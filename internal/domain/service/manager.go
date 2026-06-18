@@ -15,6 +15,16 @@ import (
 // tearing down under a join race (should be vanishingly rare).
 var errRoomUnavailable = errors.New("collaboration room unavailable")
 
+// ErrRoomFull is returned from Join when the room is at its connection cap
+// (FR-024 max connections per room). The handshake is refused; existing
+// collaborators are unaffected.
+var ErrRoomFull = errors.New("collaboration room is full")
+
+// ErrForbidden is returned from Join when per-document authorization denies the
+// connecting actor read access (a clean deny, not an error — the connection is
+// refused, distinct from a fail-closed authZ transport error).
+var ErrForbidden = errors.New("collaboration access denied")
+
 // Metrics is the observability surface the room lifecycle drives: the active
 // room/connection gauges and the snapshot counter (metrics.go). The inbound
 // HTTP adapter owns the concrete Prometheus collectors; the core depends only on
@@ -38,6 +48,10 @@ type Metrics interface {
 	FanoutPublished(lag time.Duration)
 	// FanoutFailed is called on each failed cross-pod publish.
 	FanoutFailed()
+	// ContributingActors sets the north-star contribution gauge for a room: the
+	// number of distinct actors that contributed in the window just flushed
+	// (FR-014). Always emitted, regardless of bus availability.
+	ContributingActors(n int)
 }
 
 // NopMetrics is the no-op Metrics used when none is supplied.
@@ -66,6 +80,9 @@ func (NopMetrics) FanoutPublished(time.Duration) {}
 
 // FanoutFailed does nothing.
 func (NopMetrics) FanoutFailed() {}
+
+// ContributingActors does nothing.
+func (NopMetrics) ContributingActors(int) {}
 
 // Manager is the room registry and lifecycle owner (T007). It lazily
 // materializes a Room on the first connect for a document id, shares it across
@@ -97,6 +114,9 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 	if deps.Broadcaster == nil {
 		deps.Broadcaster = noopBroadcaster{}
 	}
+	if deps.Contributor == nil {
+		deps.Contributor = noopContributor{}
+	}
 	return &Manager{
 		deps:    deps,
 		cfg:     cfg,
@@ -122,29 +142,110 @@ func (m *Manager) SendBuffer() int {
 	return m.cfg.SendBuffer
 }
 
-// Join attaches conn to the room for id (materializing it on first connect) and
-// returns the session plus the initial frames the connection must send to start
-// the y-protocols handshake (SyncStep1 + the current awareness snapshot). The
-// content type seeds a freshly created room's convention (T010); for an existing
-// room or a persisted document the stored content type wins.
-func (m *Manager) Join(ctx context.Context, id model.DocumentID, content model.ContentType, conn Conn) (*Session, [][]byte, error) {
+// JoinRequest is the set of inputs a connection brings when it joins a room: the
+// document id and seed content type, the authenticated identity (empty actor id
+// in open/standalone mode), and the outbound connection port. Bundling them in a
+// struct keeps the call site readable as the Wave-3 presence/authZ inputs grew.
+type JoinRequest struct {
+	// ID is the document to join.
+	ID model.DocumentID
+	// Content seeds a freshly created room's convention (T010); the stored
+	// content type wins for a persisted document.
+	Content model.ContentType
+	// Identity is the authenticated principal (open mode → empty ActorID).
+	Identity model.Identity
+	// Conn is the room's outbound port to this client.
+	Conn Conn
+}
+
+// Join attaches a connection to the room for the request's document
+// (materializing it on first connect) and returns the session plus the initial
+// frames the connection must send to start the y-protocols handshake (SyncStep1 +
+// the current awareness snapshot). The room evaluates per-document authZ to set
+// the joiner's collaborator mode (T014) and enforces the connection cap (FR-024);
+// a join can therefore be refused (errRoomFull) or fail closed on an authZ error.
+func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte, error) {
 	// Retry once if the acquired room tears down between acquire and join (a
 	// narrow race where the last member left and the idle timer fired). A second
 	// acquire materializes a fresh room.
 	for attempt := 0; attempt < 2; attempt++ {
-		room, err := m.acquire(ctx, id, content)
+		room, err := m.acquire(ctx, req.ID, req.Content)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		res := make(chan joinResult, 1)
-		if !room.enqueue(command{kind: cmdJoin, conn: conn, done: res}) {
+		if !room.enqueue(command{kind: cmdJoin, conn: req.Conn, identity: req.Identity, done: res}) {
 			continue
 		}
 		jr := <-res
+		if jr.err != nil {
+			return nil, nil, jr.err
+		}
 		return &Session{room: room, id: jr.id}, jr.frames, nil
 	}
 	return nil, nil, errRoomUnavailable
+}
+
+// Purge runs the owner-delete cascade for a document (FR-023, T015): it
+// disconnects any connected clients (room-closed), releases the in-memory room,
+// and purges the metadata index + the snapshot blob. It is idempotent — deleting
+// a document with no live room still purges the durable rows, and deleting an
+// absent document is a no-op. The room (when live) performs the durable purge on
+// its own run loop so the Y.Doc's single-writer invariant holds; when no room is
+// live the Manager purges directly.
+func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
+	m.mu.Lock()
+	room, live := m.rooms[id]
+	m.mu.Unlock()
+
+	if live {
+		done := make(chan error, 1)
+		if room.enqueue(command{kind: cmdPurge, done2: done}) {
+			return <-done
+		}
+		// The room tore down between lookup and enqueue; fall through to a direct
+		// durable purge so no orphan is left.
+	}
+	return m.purgeDurable(ctx, id)
+}
+
+// purgeDurable deletes the metadata row and the snapshot blob for a document with
+// no live room. It resolves the blob pointer from the metadata row (a missing row
+// means nothing to purge). Idempotent: not-found is success.
+func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
+	meta, err := m.deps.Metadata.Load(ctx, id)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if meta.ContentPointer != "" {
+		if err := m.deps.Blob.Delete(ctx, meta.ContentPointer); err != nil && !errors.Is(err, model.ErrNotFound) {
+			return err
+		}
+	}
+	return m.deps.Metadata.Delete(ctx, id)
+}
+
+// ReEvaluate asks a live room to re-run per-document authorization for its
+// connected members (lifecycle document.access_changed, T014/T015). It is a no-op
+// when no room is live for the document.
+func (m *Manager) ReEvaluate(id model.DocumentID) {
+	m.mu.Lock()
+	room, live := m.rooms[id]
+	m.mu.Unlock()
+	if live {
+		room.enqueue(command{kind: cmdReEvaluate})
+	}
+}
+
+// PreRegister writes an initial metadata row for a document ahead of its first
+// connect (lifecycle document.created, T015). It is a thin pass-through to the
+// MetadataStore so the standalone HTTP create and the bus event share one path.
+func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
+	return m.deps.Metadata.Save(ctx, meta)
 }
 
 // acquire returns the live room for id, creating and starting it under the lock

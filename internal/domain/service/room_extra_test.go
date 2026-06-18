@@ -95,7 +95,7 @@ func TestUnknownWireTypeIgnored(t *testing.T) {
 
 // TestNopMetricsCallable asserts the no-op metrics default is safe to call (it
 // is the fallback the manager and room install when no metrics are wired).
-func TestNopMetricsCallable(_ *testing.T) {
+func TestNopMetricsCallable(t *testing.T) {
 	var m Metrics = NopMetrics{}
 	m.RoomOpened()
 	m.RoomClosed()
@@ -103,6 +103,14 @@ func TestNopMetricsCallable(_ *testing.T) {
 	m.ConnClosed()
 	m.SnapshotSaved()
 	m.SnapshotFailed()
+	m.FanoutPublished(0)
+	m.FanoutFailed()
+	m.ContributingActors(3)
+
+	// The standalone default Contributor drops the event (no bus).
+	if err := (noopContributor{}).Contribution(context.Background(), "doc", []string{"a"}); err != nil {
+		t.Fatalf("noop contributor returned an error: %v", err)
+	}
 }
 
 // TestDispatchSyncMalformed asserts a non-sync / malformed framed message is
@@ -114,7 +122,7 @@ func TestDispatchSyncMalformed(t *testing.T) {
 	var aw bytes.Buffer
 	protocol.WriteMessage(&aw, protocol.MessageAwareness, []byte{0})
 	var reply bytes.Buffer
-	if err := room.dispatchSync(aw.Bytes(), &reply, 1); err != nil {
+	if _, err := room.dispatchSync(aw.Bytes(), &reply, 1, true); err != nil {
 		t.Fatalf("dispatchSync(non-sync): %v", err)
 	}
 	if reply.Len() != 0 {
@@ -122,7 +130,7 @@ func TestDispatchSyncMalformed(t *testing.T) {
 	}
 
 	// An empty buffer is a read error.
-	if err := room.dispatchSync(nil, &reply, 1); err == nil {
+	if _, err := room.dispatchSync(nil, &reply, 1, true); err == nil {
 		t.Errorf("expected error on empty frame")
 	}
 }

@@ -102,6 +102,21 @@ func (s *Store) Delete(ctx context.Context, id model.DocumentID) error {
 	return nil
 }
 
+// Contribution emits the fire-and-forget collaboration-contribution event: the
+// per-window set of contributing actor ids (FR-014). It satisfies
+// port.Contributor so the room can carry the north-star metric forward to the
+// server's analytics over the same bus (contracts/unified-metadata-rmq.md).
+func (s *Store) Contribution(ctx context.Context, id model.DocumentID, actorIDs []string) error {
+	users := make([]User, 0, len(actorIDs))
+	for _, a := range actorIDs {
+		users = append(users, User{ID: a})
+	}
+	if err := s.rpc.Emit(ctx, PatternContribution, ContributionData{ID: string(id), Users: users}); err != nil {
+		return fmt.Errorf("collaboration-contribution: %w", err)
+	}
+	return nil
+}
+
 // envelope is the NestJS RMQ request envelope { pattern, data, id }. Exported as
 // a helper so both the amqp client and the contract tests build the identical
 // wire shape (DRY — one definition of the envelope).
@@ -129,5 +144,8 @@ type nestReply struct {
 	ID         string          `json:"id"`
 }
 
-// compile-time assertion that Store satisfies the port.
-var _ port.MetadataStore = (*Store)(nil)
+// compile-time assertions that Store satisfies the metadata + contribution ports.
+var (
+	_ port.MetadataStore = (*Store)(nil)
+	_ port.Contributor   = (*Store)(nil)
+)

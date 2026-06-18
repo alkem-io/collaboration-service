@@ -17,17 +17,19 @@ import (
 func newBareRoom(t *testing.T) *Room {
 	t.Helper()
 	deps := newTestDeps()
+	deps.Contributor = noopContributor{}
 	r := &Room{
-		id:       "unit",
-		content:  model.ContentTypeMemo,
-		doc:      newRoomDoc("unit"),
-		deps:     deps.Deps,
-		cfg:      DefaultRoomConfig(),
-		metrics:  NopMetrics{},
-		logger:   zap.NewNop(),
-		commands: make(chan command, 8),
-		done:     make(chan struct{}),
-		members:  make(map[connID]roomMember),
+		id:           "unit",
+		content:      model.ContentTypeMemo,
+		doc:          newRoomDoc("unit"),
+		deps:         deps.Deps,
+		cfg:          DefaultRoomConfig(),
+		metrics:      NopMetrics{},
+		logger:       zap.NewNop(),
+		commands:     make(chan command, 8),
+		done:         make(chan struct{}),
+		members:      make(map[connID]roomMember),
+		contributors: make(map[string]struct{}),
 	}
 	r.awareness = ycrdt.NewAwareness(r.doc)
 	applyConvention(r.doc, model.ContentTypeMemo)
@@ -48,7 +50,7 @@ func TestDispatchSyncStep1ProducesDelta(t *testing.T) {
 	step1 := protocol.EncodeSyncStep1(peer)
 
 	var reply bytes.Buffer
-	if err := room.dispatchSync(step1, &reply, 1); err != nil {
+	if _, err := room.dispatchSync(step1, &reply, 1, true); err != nil {
 		t.Fatalf("dispatchSync(SyncStep1): %v", err)
 	}
 	if reply.Len() == 0 {
@@ -79,7 +81,7 @@ func TestDispatchSyncUpdateAppliesToServer(t *testing.T) {
 	framed := protocol.EncodeUpdate(update)
 
 	var reply bytes.Buffer
-	if err := room.dispatchSync(framed, &reply, 7); err != nil {
+	if _, err := room.dispatchSync(framed, &reply, 7, true); err != nil {
 		t.Fatalf("dispatchSync(Update): %v", err)
 	}
 	if got := xmlText(room.doc); !contains(got, "from-peer") {

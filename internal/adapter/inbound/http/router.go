@@ -13,6 +13,10 @@ type Deps struct {
 	// CollabHandler upgrades and serves /collab/{documentId} WebSocket
 	// connections (the inbound ws adapter).
 	CollabHandler http.Handler
+	// CollabAPI serves the standalone create/delete REST API on
+	// /collab/{documentId} (POST/DELETE) — the no-bus lifecycle equivalent
+	// (T016). Optional: nil omits the REST surface.
+	CollabAPI *CollabAPIHandler
 	// Logger is the structured request logger.
 	Logger *zap.Logger
 }
@@ -36,6 +40,12 @@ func NewRouter(deps Deps) *chi.Mux {
 
 	// One document per connection (y-websocket model): wss://<host>/collab/<id>.
 	r.Method(http.MethodGet, "/collab/{documentId}", deps.CollabHandler)
+
+	// Standalone create/delete REST API (no-bus lifecycle equivalent, T016).
+	if deps.CollabAPI != nil {
+		r.Post("/collab/{documentId}", deps.CollabAPI.Create)
+		r.Delete("/collab/{documentId}", deps.CollabAPI.Delete)
+	}
 
 	return r
 }

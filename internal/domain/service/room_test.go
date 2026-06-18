@@ -25,10 +25,11 @@ import (
 // client wants to send are forwarded to the room. It is the test stand-in for a
 // browser client, exercising the exact wire framing without a socket.
 type fakeClient struct {
-	t       *testing.T
-	doc     *ycrdt.Doc
-	aware   *ycrdt.Awareness
-	handler *protocol.SyncHandler
+	t        *testing.T
+	doc      *ycrdt.Doc
+	aware    *ycrdt.Awareness
+	handler  *protocol.SyncHandler
+	identity model.Identity
 
 	partitioned atomic.Bool // when true, Send silently drops inbound frames
 
@@ -40,12 +41,18 @@ type fakeClient struct {
 }
 
 func newFakeClient(t *testing.T) *fakeClient {
+	return newFakeClientWithIdentity(t, "")
+}
+
+// newFakeClientWithIdentity builds a fake client carrying an authenticated actor
+// id, so presence/contribution/authZ paths that key off the actor are exercised.
+func newFakeClientWithIdentity(t *testing.T, actorID string) *fakeClient {
 	t.Helper()
 	doc := ycrdt.NewDoc("guid", true, ycrdt.DefaultGCFilter, nil, false)
 	aw := ycrdt.NewAwareness(doc)
 	h := protocol.NewSyncHandler(doc)
 	h.SetAwareness(aw)
-	return &fakeClient{t: t, doc: doc, aware: aw, handler: h}
+	return &fakeClient{t: t, doc: doc, aware: aw, handler: h, identity: model.Identity{ActorID: actorID}}
 }
 
 // goOffline simulates a network partition: inbound frames from the room are
@@ -102,7 +109,9 @@ func (c *fakeClient) Send(frame []byte) error {
 // missing. This is the full y-websocket bidirectional handshake.
 func (c *fakeClient) join(m *Manager, id model.DocumentID, content model.ContentType) {
 	c.t.Helper()
-	session, initial, err := m.Join(context.Background(), id, content, c)
+	session, initial, err := m.Join(context.Background(), JoinRequest{
+		ID: id, Content: content, Identity: c.identity, Conn: c,
+	})
 	if err != nil {
 		c.t.Fatalf("join: %v", err)
 	}

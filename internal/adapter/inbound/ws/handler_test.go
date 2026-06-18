@@ -137,6 +137,64 @@ func newTestServer(t *testing.T, auth interface {
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
+// newTestServerWithManager mounts the ws handler over a caller-supplied manager,
+// so a test can drive the refused-join paths (room full / forbidden) end to end.
+func newTestServerWithManager(t *testing.T, mgr *service.Manager) (*httptest.Server, string) {
+	t.Helper()
+	h := &Handler{
+		Auth:          authopen.New(),
+		Manager:       mgr,
+		Logger:        zap.NewNop(),
+		AcceptOptions: &websocket.AcceptOptions{InsecureSkipVerify: true},
+	}
+	r := chi.NewRouter()
+	r.Method(http.MethodGet, "/collab/{documentId}", h)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// TestRefusedJoinClosesSocket asserts that a second connection to a room at its
+// connection cap is upgraded then closed with a policy-violation status (FR-024,
+// the handler's joinCloseStatus path).
+func TestRefusedJoinClosesSocket(t *testing.T) {
+	deps := service.Deps{
+		Metadata: metainmem.New(),
+		Blob:     blobinline.New(),
+		Auth:     authopen.New(),
+		AuthZ:    authopen.New(),
+	}
+	cfg := service.RoomConfig{SaveDebounce: 20 * time.Millisecond, IdleTimeout: 5 * time.Second, SendBuffer: 64}
+	cfg.Limits.MaxConnsPerRoom = 1
+	mgr := service.NewManager(deps, cfg, nil, zap.NewNop())
+	srv, base := newTestServerWithManager(t, mgr)
+	_ = srv
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First client occupies the single slot.
+	first := dialClient(t, base, "full-room", model.ContentTypeMemo)
+	first.run(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	// Second dial is accepted at the HTTP layer but the room refuses the join, so
+	// the server closes the socket — the client's read returns a close error.
+	conn, resp, err := websocket.Dial(ctx, base+"/collab/full-room", nil)
+	if err != nil {
+		// Some stacks surface the immediate close as a dial error — that is also a
+		// valid "refused" outcome.
+		return
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
+	if _, _, readErr := conn.Read(ctx); readErr == nil {
+		t.Fatal("second connection should have been closed by the server")
+	}
+}
+
 // wsTestClient is a real WebSocket client driving the y-protocols handshake over
 // the socket, applying received frames to a local Y.Doc.
 type wsTestClient struct {

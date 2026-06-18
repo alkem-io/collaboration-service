@@ -50,6 +50,20 @@ func run() int {
 	)
 
 	router, manager := buildRouter(cfg, deps, logger)
+
+	// In Alkemio mode, start the RabbitMQ lifecycle consumer (document.deleted
+	// cascade + optional created/access_changed). Standalone uses the HTTP API.
+	var lifecycleClosers []func()
+	if err := buildLifecycle(cfg, manager, logger, &lifecycleClosers); err != nil {
+		logger.Error("failed to start lifecycle consumer", zap.Error(err))
+		return 1
+	}
+	defer func() {
+		for _, c := range lifecycleClosers {
+			c()
+		}
+	}()
+
 	srv := newHTTPServer(cfg.Port, router)
 
 	sigCh := make(chan os.Signal, 1)

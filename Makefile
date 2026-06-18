@@ -21,9 +21,10 @@ lint:
 vet:
 	$(GO) vet ./...
 
-# Regenerate the OpenAPI spec from apispec-annotated handlers. No REST surface
-# is annotated yet (WebSocket-first; the standalone create/delete HTTP API is
-# task T016), so this is a no-op placeholder until that API lands.
+# Regenerate the OpenAPI spec from the chi router + handler Render methods. The
+# standalone create/delete REST API (POST/DELETE /collab/{documentId}, T016) and
+# /healthz are the documented surface; the live collaboration protocol is the
+# WebSocket contract (specs/.../ws-protocol.md), out of scope for OpenAPI.
 openapi:
 	apispec --dir . --output openapi.yaml --config apispec.yaml
 

@@ -1,0 +1,173 @@
+components:
+  schemas:
+    http.CreateDocumentResponse:
+      properties:
+        contentType:
+          type: string
+        id:
+          type: string
+      required:
+        - id
+        - contentType
+      type: object
+    http.DeleteCollabResponse:
+      properties:
+        deleted:
+          type: boolean
+        id:
+          type: string
+      required:
+        - id
+        - deleted
+      type: object
+    http.ErrorResponse:
+      properties:
+        error:
+          type: string
+      required:
+        - error
+      type: object
+    http.HealthResponse:
+      properties:
+        status:
+          type: string
+      required:
+        - status
+      type: object
+    rabbitmq.SaveData:
+      properties:
+        authorizationPolicyId:
+          type: string
+        blobStore:
+          type: string
+        contentPointer:
+          type: string
+        contentType:
+          type: string
+        id:
+          type: string
+        ownerRef:
+          type: string
+        version:
+          type: integer
+      required:
+        - id
+        - contentType
+        - version
+        - contentPointer
+        - blobStore
+      type: object
+    rabbitmq.envelope:
+      properties:
+        data:
+          format: byte
+          type: string
+        id:
+          type: string
+        pattern:
+          type: string
+      required:
+        - pattern
+        - data
+        - id
+      type: object
+info:
+  contact:
+    email: info@alkem.io
+    name: Alkemio Foundation
+    url: https://alkem.io
+  description: |
+    Unified real-time collaboration backend for the Alkemio platform. One Go
+    service over one CRDT protocol (Yjs): memos (Y.XmlFragment) and whiteboards
+    (id-keyed Y.Map) share a single document namespace. Transport is raw
+    WebSocket + y-protocols (sync + awareness) at /collab/{documentId};
+    horizontal scaling (fan-out), persistence (metadata + blob), and auth are
+    optional pluggable ports — single-binary standalone by default.
+
+    This spec covers only the operational/standalone HTTP surface; the live
+    collaboration protocol is the WebSocket contract in
+    specs/003-unify-collab-yjs/contracts/ws-protocol.md.
+  license:
+    name: EUPL-1.2
+    url: https://opensource.org/licenses/EUPL-1.2
+  title: Alkemio Collaboration Service
+  version: 0.1.0
+openapi: 3.1.1
+paths:
+  /collab/{documentId}:
+    delete:
+      operationId: CollabAPI.Delete
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.DeleteCollabResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Internal Server Error
+    post:
+      operationId: CollabAPI.Create
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/rabbitmq.envelope'
+          description: OK
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.CreateDocumentResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Internal Server Error
+  /healthz:
+    get:
+      description: |-
+        ServeHealthz is the readiness/liveness handler. With persistence and fan-out
+        being optional pluggable ports (single-binary standalone default), the
+        Phase-1 skeleton reports process-alive only; dependency probes (DB/Redis/bus,
+        when configured) are added alongside their adapters (tasks T004–T006).
+      operationId: http.ServeHealthz
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.HealthResponse'
+          description: OK
+      summary: ServeHealthz is the readiness/liveness handler.

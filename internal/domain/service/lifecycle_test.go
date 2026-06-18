@@ -42,6 +42,7 @@ type countingMetrics struct {
 	connsOpen, connsClosed  atomic.Int64
 	snapsSaved, snapsFailed atomic.Int64
 	fanoutPub, fanoutFailed atomic.Int64
+	contributors            atomic.Int64
 }
 
 func (m *countingMetrics) RoomOpened()                   { m.roomsOpen.Add(1) }
@@ -52,6 +53,7 @@ func (m *countingMetrics) SnapshotSaved()                { m.snapsSaved.Add(1) }
 func (m *countingMetrics) SnapshotFailed()               { m.snapsFailed.Add(1) }
 func (m *countingMetrics) FanoutPublished(time.Duration) { m.fanoutPub.Add(1) }
 func (m *countingMetrics) FanoutFailed()                 { m.fanoutFailed.Add(1) }
+func (m *countingMetrics) ContributingActors(n int)      { m.contributors.Store(int64(n)) }
 
 // TestSaveErrorControlOnBlobFailure asserts a blob Put failure emits a
 // `save-error` control message to the room and increments the failure metric,
@@ -96,7 +98,7 @@ func TestMaterializeFailsOnMetaLoadError(t *testing.T) {
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 
-	_, _, err := mgr.Join(context.Background(), "bad", model.ContentTypeMemo, &captureConn{})
+	_, _, err := mgr.Join(context.Background(), JoinRequest{ID: "bad", Content: model.ContentTypeMemo, Conn: &captureConn{}})
 	if err == nil {
 		t.Fatal("expected Join to fail when metadata Load errors")
 	}
@@ -186,7 +188,7 @@ func TestSlowConsumerEvicted(t *testing.T) {
 
 	// A second member that always fails to receive.
 	bad := &erroringConn{}
-	_, _, err := mgr.Join(context.Background(), "evict", model.ContentTypeMemo, bad)
+	_, _, err := mgr.Join(context.Background(), JoinRequest{ID: "evict", Content: model.ContentTypeMemo, Conn: bad})
 	if err != nil {
 		t.Fatalf("join bad: %v", err)
 	}
@@ -240,7 +242,7 @@ func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 
-	if _, _, err := mgr.Join(context.Background(), "blob-fail", model.ContentTypeMemo, &captureConn{}); err == nil {
+	if _, _, err := mgr.Join(context.Background(), JoinRequest{ID: "blob-fail", Content: model.ContentTypeMemo, Conn: &captureConn{}}); err == nil {
 		t.Fatal("expected Join to fail when the snapshot blob fetch errors")
 	}
 }

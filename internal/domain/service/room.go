@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -48,14 +49,17 @@ type updateOrigin struct {
 // single writer to its authoritative Y.Doc (data-model.md "Room"), so no lock
 // is needed around the CRDT core and -race stays clean.
 type command struct {
-	kind cmdKind
-	src  connID
-	conn Conn
-	data []byte
+	kind     cmdKind
+	src      connID
+	conn     Conn
+	identity model.Identity
+	data     []byte
 	// ephemeral distinguishes a peer-pod doc payload (false → doc:{id}) from a
 	// peer-pod awareness/ephemeral payload (true → awareness:{id}) for cmdPeer.
 	ephemeral bool
 	done      chan joinResult
+	// done2 returns the result of a cmdPurge run on the room loop (T015).
+	done2 chan error
 }
 
 type cmdKind uint8
@@ -67,20 +71,40 @@ const (
 	cmdPeer
 	cmdPersist
 	cmdClose
+	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
+	// (room-closed), purge metadata + blob, and release the room (T015).
+	cmdPurge
+	// cmdReEvaluate re-runs per-document authZ for connected members on the run
+	// loop (lifecycle document.access_changed, T014).
+	cmdReEvaluate
 )
 
 // joinResult is returned to a joining connection: its room-local id plus the
 // initial frames (SyncStep1 + the current awareness state) it must send to
-// start the handshake.
+// start the handshake, or an error when the join is refused (connection cap) or
+// fails closed (authZ error).
 type joinResult struct {
 	id     connID
 	frames [][]byte
+	err    error
 }
 
-// roomMember is the room-side bookkeeping for one connection.
+// roomMember is the room-side bookkeeping for one connection: its outbound port,
+// the authenticated actor behind it, its current collaborator mode (viewer vs.
+// collaborator, subject to inactivity downgrade), the per-connection update-rate
+// token bucket, and the y-awareness client id (learned from the member's first
+// awareness frame) used for server-forced eviction on leave (T013/T014).
 type roomMember struct {
-	id   connID
-	conn Conn
+	id           connID
+	conn         Conn
+	actorID      string
+	mode         model.CollaboratorMode
+	lastActivity time.Time
+	bucket       *tokenBucket
+	// awarenessID is the member's y-protocols awareness client id, learned when
+	// it first sends an awareness frame; 0 means not yet seen.
+	awarenessID  ycrdt.Number
+	hasAwareness bool
 }
 
 // Room is a live, in-memory document session (data-model.md "Room"): it owns the
@@ -120,6 +144,14 @@ type Room struct {
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
 	policyID string
+	// maxConns is the room's effective connection cap: the document metadata's
+	// maxCollaborators when known, else the configured fallback (T014). Zero
+	// disables the cap.
+	maxConns int
+
+	// contributors is the set of actor ids that mutated the document in the
+	// current contribution window; flushed and reset on the window tick (T013).
+	contributors map[string]struct{}
 
 	// onReleased is invoked once, on the run loop, after the room has drained
 	// and persisted, so the Manager can drop it from its registry.
@@ -166,15 +198,68 @@ type RoomConfig struct {
 	// row so a document rehydrates from the right backend (T005.6). Empty
 	// defaults to inline.
 	BlobKind model.BlobStoreKind
+
+	// Limits carries the configurable enforcement bounds (FR-024, epic R9).
+	Limits Limits
+	// CollaboratorInactivity downgrades an idle collaborator to viewer after this
+	// long with no mutation (FR-014, whiteboard parity). Zero disables the
+	// downgrade. Reset on any client mutation.
+	CollaboratorInactivity time.Duration
+	// ContributionWindow is the flush cadence for the north-star contribution
+	// metric/event: the set of actors that contributed in the window is emitted
+	// then reset (FR-014). Zero disables contribution flushing.
+	ContributionWindow time.Duration
 }
 
-// DefaultRoomConfig is the Wave-1 standalone default cadence.
+// Limits are the configurable per-room enforcement bounds (FR-024, epic R9
+// defaults). A breach disconnects only the offending connection with a control
+// message; other collaborators are unaffected (constitution §V).
+type Limits struct {
+	// MaxDocBytes rejects an update that would grow the encoded snapshot past
+	// this size (epic R9 default ~32 MiB). Zero disables the size check.
+	MaxDocBytes int
+	// MaxConnsPerRoom caps concurrent connections to a room — sourced from the
+	// document metadata's maxCollaborators when known, else this fallback (epic
+	// R9 default 50). Zero disables the connection cap.
+	MaxConnsPerRoom int
+	// UpdateRatePerSec is the per-connection token-bucket refill rate in messages
+	// per second (epic R9 default ~50/s). Zero disables rate limiting.
+	UpdateRatePerSec int
+	// UpdateBurst is the token-bucket depth (max burst above the steady rate).
+	// Zero defaults to UpdateRatePerSec.
+	UpdateBurst int
+}
+
+// Default limit/presence values (epic R9; OPEN-4 resolved).
+const (
+	defaultMaxDocBytes             = 32 << 20 // 32 MiB
+	defaultMaxConnsPerRoom         = 50
+	defaultUpdateRatePerSec        = 50
+	defaultCollaboratorInactivity  = 120 * time.Second
+	defaultContributionWindowEvery = 60 * time.Second
+)
+
+// DefaultLimits are the epic R9 defaults (all config-tunable, OPEN-4).
+func DefaultLimits() Limits {
+	return Limits{
+		MaxDocBytes:      defaultMaxDocBytes,
+		MaxConnsPerRoom:  defaultMaxConnsPerRoom,
+		UpdateRatePerSec: defaultUpdateRatePerSec,
+		UpdateBurst:      defaultUpdateRatePerSec,
+	}
+}
+
+// DefaultRoomConfig is the Wave-1 standalone default cadence, with the Wave-3
+// limit/presence defaults (epic R9, OPEN-4) layered on.
 func DefaultRoomConfig() RoomConfig {
 	return RoomConfig{
-		SaveDebounce: 500 * time.Millisecond,
-		IdleTimeout:  30 * time.Second,
-		SendBuffer:   64,
-		BlobKind:     model.BlobStoreInline,
+		SaveDebounce:           500 * time.Millisecond,
+		IdleTimeout:            30 * time.Second,
+		SendBuffer:             64,
+		BlobKind:               model.BlobStoreInline,
+		Limits:                 DefaultLimits(),
+		CollaboratorInactivity: defaultCollaboratorInactivity,
+		ContributionWindow:     defaultContributionWindowEvery,
 	}
 }
 
@@ -191,20 +276,25 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	if blobKind == "" {
 		blobKind = model.BlobStoreInline
 	}
+	if deps.Contributor == nil {
+		deps.Contributor = noopContributor{}
+	}
 	doc := newRoomDoc(string(id))
 	r := &Room{
-		id:        id,
-		content:   content,
-		doc:       doc,
-		awareness: ycrdt.NewAwareness(doc),
-		deps:      deps,
-		cfg:       cfg,
-		metrics:   metrics,
-		logger:    logger,
-		commands:  make(chan command, 256),
-		done:      make(chan struct{}),
-		members:   make(map[connID]roomMember),
-		blobKind:  blobKind,
+		id:           id,
+		content:      content,
+		doc:          doc,
+		awareness:    ycrdt.NewAwareness(doc),
+		deps:         deps,
+		cfg:          cfg,
+		metrics:      metrics,
+		logger:       logger,
+		commands:     make(chan command, 256),
+		done:         make(chan struct{}),
+		members:      make(map[connID]roomMember),
+		blobKind:     blobKind,
+		maxConns:     cfg.Limits.MaxConnsPerRoom,
+		contributors: make(map[string]struct{}),
 	}
 
 	if err := r.loadSnapshot(ctx); err != nil {
@@ -283,13 +373,23 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 }
 
 // run is the room's single goroutine. It owns the Y.Doc and the member registry,
-// draining commands until closed and managed by the debounce/idle timers. All
-// Y.Doc mutation happens here, making the room the lone writer.
+// draining commands until closed and managed by the debounce/idle timers plus the
+// Wave-3 presence tickers (inactivity sweep, contribution-window flush). All
+// Y.Doc, awareness, and member mutation happens here, making the room the lone
+// writer.
 func (r *Room) run() {
 	saveTimer := time.NewTimer(time.Hour)
 	stopTimer(saveTimer)
 	idleTimer := time.NewTimer(time.Hour)
 	stopTimer(idleTimer)
+
+	// Presence tickers (T013): the inactivity sweep downgrades idle collaborators;
+	// the contribution ticker flushes the per-window contributing-actor set. Both
+	// are disabled (a stopped far-future timer) when their interval is zero.
+	sweepTimer, sweepEvery := newOptionalTicker(r.cfg.CollaboratorInactivity)
+	contribTimer, contribEvery := newOptionalTicker(r.cfg.ContributionWindow)
+	defer sweepTimer.Stop()
+	defer contribTimer.Stop()
 
 	armSave := func() {
 		if r.cfg.SaveDebounce <= 0 {
@@ -324,8 +424,28 @@ func (r *Room) run() {
 				r.finish()
 				return
 			}
+
+		case <-sweepTimer.C:
+			r.sweepInactive()
+			sweepTimer.Reset(sweepEvery)
+
+		case <-contribTimer.C:
+			r.flushContribution(context.Background())
+			contribTimer.Reset(contribEvery)
 		}
 	}
+}
+
+// newOptionalTicker returns a timer that fires every `every` (and the interval),
+// or a stopped far-future timer when `every` is zero (the feature is disabled).
+// The caller Resets it after each fire.
+func newOptionalTicker(every time.Duration) (*time.Timer, time.Duration) {
+	if every <= 0 {
+		t := time.NewTimer(time.Hour)
+		stopTimer(t)
+		return t, time.Hour
+	}
+	return time.NewTimer(every), every
 }
 
 // dispatch handles one command on the run-loop goroutine, arming the save/idle
@@ -335,7 +455,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	switch cmd.kind {
 	case cmdJoin:
 		stopTimer(idleTimer)
-		cmd.done <- r.handleJoin(cmd.conn)
+		cmd.done <- r.handleJoin(cmd.conn, cmd.identity)
 
 	case cmdLeave:
 		r.handleLeave(cmd.src)
@@ -356,6 +476,17 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	case cmdPersist:
 		r.persist(context.Background())
 
+	case cmdReEvaluate:
+		r.reEvaluateMembers(context.Background())
+
+	case cmdPurge:
+		err := r.purge(context.Background())
+		if cmd.done2 != nil {
+			cmd.done2 <- err
+		}
+		r.finish()
+		return false
+
 	case cmdClose:
 		r.persist(context.Background())
 		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
@@ -365,19 +496,44 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	return true
 }
 
-// handleJoin registers a connection, returns its id and the initial frames it
-// must send (SyncStep1 to drive the handshake + the current awareness snapshot
-// so the newcomer sees existing presence), and notifies the room of the new
-// participant count.
-func (r *Room) handleJoin(c Conn) joinResult {
+// handleJoin registers a connection after enforcing the connection cap (FR-024)
+// and resolving its collaborator mode via per-document authZ (T014). It returns
+// the joiner's id and the initial frames it must send (SyncStep1 + the current
+// awareness snapshot so the newcomer sees existing presence) and a `read-only-
+// state` control for a viewer; or an error when the room is full (ErrRoomFull),
+// read is denied (ErrForbidden), or authZ failed closed.
+func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
+	if r.maxConns > 0 && len(r.members) >= r.maxConns {
+		return joinResult{err: ErrRoomFull}
+	}
+
+	mode, err := r.resolveMode(context.Background(), identity)
+	if err != nil {
+		return joinResult{err: err}
+	}
+
 	r.nextID++
 	id := r.nextID
-	r.members[id] = roomMember{id: id, conn: c}
+	r.members[id] = roomMember{
+		id:           id,
+		conn:         c,
+		actorID:      identity.ActorID,
+		mode:         mode,
+		lastActivity: time.Now(),
+		bucket:       newTokenBucket(r.cfg.Limits.UpdateRatePerSec, r.cfg.Limits.UpdateBurst, time.Now),
+	}
 	r.metrics.ConnOpened()
 
 	frames := [][]byte{protocol.EncodeSyncStep1(r.doc)}
 	if aw := awarenessSnapshot(r.awareness); aw != nil {
 		frames = append(frames, aw)
+	}
+	// Tell a viewer it is read-only up front so the client disables local editing
+	// (the collaborator default needs no control — editing is the baseline).
+	if mode == model.ModeViewer {
+		if ctrl := encodeControl(model.ControlMessage{Kind: model.ControlReadOnlyState, ReadOnly: true}); ctrl != nil {
+			frames = append(frames, ctrl)
+		}
 	}
 
 	r.broadcastControl(model.ControlMessage{
@@ -386,6 +542,29 @@ func (r *Room) handleJoin(c Conn) joinResult {
 	})
 
 	return joinResult{id: id, frames: frames}
+}
+
+// resolveMode decides a joiner's collaborator mode from per-document authZ
+// (T014). It first checks read access (a clean deny → ErrForbidden), then
+// update-content (granted → collaborator, denied → viewer). Any authZ port error
+// is returned so the join fails closed (constitution §V). In open/standalone mode
+// the AuthZ adapter grants everything, so every join is a collaborator.
+func (r *Room) resolveMode(ctx context.Context, identity model.Identity) (model.CollaboratorMode, error) {
+	read, err := r.deps.AuthZ.Evaluate(ctx, identity, r.id, model.PrivilegeRead)
+	if err != nil {
+		return "", fmt.Errorf("authorize read: %w", err)
+	}
+	if !read.Allowed {
+		return "", ErrForbidden
+	}
+	write, err := r.deps.AuthZ.Evaluate(ctx, identity, r.id, model.PrivilegeUpdateContent)
+	if err != nil {
+		return "", fmt.Errorf("authorize update-content: %w", err)
+	}
+	if write.Allowed {
+		return model.ModeCollaborator, nil
+	}
+	return model.ModeViewer, nil
 }
 
 // handleLeave drops a connection and tells the remaining members the count
@@ -403,20 +582,57 @@ func (r *Room) handleLeave(id connID) {
 	})
 }
 
-// dropMember removes a member from the registry and decrements the connection
-// gauge. It returns false when the member was already gone (idempotent).
+// dropMember removes a member from the registry, decrements the connection
+// gauge, and forces a server-side awareness eviction for the departed client so
+// peers stop rendering its cursor immediately rather than waiting out the 30s
+// y-awareness TTL (T013, closing the Wave-1 D6 deferral). It returns false when
+// the member was already gone (idempotent).
 //
-// Awareness cleanup for a departed client is intentionally not forced here: the
-// y-protocols awareness client id is the per-connection y client id carried in
-// the client's own updates, which the room does not map to its room-local
-// connID. Peers converge a vanished cursor via the client's explicit
-// local-state-clear on a clean close and via awareness TTL otherwise — the
-// y-websocket convention. Explicit server-side eviction lands with presence
-// (T013).
+// The eviction maps the room-local connID to the member's y-awareness client id
+// (learned from its first awareness frame) and broadcasts a null-state awareness
+// update with a bumped clock — the y-protocols "client offline" convention.
+func (r *Room) evictAwareness(m roomMember) {
+	if !m.hasAwareness {
+		return
+	}
+	frame := r.forcedAwarenessRemoval(m.awarenessID)
+	if frame == nil {
+		return
+	}
+	r.broadcast(frame, m.id)
+	r.publishToPeers(frame, true)
+}
+
+// forcedAwarenessRemoval builds a framed awareness update that marks clientID
+// offline: it deletes the client's state from the room awareness and bumps its
+// clock, then encodes a null-state update the y-protocols clients apply as a
+// removal. Returns nil when the client is unknown to the room awareness.
+func (r *Room) forcedAwarenessRemoval(clientID ycrdt.Number) []byte {
+	meta := r.awareness.Meta[clientID]
+	clock := 0
+	if meta != nil {
+		if c, ok := meta["clock"].(ycrdt.Number); ok {
+			clock = c
+		}
+	}
+	delete(r.awareness.States, clientID)
+	r.awareness.Meta[clientID] = ycrdt.Object{
+		"clock":       clock + 1,
+		"lastUpdated": ycrdt.GetUnixTime(),
+	}
+	update := ycrdt.EncodeAwarenessUpdate(r.awareness, []ycrdt.Number{clientID}, nil)
+	return protocol.EncodeAwarenessUpdateMessage(update)
+}
+
+// dropMember removes a member from the registry, evicts its awareness, and
+// decrements the connection gauge. It returns false when the member was already
+// gone (idempotent).
 func (r *Room) dropMember(id connID) bool {
-	if _, ok := r.members[id]; !ok {
+	m, ok := r.members[id]
+	if !ok {
 		return false
 	}
+	r.evictAwareness(m)
 	delete(r.members, id)
 	r.metrics.ConnClosed()
 	return true
@@ -428,6 +644,10 @@ func (r *Room) dropMember(id connID) bool {
 // authoritative doc — whose update observer fans the delta to the other members.
 // Awareness and ephemeral messages are fanned out but never touch the snapshot
 // (FR-008).
+//
+// Before any handling it enforces the per-connection update rate (FR-024): a
+// connection that breaches its token bucket is disconnected with a control
+// message; other collaborators are unaffected.
 func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 	in := bytes.NewBuffer(frame)
 	msgType, payload, err := protocol.ReadMessage(in)
@@ -436,14 +656,21 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		return false
 	}
 
+	if !r.allowRate(src) {
+		r.disconnect(src, "update rate exceeded")
+		return false
+	}
+
 	switch model.WireMessageType(msgType) {
 	case model.WireSync:
 		return r.handleSync(src, payload)
 
 	case model.WireAwareness:
-		// Apply to the room's awareness (so a late joiner gets a snapshot), fan
-		// the raw frame out to local members, and publish it to peer pods on the
-		// awareness:{id} channel. Never persisted (FR-008).
+		// Learn the member's y-awareness client id (for server-forced eviction on
+		// leave), then apply to the room's awareness (so a late joiner gets a
+		// snapshot), fan the raw frame out to local members, and publish it to peer
+		// pods on the awareness:{id} channel. Never persisted (FR-008).
+		r.trackAwarenessID(src, payload)
 		ycrdt.ApplyAwarenessUpdate(r.awareness, payload, updateOrigin{src: src})
 		r.broadcast(frame, src)
 		r.publishToPeers(frame, true)
@@ -462,6 +689,35 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		// types (matches y-protocols leniency).
 		return false
 	}
+}
+
+// allowRate consumes a token from the source connection's bucket, reporting
+// whether the message is admitted (FR-024 per-connection update rate). An unknown
+// source (already evicted) is admitted — there is nothing left to limit.
+func (r *Room) allowRate(src connID) bool {
+	m, ok := r.members[src]
+	if !ok || m.bucket == nil {
+		return true
+	}
+	return m.bucket.allow()
+}
+
+// trackAwarenessID records the y-awareness client id a member announced in its
+// first awareness frame, so dropMember can force a removal for exactly that id on
+// disconnect (T013). The first client entry of the awareness payload is the
+// member's own client id (one connection = one y client id).
+func (r *Room) trackAwarenessID(src connID, payload []byte) {
+	m, ok := r.members[src]
+	if !ok || m.hasAwareness {
+		return
+	}
+	clientID, _, err := protocol.DecodeAwarenessMessage(payload)
+	if err != nil {
+		return
+	}
+	m.awarenessID = clientID
+	m.hasAwareness = true
+	r.members[src] = m
 }
 
 // handlePeer applies a payload received from another pod via the
@@ -523,9 +779,12 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	var framed bytes.Buffer
 	protocol.WriteMessage(&framed, protocol.MessageSync, payload)
 
+	canMutate := r.canMutate(src)
+
 	wasDirty := r.dirty
 	var reply bytes.Buffer
-	if err := r.dispatchSync(framed.Bytes(), &reply, src); err != nil {
+	outcome, err := r.dispatchSync(framed.Bytes(), &reply, src, canMutate)
+	if err != nil {
 		r.logger.Warn("sync dispatch failed", zap.Error(err))
 		return false
 	}
@@ -534,9 +793,47 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		r.sendTo(src, reply.Bytes())
 	}
 
+	if outcome.applied {
+		// A collaborator just wrote: record activity (resets the inactivity
+		// downgrade timer), record the actor for the contribution window, and
+		// enforce the max-doc-size limit (FR-024).
+		r.recordActivity(src)
+		if r.cfg.Limits.MaxDocBytes > 0 && r.docByteSize() > r.cfg.Limits.MaxDocBytes {
+			r.disconnect(src, "document size limit exceeded")
+		}
+	}
+
 	// onDocUpdate flips dirty=true synchronously inside ApplyUpdate when the
 	// message carried new structs; a SyncStep1 (reply-only) leaves it untouched.
 	return r.dirty && !wasDirty
+}
+
+// canMutate reports whether the source connection may write to the document: a
+// collaborator can, a viewer cannot (T014, the read-only gate). An unknown source
+// (already evicted) cannot mutate.
+func (r *Room) canMutate(src connID) bool {
+	m, ok := r.members[src]
+	return ok && m.mode == model.ModeCollaborator
+}
+
+// recordActivity marks a member as active now (resetting the inactivity-downgrade
+// window) and records its actor id in the current contribution window (T013).
+func (r *Room) recordActivity(src connID) {
+	m, ok := r.members[src]
+	if !ok {
+		return
+	}
+	m.lastActivity = time.Now()
+	r.members[src] = m
+	if m.actorID != "" {
+		r.contributors[m.actorID] = struct{}{}
+	}
+}
+
+// docByteSize is the encoded v2 size of the authoritative doc, the measure the
+// max-doc-size limit is enforced against (the persisted snapshot size, FR-024).
+func (r *Room) docByteSize() int {
+	return len(ycrdt.EncodeStateAsUpdateV2(r.doc, nil))
 }
 
 // onDocUpdate is the doc "update" observer: it frames the v1 update and fans it

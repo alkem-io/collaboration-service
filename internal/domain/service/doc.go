@@ -33,6 +33,9 @@ type Deps struct {
 	Auth port.Auth
 	// AuthZ evaluates per-document grants (auth-evaluation-service / open).
 	AuthZ port.AuthZ
+	// Contributor emits the north-star contribution event in Alkemio mode
+	// (rabbitmq); nil defaults to a no-op so standalone pays nothing (T013).
+	Contributor port.Contributor
 }
 
 // noopBroadcaster is the single-pod default used when Deps.Broadcaster is nil:
@@ -51,4 +54,14 @@ func (noopBroadcaster) Publish(context.Context, model.DocumentID, []byte, bool) 
 // Subscribe registers nothing and returns a no-op cancel.
 func (noopBroadcaster) Subscribe(context.Context, model.DocumentID, func([]byte, bool)) (func(), error) {
 	return func() {}, nil
+}
+
+// noopContributor is the standalone default used when Deps.Contributor is nil:
+// it drops the contribution event, so a room without an Alkemio bus pays nothing
+// for a window flush (the Prometheus gauge is still emitted by the domain).
+type noopContributor struct{}
+
+// Contribution discards the contributing actor ids — no bus to publish to.
+func (noopContributor) Contribution(context.Context, model.DocumentID, []string) error {
+	return nil
 }

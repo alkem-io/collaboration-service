@@ -8,6 +8,7 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -67,7 +68,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Auth.Authenticate(r.Context(), r.Header.Get(h.tokenHeader())); err != nil {
+	identity, err := h.Auth.Authenticate(r.Context(), r.Header.Get(h.tokenHeader()))
+	if err != nil {
 		// AuthN failure at the handshake → 401 (contracts/ws-protocol.md).
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -82,12 +84,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.serve(r.Context(), conn, documentID, content)
+	h.serve(r.Context(), conn, documentID, content, identity)
 }
 
 // serve wires the accepted connection to a room and pumps frames until the read
 // loop ends, then leaves the room and closes the socket.
-func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.DocumentID, content model.ContentType) {
+func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.DocumentID, content model.ContentType, identity model.Identity) {
 	// net/http cancels the request context once ServeHTTP returns, so we detach
 	// the connection's lifetime from it: the hijacked WebSocket outlives the
 	// handler return, and the read loop's error (client close / network) is the
@@ -98,10 +100,16 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 	wc := newWSConn(connCtx, conn, h.Manager.SendBuffer(), h.Logger)
 	defer wc.close()
 
-	session, initial, err := h.Manager.Join(connCtx, id, content, wc)
+	session, initial, err := h.Manager.Join(connCtx, service.JoinRequest{
+		ID: id, Content: content, Identity: identity, Conn: wc,
+	})
 	if err != nil {
-		h.Logger.Error("room join failed", zap.String("doc", string(id)), zap.Error(err))
-		_ = conn.Close(websocket.StatusInternalError, "join failed")
+		// A refused join (full room / access denied) closes the upgraded socket
+		// with a policy-violation status so the client does not retry blindly; a
+		// fail-closed authZ error closes with an internal status.
+		status, reason := joinCloseStatus(err)
+		h.Logger.Warn("room join refused", zap.String("doc", string(id)), zap.Error(err))
+		_ = conn.Close(status, reason)
 		return
 	}
 	defer session.Leave()
@@ -138,6 +146,20 @@ func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *s
 			continue
 		}
 		session.Forward(data)
+	}
+}
+
+// joinCloseStatus maps a refused-join error to a WebSocket close status and
+// reason. A full room or access denial is a policy violation (the client should
+// not retry blindly); any other error (a fail-closed authZ failure) is internal.
+func joinCloseStatus(err error) (websocket.StatusCode, string) {
+	switch {
+	case errors.Is(err, service.ErrRoomFull):
+		return websocket.StatusPolicyViolation, "room full"
+	case errors.Is(err, service.ErrForbidden):
+		return websocket.StatusPolicyViolation, "forbidden"
+	default:
+		return websocket.StatusInternalError, "join failed"
 	}
 }
 
