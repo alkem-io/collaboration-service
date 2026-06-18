@@ -36,7 +36,12 @@ func run() int {
 		return 1
 	}
 
-	deps := buildDeps(cfg, logger)
+	deps, cleanup, err := buildDeps(cfg, logger)
+	if err != nil {
+		logger.Error("failed to wire adapters", zap.Error(err))
+		return 1
+	}
+	defer cleanup()
 	logger.Info("collaboration core wired",
 		zap.String("fanout", string(cfg.Fanout)),
 		zap.String("metadata_store", string(cfg.MetaStore)),

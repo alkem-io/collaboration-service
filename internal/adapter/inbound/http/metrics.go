@@ -7,6 +7,7 @@ package http
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -45,6 +46,25 @@ var (
 		Name:      "snapshots_total",
 		Help:      "Persisted Y.Doc snapshots by outcome.",
 	}, []string{"outcome"})
+
+	// FanoutTotal counts cross-pod fan-out publishes by outcome
+	// (published | error). Zero on single-pod (the in-memory broadcaster never
+	// publishes). Wired by the redis fan-out (task T004, R10).
+	FanoutTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "collaboration",
+		Name:      "fanout_total",
+		Help:      "Cross-pod fan-out publishes by outcome.",
+	}, []string{"outcome"})
+
+	// FanoutLagSeconds observes the latency of a cross-pod fan-out publish
+	// (R10). The local publish duration; cross-pod end-to-end delivery lag is an
+	// e2e concern (T017.2).
+	FanoutLagSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "collaboration",
+		Name:      "fanout_lag_seconds",
+		Help:      "Latency of a cross-pod fan-out publish.",
+		Buckets:   []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25},
+	})
 )
 
 // InitMetrics registers the service collectors on the dedicated registry,
@@ -57,6 +77,8 @@ func InitMetrics() {
 			RoomsActive,
 			ConnectionsActive,
 			SnapshotsTotal,
+			FanoutTotal,
+			FanoutLagSeconds,
 		)
 	})
 }
@@ -90,3 +112,12 @@ func (PrometheusMetrics) SnapshotSaved() { SnapshotsTotal.WithLabelValues("saved
 
 // SnapshotFailed counts a failed snapshot persist.
 func (PrometheusMetrics) SnapshotFailed() { SnapshotsTotal.WithLabelValues("error").Inc() }
+
+// FanoutPublished counts a cross-pod publish and records its lag (R10).
+func (PrometheusMetrics) FanoutPublished(lag time.Duration) {
+	FanoutTotal.WithLabelValues("published").Inc()
+	FanoutLagSeconds.Observe(lag.Seconds())
+}
+
+// FanoutFailed counts a failed cross-pod publish.
+func (PrometheusMetrics) FanoutFailed() { FanoutTotal.WithLabelValues("error").Inc() }

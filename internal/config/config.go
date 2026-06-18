@@ -30,6 +30,9 @@ const (
 type MetaStoreMode string
 
 const (
+	// MetaStoreInMemory keeps the document index in-process — the zero-dependency
+	// standalone default (boots with no bus or DB, SC-012).
+	MetaStoreInMemory MetaStoreMode = "inmemory"
 	// MetaStoreRabbitMQ rides the existing server save/fetch bus (Alkemio).
 	MetaStoreRabbitMQ MetaStoreMode = "rabbitmq"
 	// MetaStorePostgres persists the index in Postgres (standalone).
@@ -75,6 +78,68 @@ type Config struct {
 	BlobStore BlobStoreMode
 	// AuthMode selects the auth adapter pair (open default for standalone).
 	AuthMode AuthMode
+
+	// Redis holds the redis fan-out settings (FANOUT_MODE=redis).
+	Redis RedisConfig
+	// RabbitMQ holds the metadata-bus settings (METADATA_STORE=rabbitmq).
+	RabbitMQ RabbitMQConfig
+	// Postgres holds the metadata-DB settings (METADATA_STORE=postgres).
+	Postgres PostgresConfig
+	// FileService holds the file-service blob settings (BLOB_STORE=file-service).
+	FileService FileServiceConfig
+	// S3 holds the S3 blob settings (BLOB_STORE=s3).
+	S3 S3Config
+	// LocalBlobRoot is the local blob root directory (BLOB_STORE=local).
+	LocalBlobRoot string
+	// AuthZEval holds the authzeval settings (AUTH_MODE=authzeval).
+	AuthZEval AuthZEvalConfig
+}
+
+// RedisConfig configures the redis fan-out broadcaster.
+type RedisConfig struct {
+	// URL is the redis:// connection string (REDIS_URL).
+	URL string
+}
+
+// RabbitMQConfig configures the metadata bus.
+type RabbitMQConfig struct {
+	// URL is the amqp:// connection string (assembled from RABBITMQ_*).
+	URL string
+	// Queue is the Alkemio server collaboration queue (RABBITMQ_QUEUE).
+	Queue string
+}
+
+// PostgresConfig configures the standalone metadata DB.
+type PostgresConfig struct {
+	// DSN is the postgres:// connection string (assembled from ALKEMIO_DATABASE_*).
+	DSN string
+}
+
+// FileServiceConfig configures the file-service blob backend.
+type FileServiceConfig struct {
+	BaseURL         string
+	StorageBucketID string
+	AuthorizationID string
+	MaxUploadSize   int64
+}
+
+// S3Config configures the S3 blob backend.
+type S3Config struct {
+	Bucket          string
+	Region          string
+	Endpoint        string
+	KeyPrefix       string
+	AccessKeyID     string
+	SecretAccessKey string
+	UsePathStyle    bool
+}
+
+// AuthZEvalConfig configures the authzeval auth backend.
+type AuthZEvalConfig struct {
+	ServiceURL              string
+	BreakerFailureThreshold int
+	BreakerTimeoutSeconds   int
+	BreakerHalfOpenMaxReqs  int
 }
 
 // Load assembles the Config from environment variables, applying the
@@ -93,7 +158,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	metaStore, err := parseMetaStore(getenv("METADATA_STORE", string(MetaStoreRabbitMQ)))
+	metaStore, err := parseMetaStore(getenv("METADATA_STORE", string(MetaStoreInMemory)))
 	if err != nil {
 		return nil, err
 	}
@@ -108,13 +173,146 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	return &Config{
+	cfg := &Config{
 		Port:      port,
 		Fanout:    fanout,
 		MetaStore: metaStore,
 		BlobStore: blobStore,
 		AuthMode:  authMode,
-	}, nil
+	}
+
+	// Populate + fail-fast validate the settings for whichever non-default
+	// adapter each selection asks for (constitution §XV: no half-configured
+	// runs). The standalone defaults (inmemory / inline / open) need nothing.
+	if err := loadAdapterConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// loadAdapterConfig fills in and validates the backend-specific settings for the
+// selected adapters, dispatching to one loader per port so each stays small and
+// independently testable.
+func loadAdapterConfig(cfg *Config) error {
+	if err := loadFanoutConfig(cfg); err != nil {
+		return err
+	}
+	if err := loadMetaStoreConfig(cfg); err != nil {
+		return err
+	}
+	if err := loadBlobStoreConfig(cfg); err != nil {
+		return err
+	}
+	return loadAuthConfig(cfg)
+}
+
+func loadFanoutConfig(cfg *Config) error {
+	if cfg.Fanout != FanoutRedis {
+		return nil
+	}
+	cfg.Redis.URL = os.Getenv("REDIS_URL")
+	if cfg.Redis.URL == "" {
+		return fmt.Errorf("FANOUT_MODE=redis requires REDIS_URL")
+	}
+	return nil
+}
+
+func loadMetaStoreConfig(cfg *Config) error {
+	switch cfg.MetaStore {
+	case MetaStoreRabbitMQ:
+		cfg.RabbitMQ.URL = rabbitURL()
+		cfg.RabbitMQ.Queue = getenv("RABBITMQ_QUEUE", "")
+		if cfg.RabbitMQ.Queue == "" {
+			return fmt.Errorf("METADATA_STORE=rabbitmq requires RABBITMQ_QUEUE")
+		}
+	case MetaStorePostgres:
+		cfg.Postgres.DSN = postgresDSN()
+		if cfg.Postgres.DSN == "" {
+			return fmt.Errorf("METADATA_STORE=postgres requires ALKEMIO_DATABASE_* (host/name/user)")
+		}
+	}
+	return nil
+}
+
+func loadBlobStoreConfig(cfg *Config) error {
+	switch cfg.BlobStore {
+	case BlobStoreFileService:
+		cfg.FileService = FileServiceConfig{
+			BaseURL:         os.Getenv("FILE_SERVICE_URL"),
+			StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
+			AuthorizationID: os.Getenv("FILE_SERVICE_AUTHORIZATION_ID"),
+			MaxUploadSize:   getenvInt64("MAX_UPLOAD_SIZE", 0),
+		}
+		if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" || cfg.FileService.AuthorizationID == "" {
+			return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID, FILE_SERVICE_AUTHORIZATION_ID")
+		}
+	case BlobStoreS3:
+		cfg.S3 = S3Config{
+			Bucket:          os.Getenv("S3_BUCKET"),
+			Region:          os.Getenv("S3_REGION"),
+			Endpoint:        os.Getenv("S3_ENDPOINT"),
+			KeyPrefix:       os.Getenv("S3_KEY_PREFIX"),
+			AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("S3_SECRET_ACCESS_KEY"),
+			UsePathStyle:    os.Getenv("S3_USE_PATH_STYLE") == "true",
+		}
+		if cfg.S3.Bucket == "" || (cfg.S3.Region == "" && cfg.S3.Endpoint == "") {
+			return fmt.Errorf("BLOB_STORE=s3 requires S3_BUCKET and S3_REGION (or S3_ENDPOINT)")
+		}
+	case BlobStoreLocal:
+		cfg.LocalBlobRoot = os.Getenv("LOCAL_BLOB_ROOT")
+		if cfg.LocalBlobRoot == "" {
+			return fmt.Errorf("BLOB_STORE=local requires LOCAL_BLOB_ROOT")
+		}
+	}
+	return nil
+}
+
+func loadAuthConfig(cfg *Config) error {
+	if cfg.AuthMode != AuthModeAuthZEval {
+		return nil
+	}
+	cfg.AuthZEval = AuthZEvalConfig{
+		ServiceURL:              os.Getenv("AUTH_SERVICE_URL"),
+		BreakerFailureThreshold: getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3),
+		BreakerTimeoutSeconds:   getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15),
+		BreakerHalfOpenMaxReqs:  getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2),
+	}
+	if cfg.AuthZEval.ServiceURL == "" {
+		return fmt.Errorf("AUTH_MODE=authzeval requires AUTH_SERVICE_URL")
+	}
+	return nil
+}
+
+// rabbitURL assembles the amqp:// URL from RABBITMQ_* (the legacy convention),
+// or returns RABBITMQ_URL verbatim when set.
+func rabbitURL() string {
+	if url := os.Getenv("RABBITMQ_URL"); url != "" {
+		return url
+	}
+	host := getenv("RABBITMQ_HOST", "localhost")
+	port := getenv("RABBITMQ_PORT", "5672")
+	user := getenv("RABBITMQ_USER", "guest")
+	pass := getenv("RABBITMQ_PASSWORD", "guest")
+	return fmt.Sprintf("amqp://%s:%s@%s:%s/", user, pass, host, port)
+}
+
+// postgresDSN assembles a postgres DSN from ALKEMIO_DATABASE_* (matching the
+// .env.example convention), or returns DATABASE_URL verbatim when set.
+func postgresDSN() string {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return dsn
+	}
+	host := os.Getenv("ALKEMIO_DATABASE_HOST")
+	name := os.Getenv("ALKEMIO_DATABASE_NAME")
+	user := os.Getenv("ALKEMIO_DATABASE_USERNAME")
+	if host == "" || name == "" || user == "" {
+		return ""
+	}
+	port := getenv("ALKEMIO_DATABASE_PORT", "5432")
+	pass := os.Getenv("ALKEMIO_DATABASE_PASSWORD")
+	sslmode := getenv("ALKEMIO_DATABASE_SSLMODE", "disable")
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode)
 }
 
 func parseFanout(v string) (FanoutMode, error) {
@@ -128,10 +326,10 @@ func parseFanout(v string) (FanoutMode, error) {
 
 func parseMetaStore(v string) (MetaStoreMode, error) {
 	switch MetaStoreMode(v) {
-	case MetaStoreRabbitMQ, MetaStorePostgres:
+	case MetaStoreInMemory, MetaStoreRabbitMQ, MetaStorePostgres:
 		return MetaStoreMode(v), nil
 	default:
-		return "", fmt.Errorf("METADATA_STORE must be one of rabbitmq, postgres (got %q)", v)
+		return "", fmt.Errorf("METADATA_STORE must be one of inmemory, rabbitmq, postgres (got %q)", v)
 	}
 }
 
@@ -156,6 +354,28 @@ func parseAuthMode(v string) (AuthMode, error) {
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getenvInt reads an integer env var, falling back to a default when unset or
+// unparseable (the breaker tunables are best-effort, not fail-fast).
+func getenvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+// getenvInt64 reads an int64 env var, falling back to a default when unset or
+// unparseable.
+func getenvInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

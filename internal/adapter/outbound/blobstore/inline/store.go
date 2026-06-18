@@ -26,14 +26,16 @@ func New() *Store {
 	return &Store{blobs: make(map[string][]byte)}
 }
 
-// Put stores the snapshot bytes under pointer, replacing any previous snapshot.
-func (s *Store) Put(_ context.Context, pointer string, data []byte) error {
+// Put stores the snapshot bytes under pointer, replacing any previous snapshot,
+// and echoes the pointer back (inline blobs are addressed by the stable pointer
+// the caller supplies — the document id).
+func (s *Store) Put(_ context.Context, pointer string, data []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	s.blobs[pointer] = cp
-	return nil
+	return pointer, nil
 }
 
 // Get returns the snapshot bytes for pointer, or model.ErrNotFound.

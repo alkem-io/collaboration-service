@@ -1,0 +1,273 @@
+package rabbitmq
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
+)
+
+// fakeRPC captures each Call/Emit and returns scripted replies, so the unified
+// contract shape the adapter publishes is asserted without a live RabbitMQ (the
+// server consumer does not exist yet — OPEN-3 cross-repo follow-up).
+type fakeRPC struct {
+	calls []capturedCall
+	emits []capturedCall
+
+	// reply is unmarshalled into the Call's reply arg, keyed by pattern.
+	replies map[string]any
+	callErr error
+}
+
+type capturedCall struct {
+	pattern string
+	data    any
+}
+
+func (f *fakeRPC) Call(_ context.Context, pattern string, data, reply any) error {
+	f.calls = append(f.calls, capturedCall{pattern: pattern, data: data})
+	if f.callErr != nil {
+		return f.callErr
+	}
+	if r, ok := f.replies[pattern]; ok && reply != nil {
+		// Round-trip through JSON so the test scripts the wire reply, not a Go
+		// value directly — the same path the real transport takes.
+		raw, _ := json.Marshal(r)
+		_ = json.Unmarshal(raw, reply)
+	}
+	return nil
+}
+
+func (f *fakeRPC) Emit(_ context.Context, pattern string, data any) error {
+	f.emits = append(f.emits, capturedCall{pattern: pattern, data: data})
+	return nil
+}
+
+func TestSavePublishesUnifiedContract(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
+	store := newWithRPC(f)
+
+	err := store.Save(context.Background(), model.Metadata{
+		ID:                    "doc-1",
+		ContentType:           model.ContentTypeWhiteboard,
+		Version:               4,
+		ContentPointer:        "file-uuid",
+		BlobStore:             model.BlobStoreFileService,
+		AuthorizationPolicyID: "pol-7",
+		OwnerRef:              "owner-1",
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if len(f.calls) != 1 || f.calls[0].pattern != "collaboration-save" {
+		t.Fatalf("expected one collaboration-save call, got %+v", f.calls)
+	}
+	data, ok := f.calls[0].data.(SaveData)
+	if !ok {
+		t.Fatalf("save data type = %T, want SaveData", f.calls[0].data)
+	}
+	// Assert the exact index-only payload shape (the blob is NOT here).
+	want := SaveData{
+		ID:                    "doc-1",
+		ContentType:           "whiteboard",
+		Version:               4,
+		ContentPointer:        "file-uuid",
+		BlobStore:             "file-service",
+		AuthorizationPolicyID: "pol-7",
+		OwnerRef:              "owner-1",
+	}
+	if data != want {
+		t.Errorf("SaveData = %+v, want %+v", data, want)
+	}
+
+	// And the serialized JSON matches the documented field names verbatim.
+	raw, _ := json.Marshal(data)
+	for _, field := range []string{
+		`"id":"doc-1"`, `"contentType":"whiteboard"`, `"version":4`,
+		`"contentPointer":"file-uuid"`, `"blobStore":"file-service"`,
+		`"authorizationPolicyId":"pol-7"`,
+	} {
+		if !contains(string(raw), field) {
+			t.Errorf("save JSON %s missing %s", raw, field)
+		}
+	}
+	// The blob bytes must never appear on this bus (index-only contract).
+	if contains(string(raw), "binaryStateInBase64") || contains(string(raw), "content\":") {
+		t.Errorf("save payload leaked blob content: %s", raw)
+	}
+}
+
+func TestSaveDefaultsBlobStore(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
+	store := newWithRPC(f)
+	if err := store.Save(context.Background(), model.Metadata{ID: "d", ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data := f.calls[0].data.(SaveData)
+	if data.BlobStore != string(model.BlobStoreInline) {
+		t.Errorf("default blobStore = %q, want inline", data.BlobStore)
+	}
+}
+
+func TestSaveServerFailureSurfaces(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: false, Error: "constraint violated"}}}
+	store := newWithRPC(f)
+	if err := store.Save(context.Background(), model.Metadata{ID: "d"}); err == nil {
+		t.Error("expected Save to surface the server error")
+	}
+}
+
+func TestSaveTransportErrorSurfaces(t *testing.T) {
+	f := &fakeRPC{callErr: errors.New("channel closed")}
+	store := newWithRPC(f)
+	if err := store.Save(context.Background(), model.Metadata{ID: "d"}); err == nil {
+		t.Error("expected Save to surface the transport error")
+	}
+}
+
+func TestLoadFetchesAndMaps(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
+		Found:                 true,
+		ContentType:           "memo",
+		Version:               2,
+		ContentPointer:        "ptr",
+		BlobStore:             "s3",
+		AuthorizationPolicyID: "pol-1",
+		OwnerRef:              "owner",
+	}}}
+	store := newWithRPC(f)
+
+	meta, err := store.Load(context.Background(), "doc-9")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if f.calls[0].pattern != "collaboration-fetch" {
+		t.Errorf("pattern = %q, want collaboration-fetch", f.calls[0].pattern)
+	}
+	if fd, ok := f.calls[0].data.(FetchData); !ok || fd.ID != "doc-9" {
+		t.Errorf("fetch data = %+v", f.calls[0].data)
+	}
+	if meta.ID != "doc-9" || meta.ContentType != model.ContentTypeMemo ||
+		meta.Version != 2 || meta.ContentPointer != "ptr" ||
+		meta.BlobStore != model.BlobStoreS3 || meta.AuthorizationPolicyID != "pol-1" {
+		t.Errorf("mapped metadata = %+v", meta)
+	}
+}
+
+func TestLoadNotFound(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{Found: false}}}
+	store := newWithRPC(f)
+	if _, err := store.Load(context.Background(), "absent"); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("Load(absent) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLoadServerError(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{Error: "db down"}}}
+	store := newWithRPC(f)
+	if _, err := store.Load(context.Background(), "d"); err == nil || errors.Is(err, model.ErrNotFound) {
+		t.Errorf("expected a non-NotFound error, got %v", err)
+	}
+}
+
+func TestDeletePublishes(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Success: true}}}
+	store := newWithRPC(f)
+	if err := store.Delete(context.Background(), "doc-x"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if f.calls[0].pattern != "collaboration-delete" {
+		t.Errorf("pattern = %q, want collaboration-delete", f.calls[0].pattern)
+	}
+	if dd, ok := f.calls[0].data.(DeleteData); !ok || dd.ID != "doc-x" {
+		t.Errorf("delete data = %+v", f.calls[0].data)
+	}
+}
+
+func TestDeleteServerErrorSurfaces(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Error: "boom"}}}
+	store := newWithRPC(f)
+	if err := store.Delete(context.Background(), "d"); err == nil {
+		t.Error("expected Delete to surface the server error")
+	}
+}
+
+func TestMarshalEnvelopeShape(t *testing.T) {
+	// The NestJS RMQ request envelope { pattern, data, id } must serialize with
+	// exactly those keys so a @MessagePattern consumer routes it.
+	raw, err := marshalEnvelope("collaboration-save", "corr-1", SaveData{ID: "d", ContentType: "memo"})
+	if err != nil {
+		t.Fatalf("marshalEnvelope: %v", err)
+	}
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	for _, key := range []string{"pattern", "data", "id"} {
+		if _, ok := env[key]; !ok {
+			t.Errorf("envelope missing %q: %s", key, raw)
+		}
+	}
+	if string(env["pattern"]) != `"collaboration-save"` {
+		t.Errorf("pattern = %s", env["pattern"])
+	}
+	if string(env["id"]) != `"corr-1"` {
+		t.Errorf("id = %s", env["id"])
+	}
+	// data is nested, not stringified.
+	var sd SaveData
+	if err := json.Unmarshal(env["data"], &sd); err != nil {
+		t.Fatalf("data not a nested object: %v", err)
+	}
+	if sd.ID != "d" {
+		t.Errorf("nested data id = %q", sd.ID)
+	}
+}
+
+func TestContributionPayloadShape(t *testing.T) {
+	// The fire-and-forget contribution event carries the per-window actor ids
+	// (carried forward from both legacy dialects, unified id field).
+	raw, _ := json.Marshal(ContributionData{ID: "doc-1", Users: []User{{ID: "a"}, {ID: "b"}}})
+	if !contains(string(raw), `"id":"doc-1"`) || !contains(string(raw), `"users":[{"id":"a"},{"id":"b"}]`) {
+		t.Errorf("contribution shape = %s", raw)
+	}
+}
+
+func TestInfoReplyOptionalFields(t *testing.T) {
+	// maxCollaborators and isMultiUser are optional (whiteboard omits isMultiUser;
+	// both omit maxCollaborators when unknown).
+	raw, _ := json.Marshal(InfoReply{Read: true, Update: false})
+	if contains(string(raw), "maxCollaborators") || contains(string(raw), "isMultiUser") {
+		t.Errorf("unset optionals leaked: %s", raw)
+	}
+	maxColl := 8
+	multi := true
+	raw, _ = json.Marshal(InfoReply{Read: true, Update: true, MaxCollaborators: &maxColl, IsMultiUser: &multi})
+	if !contains(string(raw), `"maxCollaborators":8`) || !contains(string(raw), `"isMultiUser":true`) {
+		t.Errorf("set optionals missing: %s", raw)
+	}
+}
+
+func TestConnectValidates(t *testing.T) {
+	if _, _, err := Connect(Config{Queue: "q"}); err == nil {
+		t.Error("expected Connect without URL to error")
+	}
+	if _, _, err := Connect(Config{URL: "amqp://x"}); err == nil {
+		t.Error("expected Connect without Queue to error")
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
+}
+
+func indexOf(haystack, needle string) int {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
+}

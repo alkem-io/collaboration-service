@@ -20,7 +20,9 @@ import (
 // control path (R7: room keeps serving from memory, emits save-error).
 type failingBlob struct{ inner port.BlobStore }
 
-func (f failingBlob) Put(context.Context, string, []byte) error { return errors.New("disk full") }
+func (f failingBlob) Put(context.Context, string, []byte) (string, error) {
+	return "", errors.New("disk full")
+}
 func (f failingBlob) Get(ctx context.Context, p string) ([]byte, error) {
 	return f.inner.Get(ctx, p)
 }
@@ -39,14 +41,17 @@ type countingMetrics struct {
 	roomsOpen, roomsClosed  atomic.Int64
 	connsOpen, connsClosed  atomic.Int64
 	snapsSaved, snapsFailed atomic.Int64
+	fanoutPub, fanoutFailed atomic.Int64
 }
 
-func (m *countingMetrics) RoomOpened()     { m.roomsOpen.Add(1) }
-func (m *countingMetrics) RoomClosed()     { m.roomsClosed.Add(1) }
-func (m *countingMetrics) ConnOpened()     { m.connsOpen.Add(1) }
-func (m *countingMetrics) ConnClosed()     { m.connsClosed.Add(1) }
-func (m *countingMetrics) SnapshotSaved()  { m.snapsSaved.Add(1) }
-func (m *countingMetrics) SnapshotFailed() { m.snapsFailed.Add(1) }
+func (m *countingMetrics) RoomOpened()                   { m.roomsOpen.Add(1) }
+func (m *countingMetrics) RoomClosed()                   { m.roomsClosed.Add(1) }
+func (m *countingMetrics) ConnOpened()                   { m.connsOpen.Add(1) }
+func (m *countingMetrics) ConnClosed()                   { m.connsClosed.Add(1) }
+func (m *countingMetrics) SnapshotSaved()                { m.snapsSaved.Add(1) }
+func (m *countingMetrics) SnapshotFailed()               { m.snapsFailed.Add(1) }
+func (m *countingMetrics) FanoutPublished(time.Duration) { m.fanoutPub.Add(1) }
+func (m *countingMetrics) FanoutFailed()                 { m.fanoutFailed.Add(1) }
 
 // TestSaveErrorControlOnBlobFailure asserts a blob Put failure emits a
 // `save-error` control message to the room and increments the failure metric,

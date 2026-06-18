@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPrometheusMetricsBridge asserts the room-lifecycle hooks move the
@@ -22,6 +23,8 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 	m.ConnOpened()
 	m.SnapshotSaved()
 	m.SnapshotFailed()
+	m.FanoutPublished(2 * time.Millisecond)
+	m.FanoutFailed()
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -32,6 +35,9 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 		"collaboration_connections_active",
 		`collaboration_snapshots_total{outcome="saved"}`,
 		`collaboration_snapshots_total{outcome="error"}`,
+		`collaboration_fanout_total{outcome="published"}`,
+		`collaboration_fanout_total{outcome="error"}`,
+		"collaboration_fanout_lag_seconds",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)

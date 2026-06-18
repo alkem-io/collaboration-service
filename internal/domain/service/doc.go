@@ -12,6 +12,9 @@
 package service
 
 import (
+	"context"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
@@ -30,4 +33,22 @@ type Deps struct {
 	Auth port.Auth
 	// AuthZ evaluates per-document grants (auth-evaluation-service / open).
 	AuthZ port.AuthZ
+}
+
+// noopBroadcaster is the single-pod default used when Deps.Broadcaster is nil:
+// it publishes nowhere and never invokes a subscriber, so a room wired without
+// an explicit cross-pod broadcaster behaves exactly as single-pod. Keeping the
+// default inside the domain avoids importing the inmemory adapter here (which
+// would break the inward-only dependency rule, §I); the adapter remains the
+// configuration-selected production default in cmd/server.
+type noopBroadcaster struct{}
+
+// Publish discards the payload — there is no peer pod to fan out to.
+func (noopBroadcaster) Publish(context.Context, model.DocumentID, []byte, bool) error {
+	return nil
+}
+
+// Subscribe registers nothing and returns a no-op cancel.
+func (noopBroadcaster) Subscribe(context.Context, model.DocumentID, func([]byte, bool)) (func(), error) {
+	return func() {}, nil
 }
