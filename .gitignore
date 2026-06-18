@@ -1,0 +1,30 @@
+# Binaries
+bin/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.out
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendor (if used)
+vendor/
+
+# Local Claude Code state
+.claude/

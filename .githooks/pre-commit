@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-commit hook: regenerate the OpenAPI spec when handlers change and check
+# for drift. Install: git config core.hooksPath .githooks (or `make setup-hooks`).
+#
+# No apispec-annotated REST handlers exist yet (WebSocket-first; the standalone
+# create/delete HTTP API is task T016). The openapi block is wired so the gate
+# activates automatically once those handlers land — until then it is a no-op.
+
+set -e
+
+echo "Pre-commit: checking generated files..."
+
+STAGED=$(git diff --cached --name-only)
+
+NEED_OPENAPI=false
+echo "$STAGED" | grep -q "internal/adapter/inbound/http/" && NEED_OPENAPI=true || true
+
+if [ "$NEED_OPENAPI" = true ] && [ -f openapi.yaml ]; then
+  echo "  Regenerating openapi.yaml..."
+  if command -v apispec >/dev/null 2>&1; then
+    make openapi
+    git diff --exit-code openapi.yaml || {
+      echo "ERROR: openapi.yaml is stale. Run 'make openapi' and stage the changes."
+      exit 1
+    }
+  else
+    echo "  WARN: apispec not installed, skipping openapi check"
+  fi
+fi
+
+echo "Pre-commit: OK"
