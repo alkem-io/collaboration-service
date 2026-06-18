@@ -66,3 +66,27 @@ func InitMetrics() {
 func MetricsHandler() http.Handler {
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry})
 }
+
+// PrometheusMetrics bridges the room-lifecycle observability hooks
+// (service.Metrics) to the service's Prometheus collectors. It is the single
+// place the domain's lifecycle events become metrics, keeping the core free of a
+// Prometheus import (hexagon §I).
+type PrometheusMetrics struct{}
+
+// RoomOpened increments the active-rooms gauge.
+func (PrometheusMetrics) RoomOpened() { RoomsActive.Inc() }
+
+// RoomClosed decrements the active-rooms gauge.
+func (PrometheusMetrics) RoomClosed() { RoomsActive.Dec() }
+
+// ConnOpened increments the active-connections gauge.
+func (PrometheusMetrics) ConnOpened() { ConnectionsActive.Inc() }
+
+// ConnClosed decrements the active-connections gauge.
+func (PrometheusMetrics) ConnClosed() { ConnectionsActive.Dec() }
+
+// SnapshotSaved counts a persisted snapshot.
+func (PrometheusMetrics) SnapshotSaved() { SnapshotsTotal.WithLabelValues("saved").Inc() }
+
+// SnapshotFailed counts a failed snapshot persist.
+func (PrometheusMetrics) SnapshotFailed() { SnapshotsTotal.WithLabelValues("error").Inc() }
