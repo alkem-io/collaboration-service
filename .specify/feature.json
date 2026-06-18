@@ -1,5 +1,5 @@
 {
-  "feature_directory": "specs/001-collaboration-service-init",
+  "feature_directory": "specs/001-collaboration-server",
   "backlog_story": "https://github.com/alkem-io/alkemio/issues/1909",
   "workspace_spec": "../agents-hq/specs/003-unify-collab-yjs"
 }
