@@ -47,12 +47,12 @@ Detail and rationale live in `research.md`.
 - Q: Two ports beyond the epic's five were needed — are they breaking? → A: No. `service.Metrics` (observability, bridged to Prometheus by the HTTP adapter) and `service.Conn` (the room's narrow outbound view of a connection, implemented by the WS adapter) are *additive, non-breaking* domain ports that keep the room transport- and Prometheus-free.
 - Q: Server-forced awareness eviction on disconnect — now or later? → A: **Deferred to Wave 3 (T013).** Wave 1 relies on the client's clean-close local-state-clear and awareness TTL (the y-websocket convention); the room does not yet map its room-local `connID` to the y awareness client id. Documented in `room.go` `dropMember`.
 
-### OPEN — to confirm before the wave that hits each contract (see `## Clarifications → OPEN` below for recommendations)
+### OPEN — ✅ ALL RESOLVED (antst, 2026-06-18 clarify pass; detail + rationale under `## Clarifications → OPEN`)
 
-- **OPEN-1 (Wave 2, blocks T006 authzeval):** the exact `authorization-evaluation-service` request mapping — what `authorizationPolicyId` a collaboration document resolves to, and the privilege names for read vs. collaborate.
-- **OPEN-2 (Wave 2, shapes T005 fileservice blob):** whether the `fileservice` BlobStore adapter uses file-service's existing `/internal/file` API as-is, or needs the pre-authorized expansion.
-- **OPEN-3 (Wave 2, blocks T005 rabbitmq metastore):** which legacy RabbitMQ save/fetch dialect the unified server speaks (memo `collaboration-document-*` vs. whiteboard unprefixed; `binaryStateInBase64`/`contentBase64` vs. `content`), or whether `server` exposes a new unified contract.
-- **OPEN-4 (Wave 3, shapes T013/T014):** the limits defaults and the presence/collaborator-mode + FR-014 north-star contribution model (per-window contributing actors).
+- **OPEN-1 (T006 authzeval): RESOLVED →** `MetadataStore` carries the document's `authorizationPolicyId` (returned on `Load`); the `authzeval` adapter calls `evaluate(actorId, "read" | "update-content", policyId)`, reusing the file-service/wopi h2c+gobreaker client.
+- **OPEN-2 (T005 fileservice blob): RESOLVED →** implement against file-service's existing `/internal/file` API as-is; **no expansion for v1**; mirror its content-addressed convention (fixed `storageBucketId` per deployment; size ceiling via `MAX_UPLOAD_SIZE`).
+- **OPEN-3 (T005 rabbitmq metastore): RESOLVED →** target a **new unified contract** (`collaboration-save`/`collaboration-fetch`, index-only `{id, contentType, version, contentPointer, blobStore}` + `info`/`contribution`). **Cross-repo dependency:** the `server` owner must add the matching consumer — tracked as a follow-up; the rest of Wave 2 proceeds in parallel and the collab adapter is built to this contract.
+- **OPEN-4 (T013/T014 limits + metric): RESOLVED →** epic **R9 limit defaults** (config-tunable); the FR-014 contribution metric ships **both** as a Prometheus gauge (always) and a RabbitMQ `contribution` event (Alkemio mode).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -232,6 +232,13 @@ Server-level, directly testable in this repo. Each traces to an epic SC.
 Grounded by reading the sibling services (see `research.md` for the file
 anchors). Each is a Wave-2/3 implementation detail inside an already-frozen
 contract; none blocks Wave 1.
+
+> **✅ All four were resolved in the 2026-06-18 clarify pass (antst)** — see the
+> "OPEN — ALL RESOLVED" summary above for the decisions. The detailed analysis
+> below is retained as the grounding/rationale that informed each choice. The
+> chosen option matches the **Recommendation** in each block, except where the
+> summary notes otherwise. OPEN-3 carries a tracked cross-repo follow-up (the
+> `server`-side consumer for the new unified `collaboration-save`/`-fetch`).
 
 ### OPEN-1 — authzeval request mapping (Wave 2, T006)
 
