@@ -50,32 +50,40 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 ---
 
-## Phase 2 — Durable adapters — ⬜ FORWARD (Wave 2)
+## Phase 2 — Durable adapters — ✅ DONE (Wave 2)
 
-> Each adapter plugs into a held port; the three sub-streams parallelize. Replace
-> the `doc.go` placeholder in each package with a real implementation + tests.
-> **Blocked-by:** OPEN-1 (T006), OPEN-2 (T005 blob), OPEN-3 (T005 metastore) — see
-> spec.md `## Clarifications → OPEN`.
+> Built TDD on `feat/003-wave2-adapters` (off `feat/003-unify-collab-yjs`) → DRAFT
+> PR stacked on #1. Each adapter plugs into a Wave-1 held port; the `doc.go`
+> placeholders were replaced with real implementations + tests. OPEN-1/2/3 were
+> resolved and built exactly to the resolved contracts. **The `BlobStore.Put` port
+> now returns the resolved content pointer** (so file-service's assigned UUID is
+> recorded in metadata) — a coherent, non-breaking extension across all four blob
+> adapters. Gates green (`go build`/`vet`/`gofmt`/`golangci-lint run` = 0 issues,
+> `go test -race` clean); the zero-dep standalone default still boots.
+>
+> **Cross-repo follow-up (OPEN-3):** the `server`-side consumer for the unified
+> `collaboration-save`/`-fetch`/`-delete`/`-info`/`-contribution` patterns DOES NOT
+> EXIST YET — see `contracts/unified-metadata-rmq.md` for the hand-off.
 
 ### T004 — Redis fan-out (`ClusterBroadcaster`, R4) — `internal/adapter/outbound/fanout/redis/`
-- [ ] **T004.1** [P] [W2] Tests first (`broadcaster_test.go`): publish on `doc:{id}` round-trips to a subscriber on another logical pod; ephemeral publishes on `awareness:{id}`; a pod does **not** receive its own publish back; `cancel()` unsubscribes idempotently. Use a real Redis (miniredis or testcontainers) per constitution §VI integration-test guidance.
-- [ ] **T004.2** [W2] Implement `Broadcaster{client *redis.Client}` satisfying `port.ClusterBroadcaster`: `Publish` selects `doc:{id}`|`awareness:{id}` by `ephemeral`, tags the payload with a pod/source id so the local pod can drop its own echo; `Subscribe` opens a `PSUBSCRIBE`/`SUBSCRIBE`, dispatches `(payload, ephemeral)` to the handler, returns a once-idempotent `cancel`.
-- [ ] **T004.3** [W2] Wire `Room` to publish each applied update (`doc:`) and each awareness/ephemeral frame (`awareness:`) through `Deps.Broadcaster`, and to apply peer-pod payloads as **non-origin** updates (fanned to local members only). Add a fan-out lag metric (R10).
-- [ ] **T004.4** [W2] `cmd/server` selects `redis` on `FANOUT_MODE=redis` from `REDIS_URL`; `inmemory` stays default. Add `redis/go-redis` (latest, version-checked §XIV).
+- [X] **T004.1** [P] [W2] Tests first (`broadcaster_test.go`): publish on `doc:{id}` round-trips to a subscriber on another logical pod; ephemeral publishes on `awareness:{id}`; a pod does **not** receive its own publish back; `cancel()` unsubscribes idempotently. Real Redis via **miniredis** (faithful in-process); the two-instance convergence test (`TestTwoInstancesConverge`) proves SC-011.
+- [X] **T004.2** [W2] Implement `Broadcaster{client redisClient}` satisfying `port.ClusterBroadcaster`: `Publish` selects `doc:{id}`|`awareness:{id}` by `ephemeral`, frames the payload with a pod/source id so the local pod drops its own echo; `Subscribe` opens the doc+awareness channels, dispatches `(payload, ephemeral)`, returns a once-idempotent `cancel`. `redis/go-redis/v9@v9.20.1`.
+- [X] **T004.3** [W2] Wired `Room` to publish each applied **local** update (raw v1 bytes on `doc:`) and each awareness/ephemeral frame (on `awareness:`) through `Deps.Broadcaster`; peer-pod payloads apply as **peer-origin** updates (fanned to local members, never re-published — ping-pong guard). Fan-out lag metric (R10): `collaboration_fanout_total{outcome}` + `collaboration_fanout_lag_seconds`. Proven: `fanout_test.go` (`TestTwoPodDocUpdateConverges`, `TestTwoPodAwarenessConverges`, `TestPeerUpdateNotEchoedBackToBus`).
+- [X] **T004.4** [W2] `cmd/server` selects `redis` on `FANOUT_MODE=redis` from `REDIS_URL`; `inmemory` stays default (a domain `noopBroadcaster` defaults a nil port).
 
 ### T005 — Durable metastore + blobstore (R7) — `metastore/{rabbitmq,postgres}/`, `blobstore/{fileservice,s3,local}/`
-- [ ] **T005.1** [W2] **rabbitmq metastore** (Alkemio default) — tests + impl satisfying `port.MetadataStore` over `amqp091` request/reply RPC mirroring the `server` `save`/`fetch` pattern, extended with `content_pointer`+`blob_store` (index only; blob goes to the BlobStore). **Resolve OPEN-3 first** (new unified `collaboration-save`/`-fetch` contract vs. content-type-routed legacy dialects). `correlationId`/`replyTo` RPC; `Delete` on cascade.
-- [ ] **T005.2** [P] [W2] **postgres metastore** (standalone) — `db/migrations/` (golang-migrate) for the metadata table (data-model.md fields + `authorizationPolicyId`); sqlc queries; pgx/v5 adapter satisfying `port.MetadataStore` (`Load`/`Save` upsert-and-bump-version/`Delete`). Tests against a real Postgres (testcontainers).
-- [ ] **T005.3** [P] [W2] **fileservice blobstore** — adapter over file-service's existing `/internal/file` API: `Put` = multipart `POST /internal/file` (store the returned UUID as the content pointer; `externalID` for dedup), `Get` = `GET /internal/file/{id}/content`, `Delete` = `DELETE /internal/file/{id}`. Fixed `storageBucketId` per deployment; size within `MAX_UPLOAD_SIZE`. **Resolve OPEN-2** (no file-service expansion for v1). Tests against a stub file-service server.
-- [ ] **T005.4** [P] [W2] **s3 blobstore** (standalone) — adapter satisfying `port.BlobStore` over an S3-compatible client (latest SDK, §XIV); content pointer = object key. Tests against a localstack/minio container.
-- [ ] **T005.5** [P] [W2] **local blobstore** (standalone) — adapter writing the snapshot under a configured root; content pointer = relative path; atomic write (temp + rename). Tests against a temp dir.
-- [ ] **T005.6** [W2] `cmd/server` selects metastore on `METADATA_STORE` and blobstore on `BLOB_STORE`; persist the chosen `BlobStoreKind` in metadata so a doc rehydrates from the right backend regardless of running config.
+- [X] **T005.1** [W2] **rabbitmq metastore** (Alkemio default) — `port.MetadataStore` over `amqp091@v1.12.0` NestJS-style request/reply RPC (`{pattern,data,id}` + `correlationId`/`replyTo`). **OPEN-3 resolved → NEW UNIFIED contract** `collaboration-save`/`-fetch`/`-delete` (+ `-info`/`-contribution`), index-only payload `{id, contentType, version, contentPointer, blobStore, authorizationPolicyId, ownerRef}`; `info`→`{read,update,maxCollaborators,isMultiUser?}` and fire-and-forget `contribution` carried forward. Contract types in `contract.go`; documented in `contracts/unified-metadata-rmq.md` (the `server`-consumer hand-off). Unit-tested against the contract shape; live broker via build-tagged integration test.
+- [X] **T005.2** [P] [W2] **postgres metastore** (standalone) — `migrations/` (golang-migrate@v4.19.1, embedded) for `collaboration_metadata` (+ `authorization_policy_id`); explicit column SQL; pgx/v5@v5.10.0 adapter (`Load`/`Save` upsert-and-bump-version/`Delete`). Unit-tested via a fake querier; real Postgres via build-tagged integration test.
+- [X] **T005.3** [P] [W2] **fileservice blobstore** — over file-service's existing `/internal/file` API (OPEN-2): `Put` = multipart `POST` (returned UUID = content pointer; deletes the superseded snapshot), `Get` = `GET /{id}/content`, `Delete` = `DELETE /{id}`. Fixed `storageBucketId`+`authorizationId` per deployment; `MAX_UPLOAD_SIZE` ceiling. Tests against a faithful stub file-service.
+- [X] **T005.4** [P] [W2] **s3 blobstore** (standalone) — `port.BlobStore` over aws-sdk-go-v2 (s3@v1.104.0); content pointer = object key (optional prefix). Unit-tested via a fake S3 API; minio/localstack via build-tagged integration test.
+- [X] **T005.5** [P] [W2] **local blobstore** (standalone) — snapshot under a configured root; content pointer = relative path; atomic write (temp + fsync + rename); traversal-rejecting. Tests against a temp dir.
+- [X] **T005.6** [W2] `cmd/server` selects metastore on `METADATA_STORE` (`inmemory` zero-dep default / `rabbitmq` / `postgres`) and blobstore on `BLOB_STORE`; the chosen `BlobStoreKind` is persisted per metadata row and rehydration reads it back, so a doc loads from the right backend regardless of running config.
 
 ### T006 — authzeval auth (R13) — `internal/adapter/outbound/auth/authzeval/`
-- [ ] **T006.1** [W2] Tests first: a granted privilege → `AuthDecision{Allowed:true}`; a clean denial → `{Allowed:false}`; a transport/breaker failure → **error** (caller fails closed, never a clean denial); handshake token resolves an `Identity` (401 mapping in the WS adapter). Stub auth-eval server.
-- [ ] **T006.2** [W2] Implement the **authN** side: resolve `model.Identity{ActorID}` from the Alkemio handshake token/cookie (Oathkeeper/Kratos). Satisfy `port.Auth`.
-- [ ] **T006.3** [W2] Implement the **authZ** side over **h2c HTTP/2** `POST {AUTH_SERVICE_URL}/internal/auth/evaluate` (request `{actorId, privilege, authorizationPolicyId}`, response `{allowed, reason, error?}`), NATS `auth.evaluate` fallback, guarded by `sony/gobreaker/v2`, **failing closed**. **Reuse the file-service/wopi h2c+gobreaker client pattern verbatim** (`file-service/internal/adapter/outbound/authhttp/client.go`). Satisfy `port.AuthZ`. **Resolve OPEN-1** (the `documentId→authorizationPolicyId` source + the read/collaborate privilege strings).
-- [ ] **T006.4** [W2] `cmd/server` selects `authzeval` on `AUTH_MODE=authzeval` (`open` default); env `AUTH_SERVICE_URL`/`NATS_URL`/breaker tunables (already stubbed in `.env.example`).
+- [X] **T006.1** [W2] Tests first: granted → `{Allowed:true}`; clean denial → `{Allowed:false}`; transport / 503-degraded / open-breaker / unresolvable-policy → **error** (caller fails closed); handshake token resolves an `Identity`; empty token rejected. Stub h2c auth-eval server.
+- [X] **T006.2** [W2] **authN**: resolve `model.Identity{ActorID}` from the handshake token (gateway-authenticated actor id, Oathkeeper/Kratos). Satisfies `port.Auth`.
+- [X] **T006.3** [W2] **authZ** over **h2c HTTP/2** `POST {AUTH_SERVICE_URL}/internal/auth/evaluate` (`{actorId, privilege, authorizationPolicyId}` → `{allowed, reason, error?}`), `sony/gobreaker/v2@v2.4.0`, **failing closed** — **reusing the file-service h2c+gobreaker client pattern verbatim**. **OPEN-1 resolved**: the policy id is resolved from `MetadataStore` (`PolicyResolver`), privileges `read`/`update-content`. Satisfies `port.AuthZ`.
+- [X] **T006.4** [W2] `cmd/server` selects `authzeval` on `AUTH_MODE=authzeval` (`open` default); env `AUTH_SERVICE_URL` + breaker tunables. The authzeval adapter is wired with a `policyResolver` over the configured MetadataStore.
 
 ---
 
@@ -127,7 +135,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 | Wave | Status | Milestone tasks | Fine-grained sub-tasks |
 |---|---|---|---|
 | 1 (Setup+ports, live-sync) | **DONE** | 9 (T001–T003, T007–T012) | — (each proven by named tests) |
-| 2 (durable adapters) | Forward | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
+| 2 (durable adapters) | **DONE** | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
 | 3 (presence/limits/lifecycle/API) | Forward | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
 | 4 (e2e + gate) | Forward | 1 (T017) | 5 (T017.1–5) |
-| **Total** | 9 done / 8 forward | 17 | 30 forward sub-tasks |
+| **Total** | 12 done / 5 forward | 17 | 16 forward sub-tasks |

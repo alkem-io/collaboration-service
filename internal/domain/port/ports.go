@@ -63,9 +63,15 @@ type MetadataStore interface {
 // Maps to: contracts/persistence-ports.md (BlobStore port) and data-model.md
 // (Snapshot, content-blob store).
 type BlobStore interface {
-	// Put stores the encoded snapshot bytes under pointer, overwriting any
-	// previous snapshot (latest-only today).
-	Put(ctx context.Context, pointer string, data []byte) error
+	// Put stores the encoded snapshot bytes for a document and returns the
+	// content pointer under which they can be retrieved. The caller passes the
+	// document's current pointer (the document id on first save, or the pointer
+	// from the last save) as a hint; an adapter that addresses blobs by a stable
+	// key (inline, local, s3) echoes it back, while an adapter whose backend
+	// assigns its own id (file-service) returns that id. The returned pointer is
+	// persisted in the metadata index and used by Get/Delete, so a document
+	// always rehydrates from the right location (data-model.md ContentPointer).
+	Put(ctx context.Context, pointer string, data []byte) (string, error)
 	// Get returns the snapshot bytes for pointer, or model.ErrNotFound when
 	// none has been stored.
 	Get(ctx context.Context, pointer string) ([]byte, error)

@@ -173,10 +173,11 @@ func newTestDeps() testDeps {
 	open := authopen.New()
 	return testDeps{
 		Deps: Deps{
-			Metadata: meta,
-			Blob:     blob,
-			Auth:     open,
-			AuthZ:    open,
+			Broadcaster: noopBroadcaster{},
+			Metadata:    meta,
+			Blob:        blob,
+			Auth:        open,
+			AuthZ:       open,
 		},
 		meta: meta,
 		blob: blob,

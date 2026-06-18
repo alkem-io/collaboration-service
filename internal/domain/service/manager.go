@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -32,6 +33,11 @@ type Metrics interface {
 	SnapshotSaved()
 	// SnapshotFailed is called on each failed snapshot persist.
 	SnapshotFailed()
+	// FanoutPublished is called on each successful cross-pod publish, carrying
+	// the publish latency (R10 fan-out lag).
+	FanoutPublished(lag time.Duration)
+	// FanoutFailed is called on each failed cross-pod publish.
+	FanoutFailed()
 }
 
 // NopMetrics is the no-op Metrics used when none is supplied.
@@ -54,6 +60,12 @@ func (NopMetrics) SnapshotSaved() {}
 
 // SnapshotFailed does nothing.
 func (NopMetrics) SnapshotFailed() {}
+
+// FanoutPublished does nothing.
+func (NopMetrics) FanoutPublished(time.Duration) {}
+
+// FanoutFailed does nothing.
+func (NopMetrics) FanoutFailed() {}
 
 // Manager is the room registry and lifecycle owner (T007). It lazily
 // materializes a Room on the first connect for a document id, shares it across
@@ -81,6 +93,9 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 	}
 	if logger == nil {
 		logger = zap.NewNop()
+	}
+	if deps.Broadcaster == nil {
+		deps.Broadcaster = noopBroadcaster{}
 	}
 	return &Manager{
 		deps:    deps,

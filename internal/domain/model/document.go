@@ -61,6 +61,10 @@ type Metadata struct {
 	ContentPointer string
 	// BlobStore names the adapter that holds the blob for ContentPointer.
 	BlobStore BlobStoreKind
+	// AuthorizationPolicyID is the Alkemio authorization policy this document
+	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
+	// the authorization-evaluation-service; empty in open/standalone mode.
+	AuthorizationPolicyID string
 	// OwnerRef is the parent Alkemio entity that owns this document's
 	// lifecycle; the delete cascade keys off it (FR-023).
 	OwnerRef  string

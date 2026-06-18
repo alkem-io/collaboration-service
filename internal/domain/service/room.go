@@ -34,8 +34,14 @@ type Conn interface {
 // updateOrigin tags a Y.Doc transaction with the connection that caused it so
 // the room can skip echoing the resulting update back to its originator. A
 // non-connection origin (snapshot load, server-side edit) has src == 0, which
-// matches no real connection and therefore fans out to everyone.
-type updateOrigin struct{ src connID }
+// matches no real connection and therefore fans out to everyone. peer marks an
+// update applied from another pod (via the ClusterBroadcaster): it is fanned to
+// local members but MUST NOT be re-published to the bus, or pods would ping-pong
+// the same update forever.
+type updateOrigin struct {
+	src  connID
+	peer bool
+}
 
 // command is a unit of work serialized onto the room's single run-loop
 // goroutine. Routing every mutation through one goroutine makes the room the
@@ -46,7 +52,10 @@ type command struct {
 	src  connID
 	conn Conn
 	data []byte
-	done chan joinResult
+	// ephemeral distinguishes a peer-pod doc payload (false → doc:{id}) from a
+	// peer-pod awareness/ephemeral payload (true → awareness:{id}) for cmdPeer.
+	ephemeral bool
+	done      chan joinResult
 }
 
 type cmdKind uint8
@@ -55,6 +64,7 @@ const (
 	cmdJoin cmdKind = iota
 	cmdLeave
 	cmdMessage
+	cmdPeer
 	cmdPersist
 	cmdClose
 )
@@ -102,10 +112,22 @@ type Room struct {
 	dirty   bool
 	version int
 	pointer string
+	// blobKind is the configured blob backend persisted in the metadata row so a
+	// document rehydrates from the right backend regardless of running config
+	// (data-model.md BlobStore; T005.6).
+	blobKind model.BlobStoreKind
+	// policyID is the document's Alkemio authorization policy id (OPEN-1),
+	// loaded from metadata and re-persisted on save so the authzeval adapter can
+	// evaluate against it (T006).
+	policyID string
 
 	// onReleased is invoked once, on the run loop, after the room has drained
 	// and persisted, so the Manager can drop it from its registry.
 	onReleased func()
+
+	// cancelSub tears down the ClusterBroadcaster subscription on release. It is
+	// a no-op for the in-memory (single-pod) broadcaster.
+	cancelSub func()
 
 	// released guards against double release notification.
 	released atomic.Bool
@@ -140,6 +162,10 @@ type RoomConfig struct {
 	IdleTimeout time.Duration
 	// SendBuffer is the per-connection outbound queue depth the adapter uses.
 	SendBuffer int
+	// BlobKind is the configured blob backend, persisted in each saved metadata
+	// row so a document rehydrates from the right backend (T005.6). Empty
+	// defaults to inline.
+	BlobKind model.BlobStoreKind
 }
 
 // DefaultRoomConfig is the Wave-1 standalone default cadence.
@@ -148,6 +174,7 @@ func DefaultRoomConfig() RoomConfig {
 		SaveDebounce: 500 * time.Millisecond,
 		IdleTimeout:  30 * time.Second,
 		SendBuffer:   64,
+		BlobKind:     model.BlobStoreInline,
 	}
 }
 
@@ -159,6 +186,10 @@ func DefaultRoomConfig() RoomConfig {
 func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType, deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) (*Room, error) {
 	if metrics == nil {
 		metrics = NopMetrics{}
+	}
+	blobKind := cfg.BlobKind
+	if blobKind == "" {
+		blobKind = model.BlobStoreInline
 	}
 	doc := newRoomDoc(string(id))
 	r := &Room{
@@ -173,6 +204,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		commands:  make(chan command, 256),
 		done:      make(chan struct{}),
 		members:   make(map[connID]roomMember),
+		blobKind:  blobKind,
 	}
 
 	if err := r.loadSnapshot(ctx); err != nil {
@@ -189,6 +221,18 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	doc.On("update", ycrdt.NewObserverHandler(func(v ...interface{}) {
 		r.onDocUpdate(v...)
 	}))
+
+	// Subscribe to peer-pod fan-out (R4). The handler runs off the run loop, so
+	// it enqueues a cmdPeer onto the single-writer loop rather than touching the
+	// doc directly. The in-memory broadcaster's Subscribe is a no-op that never
+	// fires the handler, so single-pod deployments pay nothing here.
+	cancel, err := deps.Broadcaster.Subscribe(ctx, id, func(payload []byte, ephemeral bool) {
+		r.enqueue(command{kind: cmdPeer, data: payload, ephemeral: ephemeral})
+	})
+	if err != nil {
+		return nil, err
+	}
+	r.cancelSub = cancel
 
 	return r, nil
 }
@@ -208,8 +252,14 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 
 	r.version = meta.Version
 	r.pointer = meta.ContentPointer
+	r.policyID = meta.AuthorizationPolicyID
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
+	}
+	if meta.BlobStore != "" {
+		// Rehydrate from the backend the document was last saved to, regardless
+		// of the running BLOB_STORE selection (T005.6).
+		r.blobKind = meta.BlobStore
 	}
 
 	data, err := r.deps.Blob.Get(ctx, meta.ContentPointer)
@@ -220,10 +270,11 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 		return err
 	}
 
-	// The snapshot is a full v2 update; applying it with a nil/non-connection
-	// origin means the update observer fans it to all members (there are none
-	// yet at load time).
-	ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0})
+	// The snapshot is a full v2 update; applying it with a non-connection,
+	// peer-flagged origin means the update observer fans it to all members
+	// (there are none yet at load time) without re-publishing it to the bus —
+	// rehydration is local state, not a new edit to broadcast.
+	ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0, peer: true})
 	return nil
 }
 
@@ -256,29 +307,7 @@ func (r *Room) run() {
 	for {
 		select {
 		case cmd := <-r.commands:
-			switch cmd.kind {
-			case cmdJoin:
-				stopTimer(idleTimer)
-				cmd.done <- r.handleJoin(cmd.conn)
-
-			case cmdLeave:
-				r.handleLeave(cmd.src)
-				if len(r.members) == 0 {
-					armIdle()
-				}
-
-			case cmdMessage:
-				if r.handleMessage(cmd.src, cmd.data) {
-					armSave()
-				}
-
-			case cmdPersist:
-				r.persist(context.Background())
-
-			case cmdClose:
-				r.persist(context.Background())
-				r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
-				r.finish()
+			if !r.dispatch(cmd, armSave, armIdle, idleTimer) {
 				return
 			}
 
@@ -293,6 +322,43 @@ func (r *Room) run() {
 			}
 		}
 	}
+}
+
+// dispatch handles one command on the run-loop goroutine, arming the save/idle
+// timers as needed. It returns false when the room must tear down (cmdClose), so
+// run can exit. Splitting this out of run keeps each function's branching low.
+func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Timer) (keepRunning bool) {
+	switch cmd.kind {
+	case cmdJoin:
+		stopTimer(idleTimer)
+		cmd.done <- r.handleJoin(cmd.conn)
+
+	case cmdLeave:
+		r.handleLeave(cmd.src)
+		if len(r.members) == 0 {
+			armIdle()
+		}
+
+	case cmdMessage:
+		if r.handleMessage(cmd.src, cmd.data) {
+			armSave()
+		}
+
+	case cmdPeer:
+		if r.handlePeer(cmd.data, cmd.ephemeral) {
+			armSave()
+		}
+
+	case cmdPersist:
+		r.persist(context.Background())
+
+	case cmdClose:
+		r.persist(context.Background())
+		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
+		r.finish()
+		return false
+	}
+	return true
 }
 
 // handleJoin registers a connection, returns its id and the initial frames it
@@ -371,23 +437,73 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		return r.handleSync(src, payload)
 
 	case model.WireAwareness:
-		// Apply to the room's awareness (so a late joiner gets a snapshot) and
-		// fan the raw frame out to peers. Never persisted (FR-008).
+		// Apply to the room's awareness (so a late joiner gets a snapshot), fan
+		// the raw frame out to local members, and publish it to peer pods on the
+		// awareness:{id} channel. Never persisted (FR-008).
 		ycrdt.ApplyAwarenessUpdate(r.awareness, payload, updateOrigin{src: src})
 		r.broadcast(frame, src)
+		r.publishToPeers(frame, true)
 		return false
 
 	case model.WireEphemeral:
-		// Volatile whiteboard ephemerals (cursor/emoji/countdown): fan out
-		// verbatim, drop on the floor otherwise. Never applied to the doc,
-		// never persisted (FR-008, T009).
+		// Volatile whiteboard ephemerals (cursor/emoji/countdown): fan out to
+		// local members and to peer pods (awareness:{id}), drop on the floor
+		// otherwise. Never applied to the doc, never persisted (FR-008, T009).
 		r.broadcast(frame, src)
+		r.publishToPeers(frame, true)
 		return false
 
 	default:
 		// Control is server→client only; ignore client-sent control/unknown
 		// types (matches y-protocols leniency).
 		return false
+	}
+}
+
+// handlePeer applies a payload received from another pod via the
+// ClusterBroadcaster (R4). A doc payload (ephemeral == false) is an applied v1
+// update: it is applied with a peer origin so onDocUpdate fans it to local
+// members but does NOT re-publish it to the bus (no ping-pong). An ephemeral
+// payload (awareness or the custom ephemeral channel) is fanned to local members
+// verbatim and never persisted. It returns whether the document was mutated so
+// the run loop can arm the save debounce — only the originating pod persists, but
+// every pod that applied the update keeps its in-memory doc dirty for its own
+// final snapshot, so a pod can survive the originator vanishing.
+func (r *Room) handlePeer(payload []byte, ephemeral bool) (mutated bool) {
+	if ephemeral {
+		// Could be a y-awareness update (apply to local awareness so late
+		// joiners on THIS pod see the cursor) or a custom ephemeral frame. Both
+		// are framed messages; reuse handleMessage's parsing by re-dispatching
+		// as if from a non-member source. A non-member src never echoes back to
+		// the bus because handleMessage only publishes for local-origin frames.
+		r.applyPeerEphemeral(payload)
+		return false
+	}
+
+	wasDirty := r.dirty
+	ycrdt.ApplyUpdate(r.doc, payload, updateOrigin{src: 0, peer: true})
+	return r.dirty && !wasDirty
+}
+
+// applyPeerEphemeral applies a peer-pod awareness/ephemeral frame: an awareness
+// update is merged into the room's awareness (so a late joiner on this pod sees
+// the remote cursor) and fanned to local members; a custom ephemeral frame is
+// fanned to local members. Neither is persisted nor re-published.
+func (r *Room) applyPeerEphemeral(frame []byte) {
+	in := bytes.NewBuffer(frame)
+	msgType, payload, err := protocol.ReadMessage(in)
+	if err != nil {
+		r.logger.Warn("dropping malformed peer frame", zap.Error(err))
+		return
+	}
+	switch model.WireMessageType(msgType) {
+	case model.WireAwareness:
+		ycrdt.ApplyAwarenessUpdate(r.awareness, payload, updateOrigin{src: 0, peer: true})
+		r.broadcast(frame, 0)
+	case model.WireEphemeral:
+		r.broadcast(frame, 0)
+	default:
+		// Sync/control never travel the awareness channel; ignore.
 	}
 }
 
@@ -431,14 +547,36 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 	if !ok {
 		return
 	}
-	var src connID
+	var origin updateOrigin
 	if len(v) > 1 {
 		if o, ok := v[1].(updateOrigin); ok {
-			src = o.src
+			origin = o
 		}
 	}
 	r.dirty = true
-	r.broadcast(protocol.EncodeUpdate(update), src)
+	r.broadcast(protocol.EncodeUpdate(update), origin.src)
+
+	// Publish locally-originated updates to peer pods (R4) as the RAW v1 update
+	// bytes (not the wire-framed message) so a peer pod can ApplyUpdate them
+	// directly. A peer-applied update is NOT re-published (it already crossed the
+	// bus once) — the ping-pong guard. The snapshot load (also peer-flagged via
+	// loadSnapshot's origin) likewise stays local.
+	if !origin.peer {
+		r.publishToPeers(update, false)
+	}
+}
+
+// publishToPeers fans a frame to other pods via the ClusterBroadcaster and
+// records the fan-out result on the metrics surface (R10). It is a no-op cost on
+// single-pod (the in-memory broadcaster's Publish returns immediately).
+func (r *Room) publishToPeers(frame []byte, ephemeral bool) {
+	start := time.Now()
+	if err := r.deps.Broadcaster.Publish(context.Background(), r.id, frame, ephemeral); err != nil {
+		r.logger.Warn("cluster fan-out publish failed", zap.Error(err))
+		r.metrics.FanoutFailed()
+		return
+	}
+	r.metrics.FanoutPublished(time.Since(start))
 }
 
 // broadcast fans a framed message to every member except the one identified by except.
@@ -487,12 +625,13 @@ func (r *Room) persist(ctx context.Context) {
 	}
 
 	snapshot := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
-	pointer := r.pointer
-	if pointer == "" {
-		pointer = string(r.id) // inline pointer == document id (data-model.md).
+	hint := r.pointer
+	if hint == "" {
+		hint = string(r.id) // first save: hint the document id (inline pointer == id).
 	}
 
-	if err := r.deps.Blob.Put(ctx, pointer, snapshot); err != nil {
+	pointer, err := r.deps.Blob.Put(ctx, hint, snapshot)
+	if err != nil {
 		r.logger.Error("snapshot blob put failed", zap.String("doc", string(r.id)), zap.Error(err))
 		r.metrics.SnapshotFailed()
 		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "blob put failed"})
@@ -500,12 +639,11 @@ func (r *Room) persist(ctx context.Context) {
 	}
 
 	meta := model.Metadata{
-		ID:             r.id,
-		ContentType:    r.content,
-		ContentPointer: pointer,
-		// BlobStore is hardcoded to inline for Wave 1; T005 will thread the
-		// configured store through once non-inline adapters land.
-		BlobStore: model.BlobStoreInline,
+		ID:                    r.id,
+		ContentType:           r.content,
+		ContentPointer:        pointer,
+		BlobStore:             r.blobKind,
+		AuthorizationPolicyID: r.policyID,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))
@@ -526,6 +664,9 @@ func (r *Room) persist(ctx context.Context) {
 func (r *Room) finish() {
 	if r.released.Swap(true) {
 		return
+	}
+	if r.cancelSub != nil {
+		r.cancelSub()
 	}
 	close(r.done)
 	if r.onReleased != nil {
