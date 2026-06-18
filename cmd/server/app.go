@@ -51,18 +51,22 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) service.Deps {
 	}
 }
 
-func buildRouter(_ *config.Config, deps service.Deps, logger *zap.Logger) http.Handler {
+func buildRouter(_ *config.Config, deps service.Deps, logger *zap.Logger) (http.Handler, *service.Manager) {
 	httpAdapter.InitMetrics()
 
+	manager := service.NewManager(deps, service.DefaultRoomConfig(), httpAdapter.PrometheusMetrics{}, logger.Named("rooms"))
+
 	collab := &ws.Handler{
-		Auth:   deps.Auth,
-		Logger: logger.Named("ws"),
+		Auth:    deps.Auth,
+		Manager: manager,
+		Logger:  logger.Named("ws"),
 	}
 
-	return httpAdapter.NewRouter(httpAdapter.Deps{
+	router := httpAdapter.NewRouter(httpAdapter.Deps{
 		CollabHandler: collab,
 		Logger:        logger,
 	})
+	return router, manager
 }
 
 func newHTTPServer(port int, handler http.Handler) *http.Server {

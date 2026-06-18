@@ -1,49 +1,49 @@
 // Package ws is the inbound WebSocket adapter: it terminates the raw WebSocket
 // connection at wss://<host>/collab/<documentId> (one document per connection,
 // y-websocket model), runs AuthN at the handshake, and carries y-protocols sync
-// + awareness plus the custom ephemeral channel (contracts/ws-protocol.md). It
-// translates wire messages to/from the domain core and never holds business
-// logic itself.
-//
-// This is the Phase-1 (provisioning) stub: it accepts the upgrade, performs the
-// handshake authentication via the Auth port, and closes with a "not yet
-// implemented" status. The y-protocols sync/awareness/ephemeral handling and
-// room wiring land with tasks T008–T012 of
-// specs/003-unify-collab-yjs/tasks/collaboration-service.md.
+// + awareness plus the custom ephemeral/control channels
+// (contracts/ws-protocol.md). It translates wire messages to/from the domain
+// core (service.Manager / service.Room) and holds no business logic itself.
 package ws
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
+	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
 
 // Handler upgrades /collab/{documentId} requests to WebSocket connections and
-// (once implemented) drives the y-protocols sync + awareness exchange for the
-// addressed document.
+// drives the y-protocols sync + awareness + ephemeral/control exchange for the
+// addressed document via the room manager.
 type Handler struct {
 	// Auth resolves the connecting identity at the handshake (401 on failure).
 	Auth port.Auth
+	// Manager owns the room lifecycle the connection joins.
+	Manager *service.Manager
 	// Logger is the request-scoped structured logger.
 	Logger *zap.Logger
+	// AcceptOptions are passed to websocket.Accept. Tests set
+	// InsecureSkipVerify to dial the httptest server cross-origin; production
+	// leaves origin checking on.
+	AcceptOptions *websocket.AcceptOptions
 }
 
 // handshakeTokenHeader carries the Alkemio token/cookie surrogate. The real
 // adapter (task T006) resolves identity from the Oathkeeper/Kratos cookie; the
-// skeleton reads a bearer-style header so the Auth port is exercised end to end.
+// open adapter reads a bearer-style header so the Auth port is exercised end to
+// end.
 const handshakeTokenHeader = "Authorization"
 
-// ServeHTTP authenticates the handshake, upgrades to WebSocket, and (for now)
-// closes the connection with a "not implemented" status so the route, the
-// upgrade path, and the Auth port are wired and testable ahead of the
-// y-protocols implementation.
+// ServeHTTP authenticates the handshake, upgrades to WebSocket, joins the room
+// for the addressed document, and runs the per-connection read loop until the
+// client disconnects.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	documentID := model.DocumentID(chi.URLParam(r, "documentId"))
 	if documentID == "" {
@@ -57,28 +57,83 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	content := contentTypeFromRequest(r)
+
+	conn, err := websocket.Accept(w, r, h.AcceptOptions)
 	if err != nil {
 		// Accept already wrote the HTTP error response.
 		h.Logger.Warn("websocket upgrade failed", zap.Error(err))
 		return
 	}
 
-	// Prove the vendored CRDT core resolves and is callable: materialize the
-	// authoritative Y.Doc for this document and its y-protocols sync handler.
-	// The room lifecycle (load snapshot, register the connection, debounced
-	// persistence) and the actual SyncStep1/SyncStep2/Update + awareness
-	// exchange land with tasks T007–T012; the Phase-1 skeleton only constructs
-	// the core to verify the binding, then closes cleanly.
-	doc := newRoomDoc(string(documentID))
-	_ = protocol.NewSyncHandler(doc)
-
-	_ = conn.Close(websocket.StatusInternalError, "collab transport not yet implemented")
+	h.serve(r.Context(), conn, documentID, content)
 }
 
-// newRoomDoc constructs the authoritative, garbage-collected Y.Doc that backs a
-// room. The collaboration service holds plaintext docs (FR-021); GC is enabled
-// (the configurable GC policy is FR-025, refined in the y-crdt fork).
-func newRoomDoc(guid string) *ycrdt.Doc {
-	return ycrdt.NewDoc(guid, true, nil, nil, false)
+// serve wires the accepted connection to a room and pumps frames until the read
+// loop ends, then leaves the room and closes the socket.
+func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.DocumentID, content model.ContentType) {
+	// The request context is cancelled once Accept returns, so the connection
+	// runs on its own lifetime; the read loop's error (client close / network)
+	// is the termination signal.
+	connCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+
+	wc := newWSConn(connCtx, conn, h.Manager.SendBuffer(), h.Logger)
+	defer wc.close()
+
+	session, initial, err := h.Manager.Join(connCtx, id, content, wc)
+	if err != nil {
+		h.Logger.Error("room join failed", zap.String("doc", string(id)), zap.Error(err))
+		_ = conn.Close(websocket.StatusInternalError, "join failed")
+		return
+	}
+	defer session.Leave()
+
+	// Drive the handshake: the server sends SyncStep1 (+ awareness snapshot) so
+	// the client replies with SyncStep2 and its own SyncStep1.
+	for _, frame := range initial {
+		if err := wc.Send(frame); err != nil {
+			return
+		}
+	}
+
+	wc.startWriter()
+
+	h.readLoop(connCtx, conn, session)
 }
+
+// readLoop reads framed binary messages off the socket and forwards each to the
+// room for serialized handling, until the client closes or an error occurs.
+func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *service.Session) {
+	for {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != -1 && status != websocket.StatusNormalClosure {
+				h.Logger.Debug("connection closed", zap.Int("status", int(status)))
+			}
+			return
+		}
+		if typ != websocket.MessageBinary {
+			// y-protocols framing is binary; ignore stray text frames.
+			continue
+		}
+		session.Forward(data)
+	}
+}
+
+// contentTypeFromRequest resolves the document content type from the optional
+// ?type= query param (memo|whiteboard), defaulting to memo. The persisted
+// metadata's content type wins once a document has been saved; this only seeds a
+// brand-new document's convention (T010). The authzeval adapter (T006) will
+// instead source it from the metadata index.
+func contentTypeFromRequest(r *http.Request) model.ContentType {
+	switch model.ContentType(r.URL.Query().Get("type")) {
+	case model.ContentTypeWhiteboard:
+		return model.ContentTypeWhiteboard
+	default:
+		return model.ContentTypeMemo
+	}
+}
+
+// compile-time assertion that the handler is a plain http.Handler.
+var _ http.Handler = (*Handler)(nil)

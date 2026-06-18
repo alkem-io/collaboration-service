@@ -44,7 +44,7 @@ func run() int {
 		zap.String("auth_mode", string(cfg.AuthMode)),
 	)
 
-	router := buildRouter(cfg, deps, logger)
+	router, manager := buildRouter(cfg, deps, logger)
 	srv := newHTTPServer(cfg.Port, router)
 
 	sigCh := make(chan os.Signal, 1)
@@ -67,7 +67,10 @@ func run() int {
 		exitCode = 1
 	}
 
+	// Stop accepting new connections, then release every live room (persisting a
+	// final snapshot per room) so in-flight edits survive the shutdown.
 	shutdownServer(srv, logger)
+	manager.Close()
 	logger.Info("server stopped")
 	return exitCode
 }
