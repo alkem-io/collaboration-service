@@ -65,6 +65,17 @@ var (
 		Help:      "Latency of a cross-pod fan-out publish.",
 		Buckets:   []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25},
 	})
+
+	// ContributingActors is the north-star contribution gauge (FR-014): the
+	// number of distinct actors that contributed to a document in the last
+	// flushed window. Always emitted (independent of the RabbitMQ contribution
+	// event, which only fires in Alkemio mode). Wired by the room presence
+	// machinery (task T013).
+	ContributingActors = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "collaboration",
+		Name:      "contributing_actors",
+		Help:      "Distinct actors that contributed to a document in the last window.",
+	})
 )
 
 // InitMetrics registers the service collectors on the dedicated registry,
@@ -79,6 +90,7 @@ func InitMetrics() {
 			SnapshotsTotal,
 			FanoutTotal,
 			FanoutLagSeconds,
+			ContributingActors,
 		)
 	})
 }
@@ -121,3 +133,7 @@ func (PrometheusMetrics) FanoutPublished(lag time.Duration) {
 
 // FanoutFailed counts a failed cross-pod publish.
 func (PrometheusMetrics) FanoutFailed() { FanoutTotal.WithLabelValues("error").Inc() }
+
+// ContributingActors sets the north-star contribution gauge to the number of
+// distinct actors in the window just flushed (FR-014).
+func (PrometheusMetrics) ContributingActors(n int) { ContributingActors.Set(float64(n)) }

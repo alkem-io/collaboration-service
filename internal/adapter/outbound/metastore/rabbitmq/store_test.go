@@ -236,6 +236,22 @@ func TestMarshalEnvelopeShape(t *testing.T) {
 	}
 }
 
+func TestContributionEmitsEvent(t *testing.T) {
+	f := &fakeRPC{}
+	store := newWithRPC(f)
+	if err := store.Contribution(context.Background(), "doc-c", []string{"actor-1", "actor-2"}); err != nil {
+		t.Fatalf("Contribution: %v", err)
+	}
+	if len(f.emits) != 1 || f.emits[0].pattern != PatternContribution {
+		t.Fatalf("expected one collaboration-contribution emit, got %+v", f.emits)
+	}
+	data, ok := f.emits[0].data.(ContributionData)
+	if !ok || data.ID != "doc-c" || len(data.Users) != 2 ||
+		data.Users[0].ID != "actor-1" || data.Users[1].ID != "actor-2" {
+		t.Fatalf("contribution emit payload = %+v", f.emits[0].data)
+	}
+}
+
 func TestContributionPayloadShape(t *testing.T) {
 	// The fire-and-forget contribution event carries the per-window actor ids
 	// (carried forward from both legacy dialects, unified id field).

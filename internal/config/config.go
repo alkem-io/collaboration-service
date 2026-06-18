@@ -98,6 +98,32 @@ type Config struct {
 	LocalBlobRoot string
 	// AuthZEval holds the authzeval settings (AUTH_MODE=authzeval).
 	AuthZEval AuthZEvalConfig
+	// Limits holds the configurable enforcement bounds + presence cadences
+	// (FR-014/FR-024, epic R9 defaults, OPEN-4).
+	Limits LimitsConfig
+}
+
+// LimitsConfig holds the Wave-3 enforcement/presence tunables, all overridable by
+// environment variable with epic R9 defaults (OPEN-4). Zero on a limit field
+// disables that limit; a zero cadence disables that sweep.
+type LimitsConfig struct {
+	// MaxDocBytes rejects an update growing the encoded snapshot past this size
+	// (MAX_DOC_BYTES, default 32 MiB).
+	MaxDocBytes int
+	// MaxConnsPerRoom caps concurrent connections per room (MAX_CONNS_PER_ROOM,
+	// default 50; refined per-document by metadata maxCollaborators when known).
+	MaxConnsPerRoom int
+	// UpdateRatePerSec is the per-connection token-bucket refill rate
+	// (UPDATE_RATE_PER_SEC, default 50 msg/s).
+	UpdateRatePerSec int
+	// UpdateBurst is the token-bucket depth (UPDATE_BURST, default = rate).
+	UpdateBurst int
+	// CollaboratorInactivitySeconds downgrades an idle collaborator to viewer
+	// (COLLABORATOR_INACTIVITY_SECONDS, default 120s; 0 disables).
+	CollaboratorInactivitySeconds int
+	// ContributionWindowSeconds is the contribution-metric flush cadence
+	// (CONTRIBUTION_WINDOW_SECONDS, default 60s; 0 disables).
+	ContributionWindowSeconds int
 }
 
 // RedisConfig configures the redis fan-out broadcaster.
@@ -224,7 +250,50 @@ func Load() (*Config, error) {
 	if err := loadAdapterConfig(cfg); err != nil {
 		return nil, err
 	}
+
+	limits, err := loadLimitsConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Limits = limits
 	return cfg, nil
+}
+
+// Default limit/presence values (epic R9, OPEN-4) — kept in sync with the domain
+// service.DefaultRoomConfig so config and core agree on the standalone defaults.
+const (
+	defaultMaxDocBytes               = 32 << 20 // 32 MiB
+	defaultMaxConnsPerRoom           = 50
+	defaultUpdateRatePerSec          = 50
+	defaultCollaboratorInactivitySec = 120
+	defaultContributionWindowSec     = 60
+)
+
+// loadLimitsConfig reads the Wave-3 enforcement/presence tunables, applying the
+// epic R9 defaults and failing fast on a negative value (a negative limit is a
+// configuration error, not a disable — use 0 to disable).
+func loadLimitsConfig() (LimitsConfig, error) {
+	lc := LimitsConfig{
+		MaxDocBytes:                   getenvInt("MAX_DOC_BYTES", defaultMaxDocBytes),
+		MaxConnsPerRoom:               getenvInt("MAX_CONNS_PER_ROOM", defaultMaxConnsPerRoom),
+		UpdateRatePerSec:              getenvInt("UPDATE_RATE_PER_SEC", defaultUpdateRatePerSec),
+		UpdateBurst:                   getenvInt("UPDATE_BURST", 0),
+		CollaboratorInactivitySeconds: getenvInt("COLLABORATOR_INACTIVITY_SECONDS", defaultCollaboratorInactivitySec),
+		ContributionWindowSeconds:     getenvInt("CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec),
+	}
+	for name, v := range map[string]int{
+		"MAX_DOC_BYTES":                   lc.MaxDocBytes,
+		"MAX_CONNS_PER_ROOM":              lc.MaxConnsPerRoom,
+		"UPDATE_RATE_PER_SEC":             lc.UpdateRatePerSec,
+		"UPDATE_BURST":                    lc.UpdateBurst,
+		"COLLABORATOR_INACTIVITY_SECONDS": lc.CollaboratorInactivitySeconds,
+		"CONTRIBUTION_WINDOW_SECONDS":     lc.ContributionWindowSeconds,
+	} {
+		if v < 0 {
+			return LimitsConfig{}, fmt.Errorf("%s must be >= 0 (0 disables)", name)
+		}
+	}
+	return lc, nil
 }
 
 // loadAdapterConfig fills in and validates the backend-specific settings for the

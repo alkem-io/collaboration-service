@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	httpAdapter "github.com/alkem-io/collaboration-service/internal/adapter/inbound/http"
+	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/lifecycle"
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/ws"
 	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/authzeval"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -48,7 +49,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		return service.Deps{}, nil, err
 	}
 
-	metadata, err := buildMetadata(cfg, &closers)
+	metadata, contributor, err := buildMetadata(cfg, &closers)
 	if err != nil {
 		cleanup()
 		return service.Deps{}, nil, err
@@ -68,6 +69,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		Blob:        blob,
 		Auth:        auth,
 		AuthZ:       authz,
+		Contributor: contributor,
 	}, cleanup, nil
 }
 
@@ -86,32 +88,57 @@ func buildBroadcaster(cfg *config.Config, logger *zap.Logger, closers *[]func())
 	return b, nil
 }
 
-func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, error) {
+// buildMetadata selects the MetadataStore and, for the Alkemio (rabbitmq) bus,
+// the Contributor that publishes the north-star contribution event over the same
+// bus (T013). A nil Contributor (standalone) defaults to a domain no-op.
+func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, port.Contributor, error) {
 	switch cfg.MetaStore {
 	case config.MetaStoreRabbitMQ:
 		client, store, err := metarabbitmq.Connect(metarabbitmq.Config{
 			URL: cfg.RabbitMQ.URL, Queue: cfg.RabbitMQ.Queue,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("rabbitmq metadata store: %w", err)
+			return nil, nil, fmt.Errorf("rabbitmq metadata store: %w", err)
 		}
 		*closers = append(*closers, func() { _ = client.Close() })
-		return store, nil
+		// The rabbitmq store also satisfies port.Contributor (collaboration-
+		// contribution event), so analytics ride the same bus.
+		return store, store, nil
 	case config.MetaStorePostgres:
 		if err := metapostgres.Migrate(cfg.Postgres.DSN); err != nil {
-			return nil, fmt.Errorf("postgres migrate: %w", err)
+			return nil, nil, fmt.Errorf("postgres migrate: %w", err)
 		}
 		store, pool, err := metapostgres.Connect(context.Background(), cfg.Postgres.DSN)
 		if err != nil {
-			return nil, fmt.Errorf("postgres metadata store: %w", err)
+			return nil, nil, fmt.Errorf("postgres metadata store: %w", err)
 		}
 		*closers = append(*closers, pool.Close)
-		return store, nil
+		return store, nil, nil
 	default:
 		// Standalone in-process store (no METADATA_STORE selection maps here in
 		// practice, but keeps the zero-dep path explicit).
-		return metainmem.New(), nil
+		return metainmem.New(), nil, nil
 	}
+}
+
+// buildLifecycle starts the RabbitMQ lifecycle consumer (document.deleted cascade,
+// optional created/access_changed) on the Alkemio bus, registering its closer.
+// It is a no-op in standalone mode — the create/delete HTTP API replaces the bus
+// events there (T015/T016). A failure to connect is fatal in Alkemio mode (the
+// cascade is a correctness requirement: no orphan documents).
+func buildLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Logger, closers *[]func()) error {
+	if cfg.MetaStore != config.MetaStoreRabbitMQ {
+		return nil
+	}
+	consumer, err := lifecycle.Connect(lifecycle.Config{
+		URL: cfg.RabbitMQ.URL, Queue: cfg.RabbitMQ.Queue,
+	}, manager, logger.Named("lifecycle"))
+	if err != nil {
+		return fmt.Errorf("lifecycle consumer: %w", err)
+	}
+	*closers = append(*closers, func() { _ = consumer.Close() })
+	logger.Info("lifecycle consumer enabled")
+	return nil
 }
 
 func buildBlob(cfg *config.Config) (port.BlobStore, error) {
@@ -182,6 +209,14 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 
 	roomCfg := service.DefaultRoomConfig()
 	roomCfg.BlobKind = blobKindFor(cfg.BlobStore)
+	roomCfg.Limits = service.Limits{
+		MaxDocBytes:      cfg.Limits.MaxDocBytes,
+		MaxConnsPerRoom:  cfg.Limits.MaxConnsPerRoom,
+		UpdateRatePerSec: cfg.Limits.UpdateRatePerSec,
+		UpdateBurst:      cfg.Limits.UpdateBurst,
+	}
+	roomCfg.CollaboratorInactivity = time.Duration(cfg.Limits.CollaboratorInactivitySeconds) * time.Second
+	roomCfg.ContributionWindow = time.Duration(cfg.Limits.ContributionWindowSeconds) * time.Second
 	manager := service.NewManager(deps, roomCfg, httpAdapter.PrometheusMetrics{}, logger.Named("rooms"))
 
 	collab := &ws.Handler{
@@ -192,6 +227,7 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 
 	router := httpAdapter.NewRouter(httpAdapter.Deps{
 		CollabHandler: collab,
+		CollabAPI:     &httpAdapter.CollabAPIHandler{Lifecycle: manager},
 		Logger:        logger,
 	})
 	return router, manager

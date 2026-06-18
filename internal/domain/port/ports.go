@@ -108,3 +108,18 @@ type AuthZ interface {
 	// is model.AuthDecision{Allowed: false}.
 	Evaluate(ctx context.Context, identity model.Identity, id model.DocumentID, privilege model.Privilege) (model.AuthDecision, error)
 }
+
+// Contributor emits the north-star contribution event (FR-014): the per-window
+// set of actor ids that mutated a document. In the Alkemio deployment the
+// rabbitmq adapter publishes the `collaboration-contribution` event so server
+// analytics stay unbroken; standalone uses a no-op so a contribution flush costs
+// nothing without a bus. The Prometheus gauge is always emitted by the domain
+// independently of this port.
+//
+// Maps to: contracts/unified-metadata-rmq.md (`collaboration-contribution`).
+type Contributor interface {
+	// Contribution publishes the contributing actor ids for a document window
+	// (fire-and-forget). An error is logged and dropped — a missed analytics
+	// event MUST NOT break live collaboration.
+	Contribution(ctx context.Context, id model.DocumentID, actorIDs []string) error
+}

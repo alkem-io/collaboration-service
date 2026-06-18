@@ -261,3 +261,41 @@ func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
 		t.Errorf("breaker defaults = %+v", cfg.AuthZEval)
 	}
 }
+
+func TestLimitsDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Limits.MaxDocBytes != 32<<20 {
+		t.Errorf("MaxDocBytes = %d, want 32MiB", cfg.Limits.MaxDocBytes)
+	}
+	if cfg.Limits.MaxConnsPerRoom != 50 || cfg.Limits.UpdateRatePerSec != 50 {
+		t.Errorf("limit defaults = %+v", cfg.Limits)
+	}
+	if cfg.Limits.CollaboratorInactivitySeconds != 120 || cfg.Limits.ContributionWindowSeconds != 60 {
+		t.Errorf("presence cadence defaults = %+v", cfg.Limits)
+	}
+}
+
+func TestLimitsOverridable(t *testing.T) {
+	t.Setenv("MAX_DOC_BYTES", "1048576")
+	t.Setenv("MAX_CONNS_PER_ROOM", "8")
+	t.Setenv("UPDATE_RATE_PER_SEC", "20")
+	t.Setenv("COLLABORATOR_INACTIVITY_SECONDS", "0") // disable
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Limits.MaxDocBytes != 1048576 || cfg.Limits.MaxConnsPerRoom != 8 ||
+		cfg.Limits.UpdateRatePerSec != 20 || cfg.Limits.CollaboratorInactivitySeconds != 0 {
+		t.Errorf("overridden limits = %+v", cfg.Limits)
+	}
+}
+
+func TestLimitsRejectNegative(t *testing.T) {
+	t.Setenv("MAX_CONNS_PER_ROOM", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("a negative limit should fail fast")
+	}
+}

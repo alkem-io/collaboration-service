@@ -87,28 +87,32 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 ---
 
-## Phase 4 — Presence, auth, limits, lifecycle, standalone API — ⬜ FORWARD (Wave 3)
+## Phase 4 — Presence, auth, limits, lifecycle, standalone API — ✅ DONE (Wave 3)
 
 > **Shaped by OPEN-4** (limits defaults + presence/collaborator-mode + FR-014 metric).
+> Built TDD on `feat/003-wave3` (off `feat/003-wave2-adapters`) → DRAFT PR stacked
+> on #2. Gates green (`go build`/`vet`/`gofmt`/`goimports`/`golangci-lint run` = 0
+> issues, `go test -race` clean, `make openapi` clean for the new REST surface);
+> the zero-dep standalone binary still boots and the HTTP API works without a bus.
 
 ### T013 — Presence + collaborator mode + contribution metric (FR-007/FR-014) — `internal/domain/service/`
-- [ ] **T013.1** [W3] Tests first: a collaborator that goes idle past `COLLABORATOR_INACTIVITY` is downgraded to viewer (`read-only-state` control); a departed connection's awareness entry is evicted so peers stop rendering its cursor; the contribution metric counts distinct contributing actors within a window and flushes on the interval.
-- [ ] **T013.2** [W3] Track the connection↔awareness-client-id mapping in the room (the gap noted in `room.go` `dropMember`) and emit a **server-forced awareness removal** on disconnect and on the delete cascade (closes the Wave-1 D6 deferral).
-- [ ] **T013.3** [W3] Implement viewer/collaborator mode + inactivity downgrade: re-evaluate via `AuthZ`, emit `read-only-state`; reset the inactivity timer on any client mutation (mirror the legacy whiteboard `collaborator_inactivity` logic).
-- [ ] **T013.4** [W3] Emit the **north-star contribution metric** (per-window contributing actor ids): a Prometheus gauge `collaboration_contributing_actors`, and — in Alkemio mode — the RabbitMQ `contribution` event so `server` analytics stay unbroken (**confirm transport in OPEN-4**).
+- [X] **T013.1** [W3] Tests first: a collaborator that goes idle past `COLLABORATOR_INACTIVITY` is downgraded to viewer (`read-only-state` control); a departed connection's awareness entry is evicted so peers stop rendering its cursor; the contribution metric counts distinct contributing actors within a window and flushes on the interval. Proven: `presence_test.go` (`TestAwarenessEvictedOnDisconnect`, `TestCollaboratorDowngradedOnInactivity`, `TestMutationResetsInactivity`, `TestContributionMetricFlush`).
+- [X] **T013.2** [W3] Track the connection↔awareness-client-id mapping in the room (`roomMember.awarenessID`, learned via `trackAwarenessID`) and emit a **server-forced awareness removal** on disconnect and on the delete cascade (`room.go` `evictAwareness`/`forcedAwarenessRemoval` — null-state update with a bumped clock; closes the Wave-1 D6 deferral).
+- [X] **T013.3** [W3] Viewer/collaborator mode + inactivity downgrade: mode resolved at join via `AuthZ` (`resolveMode`), `read-only-state` emitted; the inactivity sweep (`presence.go` `sweepInactive`) downgrades idle collaborators; any mutation resets `lastActivity` (`recordActivity`), mirroring the legacy whiteboard `collaborator_inactivity` logic.
+- [X] **T013.4** [W3] North-star contribution metric (`presence.go` `flushContribution`): Prometheus gauge `collaboration_contributing_actors` (always) **and** — in Alkemio mode — the RabbitMQ `collaboration-contribution` event via the new `port.Contributor` (rabbitmq `Store.Contribution`); standalone uses a domain `noopContributor`. **OPEN-4 transport resolved: both Prom gauge + RMQ event.**
 
 ### T014 — AuthN-at-handshake + per-doc authZ + configurable limits (FR-021/FR-024) — `ws/handler.go`, `service/room.go`
-- [ ] **T014.1** [W3] Tests first: an unauthenticated handshake → 401 (except `open`); a viewer's update is **not** applied while a collaborator's is; a connection breaching a limit (doc size / conns-per-room / update rate) is disconnected with a control message and **other collaborators are unaffected**; authZ re-evaluated on `document.access_changed`.
-- [ ] **T014.2** [W3] Enforce per-document authZ in the room/handler: gate `update-content` on `AuthZ.Evaluate` (fail closed); deny applying updates from a viewer; re-evaluate on `document.access_changed` (lifecycle).
-- [ ] **T014.3** [W3] Enforce configurable limits — `MAX_DOC_BYTES` (~32 MB default), `MAX_CONNS_PER_ROOM` (from metadata `maxCollaborators`, fallback default), per-connection update rate (token bucket, ~50 msg/s default), inactivity timeout — breach → control + disconnect (**confirm defaults in OPEN-4**). Add to `config.go` with fail-fast validation.
+- [X] **T014.1** [W3] Tests first: unauthenticated handshake → 401 (`handler_test.go` `TestHandshakeRejectedOn401`); a viewer's update is not applied while a collaborator's is (`authz_limits_test.go` `TestViewerUpdateNotApplied`/`TestCollaboratorUpdateApplied`); a limit breach (doc size / conns / rate) disconnects only the offender (`TestMaxDocSizeDisconnects`/`TestMaxConnsPerRoomCap`/`TestUpdateRateLimitDisconnects`, `TestRefusedJoinClosesSocket`); authZ re-evaluated on access change (`TestReEvaluateDowngradesOnAccessChange`/`TestReEvaluateUpgradesOnAccessChange`/`TestReEvaluateFailsClosed`).
+- [X] **T014.2** [W3] Per-document authZ in the room: `update-content` gated on `AuthZ.Evaluate` (`canMutate`/`dispatchSync` viewer gate, fail closed via `resolveMode`); a viewer's update is dropped; `Manager.ReEvaluate`→`reEvaluateMembers` handles `document.access_changed`. Refused join close-status mapped in `handler.go` `joinCloseStatus`.
+- [X] **T014.3** [W3] Configurable limits (`service/limits.go` token bucket + `Limits` in `RoomConfig`): `MAX_DOC_BYTES` (32 MiB), `MAX_CONNS_PER_ROOM` (50), `UPDATE_RATE_PER_SEC` (~50/s token bucket), `COLLABORATOR_INACTIVITY_SECONDS` (120s), `CONTRIBUTION_WINDOW_SECONDS` (60s) — all in `config.go` (`LimitsConfig`/`loadLimitsConfig`) with fail-fast validation (negative → error). **OPEN-4 defaults adopted (epic R9).**
 
 ### T015 — Lifecycle delete-cascade consumer (FR-012/FR-023) — `internal/adapter/inbound/lifecycle/`
-- [ ] **T015.1** [W3] Tests first: a `document.deleted` event disconnects connected clients (`room-closed`), releases the room, and calls `MetadataStore.Delete` + `BlobStore.Delete`; deleting an absent doc is a **no-op** (idempotent); optional `document.created` pre-registers metadata; `document.access_changed` triggers a re-evaluation.
-- [ ] **T015.2** [W3] Implement the RabbitMQ lifecycle consumer (same bus as persistence) per `contracts/lifecycle-events.md`: route `document.deleted`→cascade purge via the Manager, `document.created`→pre-register, `document.access_changed`→re-evaluate.
+- [X] **T015.1** [W3] Tests first: `document.deleted` disconnects clients (`room-closed`), releases the room, and `MetadataStore.Delete` + `BlobStore.Delete`; absent-doc delete is a no-op; `document.created` pre-registers; `document.access_changed` re-evaluates. Proven: `service/cascade_test.go` (`TestPurge*`, `TestPreRegisterWritesMetadata`, `TestReEvaluate*`) + `lifecycle/consumer_test.go`.
+- [X] **T015.2** [W3] RabbitMQ lifecycle consumer (`lifecycle/{consumer,conn}.go`, same bus as persistence) per `contracts/lifecycle-events.md`: `document.deleted`→`Manager.Purge` (cascade), `document.created`→`Manager.PreRegister`, `document.access_changed`→`Manager.ReEvaluate`. Wired in `cmd/server` for `METADATA_STORE=rabbitmq`.
 
 ### T016 — Standalone create/delete HTTP API (FR-020/FR-023) — `internal/adapter/inbound/http/`
-- [ ] **T016.1** [W3] Tests first: `POST /collab/<id>` pre-registers a document (content-type in body); `DELETE /collab/<id>` cascades the same purge as the bus event; responses are **named structs with a `Render()` method** (constitution anti-pattern 11 — never `map[string]any`) so `apispec.yaml` stays generatable.
-- [ ] **T016.2** [W3] Implement the create/delete handlers on the chi router (the no-bus equivalent of the lifecycle events) and regenerate `apispec.yaml`.
+- [X] **T016.1** [W3] Tests first (`http/collab_api_test.go`): `POST /collab/<id>` pre-registers (content-type in body, defaults memo, rejects unknown); `DELETE /collab/<id>` cascades the same purge as the bus event; responses are **named structs with `Render()`** (`CreateDocumentResponse`/`DeleteCollabResponse`/`ErrorResponse` — never `map[string]any`, anti-pattern 11) so OpenAPI stays generatable.
+- [X] **T016.2** [W3] Create/delete handlers (`http/collab_api.go` `CollabAPIHandler`) mounted on the chi router (no-bus equivalent of the lifecycle events, sharing `Manager.PreRegister`/`Purge`); `make openapi` regenerates `openapi.yaml` with `POST`/`DELETE /collab/{documentId}` + schemas. **The deferred OpenAPI gate is now ON.**
 
 ---
 
@@ -127,7 +131,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 - **Wave 1 (T001–T003, T007–T012)** — DONE; no remaining dependency.
 - **Wave 2 (T004–T006)** — depends on Wave 1's held ports. T004/T005/T006 parallelize; resolve **OPEN-1/2/3** before the contract-touching sub-tasks (T006.3, T005.1, T005.3). Trusting the fork in production also depends on **WS-A's fuzz gate** (workspace, not a server task).
-- **Wave 3 (T013–T016)** — T014 (per-doc authZ) depends on T006 (authzeval); T013/T015/T016 depend on Wave-1 lifecycle; resolve **OPEN-4** before T013/T014 defaults.
+- **Wave 3 (T013–T016)** — DONE. T014 (per-doc authZ) built on T006 (authzeval); T013/T015/T016 on Wave-1 lifecycle; **OPEN-4 resolved** (epic R9 defaults + Prom gauge *and* RMQ contribution event).
 - **Wave 4 (T017)** — depends on all prior waves; T017.2 needs T004; T017.3 needs T005.3; T017.4 needs T006/T014.
 
 ## Counts
@@ -136,6 +140,6 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 |---|---|---|---|
 | 1 (Setup+ports, live-sync) | **DONE** | 9 (T001–T003, T007–T012) | — (each proven by named tests) |
 | 2 (durable adapters) | **DONE** | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
-| 3 (presence/limits/lifecycle/API) | Forward | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
+| 3 (presence/limits/lifecycle/API) | **DONE** | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
 | 4 (e2e + gate) | Forward | 1 (T017) | 5 (T017.1–5) |
-| **Total** | 12 done / 5 forward | 17 | 16 forward sub-tasks |
+| **Total** | 16 done / 1 forward | 17 | 5 forward sub-tasks |
