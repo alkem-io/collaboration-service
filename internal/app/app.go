@@ -187,19 +187,39 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 // It is a no-op in standalone mode — the create/delete HTTP API replaces the bus
 // events there (T015/T016). A failure to connect is fatal in Alkemio mode (the
 // cascade is a correctness requirement: no orphan documents).
+//
+// The consumer binds the DEDICATED lifecycle queue (cfg.RabbitMQ.LifecycleQueue),
+// NOT the metastore RPC queue. RabbitMQ round-robins a queue across its consumers,
+// so binding the metastore queue here would let the lifecycle consumer steal a
+// fraction of collaboration-fetch/-save RPCs and drop them — memo joins then time
+// out. The two consumers must never share a queue.
 func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Logger, closers *[]func()) error {
 	if cfg.MetaStore != config.MetaStoreRabbitMQ {
 		return nil
 	}
+	queue := lifecycleQueue(cfg)
 	consumer, err := lifecycle.Connect(lifecycle.Config{
-		URL: cfg.RabbitMQ.URL, Queue: cfg.RabbitMQ.Queue,
+		URL: cfg.RabbitMQ.URL, Queue: queue,
 	}, manager, logger.Named("lifecycle"))
 	if err != nil {
 		return fmt.Errorf("lifecycle consumer: %w", err)
 	}
 	*closers = append(*closers, func() { _ = consumer.Close() })
-	logger.Info("lifecycle consumer enabled")
+	logger.Info("lifecycle consumer enabled", zap.String("queue", queue))
 	return nil
+}
+
+// lifecycleQueue is the queue the lifecycle consumer binds: the dedicated
+// LifecycleQueue, NEVER the metastore RPC queue. RabbitMQ round-robins a queue
+// across its consumers, so binding the metastore queue would let the lifecycle
+// consumer steal metastore fetch/save RPCs. config.Load already defaults and
+// validates LifecycleQueue (distinct from Queue); this falls back to the package
+// default only as a belt-and-suspenders guard for a hand-built Config.
+func lifecycleQueue(cfg *config.Config) string {
+	if cfg.RabbitMQ.LifecycleQueue != "" {
+		return cfg.RabbitMQ.LifecycleQueue
+	}
+	return config.DefaultLifecycleQueue
 }
 
 func buildBlob(cfg *config.Config) (port.BlobStore, error) {
@@ -301,8 +321,17 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 	// (T016). In Alkemio/rabbitmq mode the server owns document lifecycle over the
 	// bus (the lifecycle consumer), so these unauthenticated endpoints must NOT be
 	// exposed — leaving CollabAPI nil omits the REST surface entirely.
+	//
+	// When auth is authzeval, a create MUST carry an authorizationPolicyId — an
+	// empty one registers a document that fails every later authorization
+	// evaluation (the authzeval adapter fails closed on an empty policy). Require it
+	// at the handler so such a document is never persisted; in open mode authZ
+	// grants everything, so the policy id is optional.
 	if cfg.MetaStore != config.MetaStoreRabbitMQ {
-		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{Lifecycle: manager}
+		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{
+			Lifecycle:                  manager,
+			RequireAuthorizationPolicy: cfg.AuthMode == config.AuthModeAuthZEval,
+		}
 	}
 
 	router := httpAdapter.NewRouter(routerDeps)
