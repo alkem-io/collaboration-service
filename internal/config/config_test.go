@@ -28,6 +28,26 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AuthMode != AuthModeOpen {
 		t.Errorf("default AuthMode = %q, want open", cfg.AuthMode)
 	}
+	if cfg.Auth.TokenHeader != DefaultAuthTokenHeader {
+		t.Errorf("default Auth.TokenHeader = %q, want %q", cfg.Auth.TokenHeader, DefaultAuthTokenHeader)
+	}
+}
+
+// TestAuthTokenHeaderOverride asserts AUTH_TOKEN_HEADER overrides the handshake
+// header the WS adapter reads the identity token from — the seam the Alkemio
+// deployment uses to point the handshake at the gateway's resolved actor-id
+// header (X-Alkemio-Actor-Id) while standalone/open mode keeps Authorization.
+func TestAuthTokenHeaderOverride(t *testing.T) {
+	t.Setenv("AUTH_MODE", "")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error %v", err)
+	}
+	if cfg.Auth.TokenHeader != "X-Alkemio-Actor-Id" {
+		t.Errorf("Auth.TokenHeader = %q, want %q", cfg.Auth.TokenHeader, "X-Alkemio-Actor-Id")
+	}
 }
 
 func TestLoadRejectsUnknownEnum(t *testing.T) {
