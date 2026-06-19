@@ -130,7 +130,7 @@ func (r *Room) enqueue(cmd command) bool {
 // RoomConfig carries the per-room tunables (R7 save cadence, idle release).
 // Values come from configuration; the defaults are standalone-friendly.
 type RoomConfig struct {
-	// SaveDebounce is the window from the first dirty mutation before a snapshot
+	// SaveDebounce is the time from the first dirty mutation until a snapshot
 	// is persisted (R7; memo/whiteboard ~500ms default, configurable). The timer
 	// is armed once per clean→dirty cycle (on the first edit after a save) and
 	// fires once, bounding the staleness window regardless of edit frequency.
