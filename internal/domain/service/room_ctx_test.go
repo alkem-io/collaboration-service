@@ -70,6 +70,36 @@ func TestBackendCallIsTimeoutBounded(t *testing.T) {
 	})
 }
 
+// TestOpCtxDefaultsAndNilParent asserts opCtx is robust: it falls back to the
+// default timeout when BackendTimeout is unset, and roots at Background when the
+// room context is nil (a bare Room built directly in a test), never panicking.
+func TestOpCtxDefaultsAndNilParent(t *testing.T) {
+	// Bare room (no newRoom): r.ctx is nil, cfg.BackendTimeout is 0.
+	r := &Room{}
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	if ctx == nil {
+		t.Fatal("opCtx returned a nil context")
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("opCtx context has no deadline (timeout not applied)")
+	}
+	// The deadline should be ~defaultBackendTimeout out (allow generous slack).
+	if until := time.Until(dl); until <= 0 || until > defaultBackendTimeout+time.Second {
+		t.Fatalf("opCtx deadline %v is not ~defaultBackendTimeout (%v)", until, defaultBackendTimeout)
+	}
+
+	// With an explicit (short) BackendTimeout, opCtx honors it.
+	r2 := &Room{cfg: RoomConfig{BackendTimeout: 5 * time.Millisecond}}
+	ctx2, cancel2 := r2.opCtx()
+	defer cancel2()
+	dl2, ok2 := ctx2.Deadline()
+	if !ok2 || time.Until(dl2) > time.Second {
+		t.Fatalf("opCtx did not honor the configured BackendTimeout")
+	}
+}
+
 // TestHungBackendDoesNotWedgeRoomRelease asserts a hung backend call on the run
 // loop does not permanently wedge the room: bounded by BackendTimeout, the call
 // returns, the loop drains its backlog, and the now-empty room still releases (its
