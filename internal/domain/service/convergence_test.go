@@ -243,6 +243,11 @@ func TestOfflineReconnectNoLostEdits(t *testing.T) {
 	waitFor(t, "B synced baseline", func() bool { return contains(b.text(), "base") })
 	b.goOffline() // bidirectional partition: B neither sends nor receives
 
+	// Simulate a network partition: block inbound delivery so the room's fan-out
+	// of A's subsequent edits cannot reach B (both inbound and outbound are cut —
+	// B has no observeUpdates registered, so it also cannot send).
+	b.partition()
+
 	// While B is partitioned, both sides edit concurrently.
 	b.insertText("offline-b ") // buffered locally on B (not forwarded)
 	a.insertText("online-a ")  // A is online; reaches the server
@@ -253,9 +258,9 @@ func TestOfflineReconnectNoLostEdits(t *testing.T) {
 		t.Fatalf("B saw A's edit while partitioned — partition not simulated")
 	}
 
-	// B reconnects: it flushes its offline buffer (so A converges) and drives
-	// SyncStep1 (so the server replies with the delta B is missing — online-a).
-	b.goOnline()              // end partition: inbound frames apply again
+	// B reconnects: restore inbound delivery, then flush its offline buffer and
+	// drive SyncStep1 so the server replies with the delta B is missing.
+	b.unpartition()
 	b.observeUpdates()        // now B forwards local edits
 	b.pushBufferedAndResync() // flush offline buffer + SyncStep1
 

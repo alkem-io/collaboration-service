@@ -139,6 +139,23 @@ func (c *fakeClient) awarenessUserOf(clientID ycrdt.Number) interface{} {
 
 // --- fakeClient extensions ---
 
+// partition simulates cutting the client's inbound network: Send drops all
+// incoming frames until unpartition is called. The client's local doc and any
+// outbound forwarding (once observeUpdates is registered) are unaffected —
+// modelling a real offline client that keeps editing locally.
+func (c *fakeClient) partition() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blocked = true
+}
+
+// unpartition restores inbound delivery, modelling a reconnect.
+func (c *fakeClient) unpartition() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blocked = false
+}
+
 // pushBufferedAndResync simulates a reconnecting client (US5): it pushes its
 // full local state up as a sync Update (so the server learns the client's
 // offline-buffered edits and fans them to peers) and then drives SyncStep1 (so
