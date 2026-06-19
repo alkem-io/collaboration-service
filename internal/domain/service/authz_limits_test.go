@@ -218,6 +218,55 @@ func TestMaxDocSizeDisconnects(t *testing.T) {
 	})
 }
 
+// TestMaxDocSizeRejectsBeforeCommit asserts that an oversized update is rejected
+// PRE-COMMIT: it never mutates or broadcasts the authoritative doc. A second
+// collaborator must never receive the oversized payload, and a small follow-up
+// edit from that collaborator must converge against the pre-rejection state (the
+// rejected bytes are absent). This is the "enforce before committing" contract —
+// the offender is disconnected, but no live mutation/broadcast leaked first.
+func TestMaxDocSizeRejectsBeforeCommit(t *testing.T) {
+	cfg := fastConfig()
+	cfg.Limits.MaxDocBytes = 512 // tiny, so a modest edit breaches it
+	cfg.Limits.UpdateRatePerSec = 0
+	deps := newTestDeps()
+	mgr := NewManager(deps.Deps, cfg, nil, nil)
+
+	a := newFakeClient(t)
+	a.join(mgr, "big-doc-2", model.ContentTypeMemo)
+	a.observeUpdates()
+
+	b := newFakeClient(t)
+	b.join(mgr, "big-doc-2", model.ContentTypeMemo)
+	b.observeUpdates()
+
+	// A sends an oversized insert: applying it would push the encoded snapshot past
+	// the 512-byte cap, so it must be rejected before any commit/broadcast.
+	oversized := ""
+	for i := 0; i < 300; i++ {
+		oversized += "OVERSIZE "
+	}
+	a.insertText(oversized)
+
+	// A is disconnected for the breach.
+	waitFor(t, "oversized sender disconnected", func() bool {
+		for _, m := range controlMessages(a) {
+			if m.Kind == model.ControlRoomClosed && m.Error == "document size limit exceeded" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// B does a small, in-bounds edit and converges. The rejected oversized bytes
+	// must be absent from B's converged doc — proving the live doc was never
+	// mutated/broadcast by the rejected write.
+	b.insertText("small-ok ")
+	waitFor(t, "peer edit converges", func() bool { return contains(b.text(), "small-ok") })
+	if contains(b.text(), "OVERSIZE") {
+		t.Fatal("oversized update leaked to a peer: it must be rejected before commit/broadcast")
+	}
+}
+
 // TestReEvaluateDowngradesOnAccessChange asserts a re-evaluation that revokes
 // update-content downgrades a live collaborator to viewer (read-only-state),
 // the document.access_changed path (T014).
@@ -278,6 +327,109 @@ func TestReEvaluateFailsClosed(t *testing.T) {
 	mgr.ReEvaluate("authz-flaps")
 
 	waitFor(t, "fail-closed downgrade", func() bool { return hasReadOnly(a, true) })
+}
+
+// TestReEvaluateDisconnectsOnReadRevocation asserts that when a re-evaluation
+// finds READ access revoked, the member is DISCONNECTED (room-closed control),
+// not downgraded to viewer. A viewer still receives every doc update, so a
+// read-revoked member kept as a viewer would keep reading the document — an
+// access-revocation leak (CR critical, presence.go). The fix must eject.
+func TestReEvaluateDisconnectsOnReadRevocation(t *testing.T) {
+	authz := &mutableAuthZ{read: allow, update: allow}
+	deps := newTestDeps()
+	deps.AuthZ = authz
+	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
+
+	a := newFakeClient(t)
+	a.join(mgr, "read-revoked", model.ContentTypeMemo)
+	a.observeUpdates()
+
+	// Revoke READ (and update-content), then trigger a re-evaluation.
+	authz.set(deny, deny)
+	mgr.ReEvaluate("read-revoked")
+
+	// The member is ejected with a room-closed control carrying the revoke reason —
+	// NOT merely downgraded to a read-only viewer.
+	waitFor(t, "read-revoked member disconnected", func() bool {
+		for _, m := range controlMessages(a) {
+			if m.Kind == model.ControlRoomClosed && m.Error == "read access revoked" {
+				return true
+			}
+		}
+		return false
+	})
+	// And it must NOT have been left connected as a viewer (the leak we are fixing):
+	// the room drops the member, so the room count returns to zero once it idles out.
+	waitFor(t, "room releases after the only member is ejected", func() bool {
+		return mgr.RoomCount() == 0
+	})
+	if hasReadOnly(a, true) {
+		// A read-revoked member must be ejected, never downgraded to a viewer that
+		// keeps receiving updates.
+		// (A read-only-state control would indicate the leaky downgrade path.)
+		t.Fatal("read-revoked member was downgraded to viewer instead of disconnected")
+	}
+}
+
+// TestReEvaluateDisconnectsAllReadRevokedMembers asserts the re-evaluation loop
+// disconnects EVERY member whose read access was revoked (not just the first),
+// exercising the snapshot-iteration path with multiple ejections in one pass.
+func TestReEvaluateDisconnectsAllReadRevokedMembers(t *testing.T) {
+	authz := &mutableAuthZ{read: allow, update: allow}
+	deps := newTestDeps()
+	deps.AuthZ = authz
+	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
+
+	a := newFakeClient(t)
+	a.join(mgr, "multi-revoke", model.ContentTypeMemo)
+	a.observeUpdates()
+	b := newFakeClient(t)
+	b.join(mgr, "multi-revoke", model.ContentTypeMemo)
+	b.observeUpdates()
+
+	authz.set(deny, deny) // revoke read for everyone
+	mgr.ReEvaluate("multi-revoke")
+
+	closed := func(c *fakeClient) bool {
+		for _, m := range controlMessages(c) {
+			if m.Kind == model.ControlRoomClosed && m.Error == "read access revoked" {
+				return true
+			}
+		}
+		return false
+	}
+	waitFor(t, "both members disconnected on read revocation", func() bool {
+		return closed(a) && closed(b) && mgr.RoomCount() == 0
+	})
+}
+
+// TestMaxDocSizeDisabledAllowsAnySize asserts that with MaxDocBytes disabled (0),
+// the pre-commit size gate is a no-op: a large update applies and broadcasts
+// normally (the limit check short-circuits without scratch-applying).
+func TestMaxDocSizeDisabledAllowsAnySize(t *testing.T) {
+	cfg := fastConfig()
+	cfg.Limits.MaxDocBytes = 0 // disabled
+	cfg.Limits.UpdateRatePerSec = 0
+	deps := newTestDeps()
+	mgr := NewManager(deps.Deps, cfg, nil, nil)
+
+	a := newFakeClient(t)
+	a.join(mgr, "no-limit", model.ContentTypeMemo)
+	a.observeUpdates()
+
+	big := ""
+	for i := 0; i < 500; i++ {
+		big += "lorem "
+	}
+	a.insertText(big)
+	waitFor(t, "large edit applies when limit disabled", func() bool { return contains(a.text(), "lorem") })
+
+	// No disconnect: the size limit is off.
+	for _, m := range controlMessages(a) {
+		if m.Kind == model.ControlRoomClosed {
+			t.Fatalf("unexpected disconnect with MaxDocBytes disabled: %q", m.Error)
+		}
+	}
 }
 
 // mutableAuthZ is an AuthZ whose decisions can change between calls, to drive the

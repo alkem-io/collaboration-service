@@ -191,3 +191,60 @@ func TestMalformedAndEmptyEventsIgnored(t *testing.T) {
 			mgr.purged, mgr.registered, mgr.reEvaluated)
 	}
 }
+
+// TestHandleAcksOnSuccess asserts a successfully processed event returns
+// ackSuccess so consume acks it (manual-ack: ack only after the work succeeds).
+func TestHandleAcksOnSuccess(t *testing.T) {
+	mgr := &fakeManager{}
+	c := newConsumer(mgr)
+
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"})},
+		{"created", eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "c", ContentType: "memo"})},
+		{"access_changed", eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: "a"})},
+		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"})},
+		{"not-json", []byte("not json")},
+		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""})},
+	}
+	for _, tc := range cases {
+		if got := c.handle(context.Background(), tc.body); got != ackSuccess {
+			t.Errorf("%s: handle = %v, want ackSuccess", tc.name, got)
+		}
+	}
+}
+
+// TestHandleNacksRequeueOnPurgeFailure asserts a transient purge failure returns
+// nackRequeue so the delete event is redelivered (not at-most-once dropped) — the
+// cascade is a correctness requirement (no orphan documents).
+func TestHandleNacksRequeueOnPurgeFailure(t *testing.T) {
+	mgr := &fakeManager{purgeErr: errors.New("backend down")}
+	c := newConsumer(mgr)
+	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != nackRequeue {
+		t.Fatalf("handle on purge failure = %v, want nackRequeue", got)
+	}
+}
+
+// TestHandleNacksRequeueOnPreRegisterFailure asserts a pre-register failure on a
+// create event also returns nackRequeue for a bounded retry.
+func TestHandleNacksRequeueOnPreRegisterFailure(t *testing.T) {
+	mgr := &fakeManager{registerErr: errors.New("index down")}
+	c := newConsumer(mgr)
+	if got := c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-fail", ContentType: "memo"})); got != nackRequeue {
+		t.Fatalf("handle on pre-register failure = %v, want nackRequeue", got)
+	}
+}
+
+// TestShouldRequeueIsBounded asserts the bounded-requeue rule: a first-attempt
+// failure is requeued; a redelivery is dropped (no requeue) so a poison message
+// cannot loop forever.
+func TestShouldRequeueIsBounded(t *testing.T) {
+	if !shouldRequeue(false) {
+		t.Error("first attempt (Redelivered=false) must requeue")
+	}
+	if shouldRequeue(true) {
+		t.Error("redelivery (Redelivered=true) must NOT requeue (drop to avoid a poison loop)")
+	}
+}

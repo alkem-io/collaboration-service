@@ -1,6 +1,7 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,4 +44,53 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 			t.Errorf("/metrics missing %q", want)
 		}
 	}
+}
+
+// TestContributingActorsHistogramAggregatesAcrossRooms asserts the contribution
+// metric is a histogram that aggregates per-room/per-window observations rather
+// than an unlabeled gauge that is last-window-wins (one room clobbering another).
+// Three rooms each flush a window; the histogram _count must reflect all three
+// observations, not just the most recent one.
+func TestContributingActorsHistogramAggregatesAcrossRooms(t *testing.T) {
+	InitMetrics()
+	m := PrometheusMetrics{}
+
+	// Baseline _count before this test's observations (the registry is shared).
+	before := histogramCount(t, "collaboration_contributing_actors_per_window")
+
+	// Three independent rooms each flush their window.
+	m.ContributingActors(2) // room A: 2 actors
+	m.ContributingActors(5) // room B: 5 actors
+	m.ContributingActors(1) // room C: 1 actor
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, "collaboration_contributing_actors_per_window_bucket") {
+		t.Fatal("/metrics missing the contribution histogram buckets (is it still a gauge?)")
+	}
+
+	after := histogramCount(t, "collaboration_contributing_actors_per_window")
+	if got := after - before; got != 3 {
+		t.Errorf("histogram _count delta = %d, want 3 (one observation per room — a gauge would be 1, last-window-wins)", got)
+	}
+}
+
+// histogramCount scrapes the shared registry and returns the named histogram's
+// _count value, so a test can assert each flush is a distinct observation.
+func histogramCount(t *testing.T, name string) int {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	prefix := name + "_count "
+	for _, line := range strings.Split(rr.Body.String(), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			var v int
+			if _, err := fmt.Sscanf(strings.TrimPrefix(line, prefix), "%d", &v); err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			return v
+		}
+	}
+	return 0 // not yet observed.
 }
