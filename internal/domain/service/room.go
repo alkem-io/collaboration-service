@@ -130,8 +130,10 @@ func (r *Room) enqueue(cmd command) bool {
 // RoomConfig carries the per-room tunables (R7 save cadence, idle release).
 // Values come from configuration; the defaults are standalone-friendly.
 type RoomConfig struct {
-	// SaveDebounce is the quiet period after the last edit before a snapshot is
-	// persisted (R7; memo/whiteboard ~500ms default, configurable).
+	// SaveDebounce is the window from the first dirty mutation before a snapshot
+	// is persisted (R7; memo/whiteboard ~500ms default, configurable). The timer
+	// is armed once per clean→dirty cycle (on the first edit after a save) and
+	// fires once, bounding the staleness window regardless of edit frequency.
 	SaveDebounce time.Duration
 	// IdleTimeout releases an empty room after this long with no members. Zero
 	// releases immediately when the last member leaves.
@@ -437,7 +439,7 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 	r.broadcast(protocol.EncodeUpdate(update), src)
 }
 
-// broadcast fans a framed message to every member except except.
+// broadcast fans a framed message to every member except the one identified by except.
 func (r *Room) broadcast(frame []byte, except connID) {
 	for id, m := range r.members {
 		if id == except {
@@ -499,7 +501,9 @@ func (r *Room) persist(ctx context.Context) {
 		ID:             r.id,
 		ContentType:    r.content,
 		ContentPointer: pointer,
-		BlobStore:      model.BlobStoreInline,
+		// BlobStore is hardcoded to inline for Wave 1; T005 will thread the
+		// configured store through once non-inline adapters land.
+		BlobStore: model.BlobStoreInline,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))

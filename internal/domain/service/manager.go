@@ -147,6 +147,13 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	// Materialization (snapshot load) and the room's run loop outlive the
 	// connecting request, so they must not inherit its cancellation: a client
 	// disconnecting mid-load must not abort the room that other clients share.
+	//
+	// Wave-1 note: newRoom is called while holding m.mu, which serializes
+	// concurrent first-connects across all documents through one mutex. With
+	// the in-memory blob adapter the snapshot load is a map read (nanoseconds)
+	// so the lock is never held for meaningful time. When durable blob
+	// adapters (T005) land, m.mu should be dropped before I/O and re-acquired
+	// only for the map write, using a per-id singleflight to collapse races.
 	roomCtx := context.WithoutCancel(ctx)
 	room, err := newRoom(roomCtx, id, content, m.deps, m.cfg, m.metrics, m.logger.With(zap.String("doc", string(id))))
 	if err != nil {
