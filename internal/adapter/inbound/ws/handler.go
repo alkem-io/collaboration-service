@@ -33,13 +33,29 @@ type Handler struct {
 	// InsecureSkipVerify to dial the httptest server cross-origin; production
 	// leaves origin checking on.
 	AcceptOptions *websocket.AcceptOptions
+	// TokenHeader is the request header the handshake reads the Alkemio
+	// token/identity surrogate from. Empty selects the default
+	// (defaultTokenHeader). The Alkemio deployment terminates auth at the gateway
+	// and forwards the resolved actor id in a header (e.g. X-Alkemio-Actor-Id),
+	// while standalone/open mode keeps a bearer-style Authorization header; this
+	// field lets the deployment point the handshake at whichever header carries
+	// the identity (AUTH_TOKEN_HEADER).
+	TokenHeader string
 }
 
-// handshakeTokenHeader carries the Alkemio token/cookie surrogate. The real
-// adapter (task T006) resolves identity from the Oathkeeper/Kratos cookie; the
-// open adapter reads a bearer-style header so the Auth port is exercised end to
-// end.
-const handshakeTokenHeader = "Authorization"
+// defaultTokenHeader carries the Alkemio token/cookie surrogate when no header is
+// configured. The open adapter reads a bearer-style header so the Auth port is
+// exercised end to end; the Alkemio deployment overrides this (via the Handler's
+// TokenHeader) with the gateway's resolved actor-id header.
+const defaultTokenHeader = "Authorization"
+
+// tokenHeader returns the configured handshake header, or the default when unset.
+func (h *Handler) tokenHeader() string {
+	if h.TokenHeader != "" {
+		return h.TokenHeader
+	}
+	return defaultTokenHeader
+}
 
 // ServeHTTP authenticates the handshake, upgrades to WebSocket, joins the room
 // for the addressed document, and runs the per-connection read loop until the
@@ -51,7 +67,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.Auth.Authenticate(r.Context(), r.Header.Get(handshakeTokenHeader)); err != nil {
+	if _, err := h.Auth.Authenticate(r.Context(), r.Header.Get(h.tokenHeader())); err != nil {
 		// AuthN failure at the handshake → 401 (contracts/ws-protocol.md).
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

@@ -46,6 +46,64 @@ func (rejectAuth) Authenticate(_ context.Context, _ string) (model.Identity, err
 	return model.Identity{}, errors.New("denied")
 }
 
+// captureAuth records the token string the handshake passes to Authenticate, so a
+// test can assert which request header the handler read it from. It always fails
+// (no upgrade) so ServeHTTP can be driven directly with a recorder.
+type captureAuth struct{ token string }
+
+func (c *captureAuth) Authenticate(_ context.Context, token string) (model.Identity, error) {
+	c.token = token
+	return model.Identity{}, errors.New("denied")
+}
+
+// TestHandshakeReadsConfiguredTokenHeader asserts the handler reads the handshake
+// token from the header named by Handler.TokenHeader, defaulting to Authorization
+// when unset. This is the seam the Alkemio deployment uses to point the handshake
+// at the gateway's resolved actor-id header (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id)
+// while standalone/open mode keeps Authorization.
+func TestHandshakeReadsConfiguredTokenHeader(t *testing.T) {
+	cases := []struct {
+		name       string
+		header     string // Handler.TokenHeader; "" = default
+		setHeaders map[string]string
+		wantToken  string
+	}{
+		{
+			name:       "default reads Authorization",
+			setHeaders: map[string]string{"Authorization": "auth-tok", "X-Alkemio-Actor-Id": "actor-tok"},
+			wantToken:  "auth-tok",
+		},
+		{
+			name:       "override reads the configured header",
+			header:     "X-Alkemio-Actor-Id",
+			setHeaders: map[string]string{"Authorization": "auth-tok", "X-Alkemio-Actor-Id": "actor-tok"},
+			wantToken:  "actor-tok",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &captureAuth{}
+			h := &Handler{Auth: spy, Logger: zap.NewNop(), TokenHeader: tc.header}
+
+			req := httptest.NewRequest(http.MethodGet, "/collab/doc-hdr", nil)
+			// Set the route var so the handler reaches the auth step (chi would set it
+			// in the real router; we inject it directly for a unit-level assertion).
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("documentId", "doc-hdr")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			for k, v := range tc.setHeaders {
+				req.Header.Set(k, v)
+			}
+
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			if spy.token != tc.wantToken {
+				t.Fatalf("handshake token = %q, want %q (read from wrong header)", spy.token, tc.wantToken)
+			}
+		})
+	}
+}
+
 // newTestServer spins up an httptest server mounting the ws handler over the
 // real room manager (in-memory/inline defaults), returning the server and its
 // ws:// base URL. Cross-origin is allowed so the test client can dial.
