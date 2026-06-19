@@ -98,6 +98,70 @@ func TestCreateDocumentDefaultsContentType(t *testing.T) {
 	}
 }
 
+// TestCreateRejectsEmptyPolicyInAuthZEvalMode asserts that with
+// RequireAuthorizationPolicy set (authzeval mode), a create with an empty
+// authorizationPolicyId is rejected (400) and NOT persisted — otherwise it would
+// register a document that fails every later authorization evaluation (CR Major).
+func TestCreateRejectsEmptyPolicyInAuthZEvalMode(t *testing.T) {
+	lc := &fakeLifecycle{}
+	h := &CollabAPIHandler{Lifecycle: lc, RequireAuthorizationPolicy: true}
+	r := newCollabRouter(h)
+
+	// No authorizationPolicyId in the body.
+	req := httptest.NewRequest(http.MethodPost, "/collab/doc-noauth", strings.NewReader(`{"contentType":"memo"}`))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (empty policy in authzeval mode); body=%s", rr.Code, rr.Body.String())
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if len(lc.registered) != 0 {
+		t.Fatalf("a document with no authorization policy was persisted: %+v", lc.registered)
+	}
+}
+
+// TestCreateAcceptsPolicyInAuthZEvalMode asserts that with
+// RequireAuthorizationPolicy set, a create that DOES carry an authorizationPolicyId
+// is accepted and persisted with that policy id.
+func TestCreateAcceptsPolicyInAuthZEvalMode(t *testing.T) {
+	lc := &fakeLifecycle{}
+	h := &CollabAPIHandler{Lifecycle: lc, RequireAuthorizationPolicy: true}
+	r := newCollabRouter(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/collab/doc-auth",
+		strings.NewReader(`{"contentType":"memo","authorizationPolicyId":"policy-9"}`))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if len(lc.registered) != 1 || lc.registered[0].AuthorizationPolicyID != "policy-9" {
+		t.Fatalf("expected the carried policy id to be persisted: %+v", lc.registered)
+	}
+}
+
+// TestCreateAllowsEmptyPolicyInOpenMode asserts that in open/standalone mode
+// (RequireAuthorizationPolicy false), an empty authorizationPolicyId is fine —
+// authZ grants everything there, so the policy id is genuinely optional.
+func TestCreateAllowsEmptyPolicyInOpenMode(t *testing.T) {
+	lc := &fakeLifecycle{}
+	h := &CollabAPIHandler{Lifecycle: lc} // RequireAuthorizationPolicy defaults false
+	r := newCollabRouter(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/collab/doc-open", strings.NewReader(`{"contentType":"memo"}`))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (open mode); body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 // TestCreateDocumentRejectsBadContentType asserts an unknown content type is a
 // 400 (no silent default for an explicit, invalid value).
 func TestCreateDocumentRejectsBadContentType(t *testing.T) {

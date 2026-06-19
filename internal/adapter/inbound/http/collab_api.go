@@ -31,6 +31,13 @@ type CollabLifecycle interface {
 type CollabAPIHandler struct {
 	// Lifecycle is the domain manager the handlers drive.
 	Lifecycle CollabLifecycle
+	// RequireAuthorizationPolicy rejects a create with an empty authorizationPolicyId
+	// (set true in authzeval mode). Without it an empty policy id would register a
+	// document that looks valid but fails EVERY later authorization evaluation
+	// (the authzeval adapter fails closed on an empty policy), so the document is
+	// silently unreachable. In open/standalone mode authZ grants everything, so the
+	// policy id is genuinely optional and this stays false.
+	RequireAuthorizationPolicy bool
 }
 
 // maxCreateBody bounds the create request body (it is a tiny JSON document).
@@ -130,6 +137,15 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 	content, err := resolveContentType(req.ContentType)
 	if err != nil {
 		ErrorResponse{Error: err.Error()}.Render(w, http.StatusBadRequest)
+		return
+	}
+
+	// In authzeval mode an empty authorizationPolicyId registers a document that
+	// fails every later authorization evaluation (the authzeval adapter fails
+	// closed on an empty policy id), making it silently unreachable. Reject it up
+	// front rather than persisting an unusable document.
+	if h.RequireAuthorizationPolicy && req.AuthorizationPolicyID == "" {
+		ErrorResponse{Error: "authorizationPolicyId is required in authzeval mode"}.Render(w, http.StatusBadRequest)
 		return
 	}
 
