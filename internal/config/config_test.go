@@ -286,6 +286,7 @@ func TestLimitsDefaults(t *testing.T) {
 	for _, k := range []string{
 		"MAX_DOC_BYTES", "MAX_CONNS_PER_ROOM", "UPDATE_RATE_PER_SEC", "UPDATE_BURST",
 		"COLLABORATOR_INACTIVITY_SECONDS", "CONTRIBUTION_WINDOW_SECONDS",
+		"IDLE_RELEASE_SECONDS", "SAVE_DEBOUNCE_MILLIS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -302,6 +303,9 @@ func TestLimitsDefaults(t *testing.T) {
 	if cfg.Limits.CollaboratorInactivitySeconds != 120 || cfg.Limits.ContributionWindowSeconds != 60 {
 		t.Errorf("presence cadence defaults = %+v", cfg.Limits)
 	}
+	if cfg.Limits.IdleReleaseSeconds != 30 || cfg.Limits.SaveDebounceMillis != 500 {
+		t.Errorf("room cadence defaults = %+v", cfg.Limits)
+	}
 }
 
 func TestLimitsOverridable(t *testing.T) {
@@ -309,6 +313,8 @@ func TestLimitsOverridable(t *testing.T) {
 	t.Setenv("MAX_CONNS_PER_ROOM", "8")
 	t.Setenv("UPDATE_RATE_PER_SEC", "20")
 	t.Setenv("COLLABORATOR_INACTIVITY_SECONDS", "0") // disable
+	t.Setenv("IDLE_RELEASE_SECONDS", "0")            // immediate release
+	t.Setenv("SAVE_DEBOUNCE_MILLIS", "25")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -316,6 +322,9 @@ func TestLimitsOverridable(t *testing.T) {
 	if cfg.Limits.MaxDocBytes != 1048576 || cfg.Limits.MaxConnsPerRoom != 8 ||
 		cfg.Limits.UpdateRatePerSec != 20 || cfg.Limits.CollaboratorInactivitySeconds != 0 {
 		t.Errorf("overridden limits = %+v", cfg.Limits)
+	}
+	if cfg.Limits.IdleReleaseSeconds != 0 || cfg.Limits.SaveDebounceMillis != 25 {
+		t.Errorf("overridden room cadence = %+v", cfg.Limits)
 	}
 }
 

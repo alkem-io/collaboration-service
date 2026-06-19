@@ -64,13 +64,13 @@ func TestSinglePodPersistenceRoundTrip(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	a.insertMemo("durable-content ")
 
-	// Wait for the default debounce to persist (500ms), then close so the room
-	// idles and releases (persisting a final snapshot).
-	time.Sleep(700 * time.Millisecond)
+	// Let the (short, test-configured) debounce persist the snapshot, then close
+	// the last client. With IdleReleaseSeconds=0 the room releases immediately on
+	// leave — persisting a final snapshot and dropping out of the registry — so the
+	// reconnect below is a genuine cold reload, not a join to a still-live room.
+	time.Sleep(100 * time.Millisecond)
 	a.close()
-
-	// Allow the idle release (default IdleTimeout) to fire and persist.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	b := dial(t, base, "e2e-reload", "memo")
 	if !eventually(func() bool { return contains(b.memoText(), "durable-content") }) {
