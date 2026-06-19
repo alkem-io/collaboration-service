@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,8 +29,6 @@ type fakeClient struct {
 	aware    *ycrdt.Awareness
 	handler  *protocol.SyncHandler
 	identity model.Identity
-
-	partitioned atomic.Bool // when true, Send silently drops inbound frames
 
 	mu        sync.Mutex
 	session   *Session
@@ -63,9 +60,6 @@ func newFakeClientWithIdentity(t *testing.T, actorID string) *fakeClient {
 // goroutine never touch the doc concurrently (the doc is not thread-safe).
 // When the client is partitioned (partition()), frames are silently dropped.
 func (c *fakeClient) Send(frame []byte) error {
-	if c.partitioned.Load() {
-		return nil // drop: simulated network partition
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// Drop all inbound frames while partitioned — simulates the client being

@@ -65,14 +65,16 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		b, rerr := io.ReadAll(part)
+		name := part.FormName()
+		_ = part.Close()
 		if rerr != nil {
 			http.Error(w, "read part body", http.StatusBadRequest)
 			return
 		}
-		if part.FormName() == "file" {
+		if name == "file" {
 			fileBytes = b
 		} else {
-			fields[part.FormName()] = string(b)
+			fields[name] = string(b)
 		}
 	}
 	if fields["storageBucketId"] == "" || fields["authorizationId"] == "" {
