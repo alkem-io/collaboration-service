@@ -40,11 +40,14 @@ type JSONLSource struct {
 }
 
 // NewJSONLSource wraps r as a JSONL legacy-record source. The scanner buffer is
-// raised to 16 MiB/line because a single legacy whiteboard's Excalidraw JSON (or
-// a long memo's base64 update) can be large.
+// sized to comfortably exceed the largest valid record: a document at the 32 MiB
+// MaxDocBytes ceiling is base64-encoded in the JSONL line (~33% overhead → ~43
+// MiB) plus the JSON envelope, so a 16 MiB cap would reject large-but-valid
+// records with "token too long". 64 MiB leaves headroom above the base64-encoded
+// max document.
 func NewJSONLSource(r io.Reader) *JSONLSource {
 	sc := bufio.NewScanner(r)
-	const maxLine = 16 << 20 // 16 MiB
+	const maxLine = 64 << 20 // 64 MiB — > base64(32 MiB MaxDocBytes) + envelope
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)
 	return &JSONLSource{sc: sc}
 }

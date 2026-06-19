@@ -391,6 +391,28 @@ func TestJSONLSource_BadJSONErrors(t *testing.T) {
 	}
 }
 
+// TestJSONLSource_LargeRecord guards the scanner buffer size: a record whose line
+// exceeds the old 16 MiB cap (but is well within the buffer) must parse rather
+// than fail with "token too long". A document at the 32 MiB MaxDocBytes ceiling,
+// base64-encoded in the line, lands above 16 MiB, so this is a real corpus case.
+func TestJSONLSource_LargeRecord(t *testing.T) {
+	const contentLen = 20 << 20 // 20 MiB of content — past the old 16 MiB line cap
+	var b strings.Builder
+	b.Grow(contentLen + 64)
+	b.WriteString(`{"id":"big","contentType":"memo","content":"`)
+	b.WriteString(strings.Repeat("A", contentLen))
+	b.WriteString(`"}`)
+
+	s := NewJSONLSource(strings.NewReader(b.String()))
+	rec, ok, err := s.Next()
+	if err != nil {
+		t.Fatalf("large record must parse, got: %v", err)
+	}
+	if !ok || rec.ID != "big" || len(rec.Content) != contentLen {
+		t.Fatalf("large record decoded wrong: ok=%v id=%q len=%d", ok, rec.ID, len(rec.Content))
+	}
+}
+
 // --- seed corpus -----------------------------------------------------------
 
 func TestSeedCorpus_DryRunOutcomes(t *testing.T) {
