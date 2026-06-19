@@ -66,15 +66,24 @@ var (
 		Buckets:   []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25},
 	})
 
-	// ContributingActors is the north-star contribution gauge (FR-014): the
-	// number of distinct actors that contributed to a document in the last
-	// flushed window. Always emitted (independent of the RabbitMQ contribution
-	// event, which only fires in Alkemio mode). Wired by the room presence
-	// machinery (task T013).
-	ContributingActors = prometheus.NewGauge(prometheus.GaugeOpts{
+	// ContributingActors is the north-star contribution metric (FR-014): the number
+	// of distinct actors that contributed to a document in one flushed window. It is
+	// a HISTOGRAM, observed once per room per window — NOT an unlabeled gauge.
+	//
+	// A single unlabeled gauge .Set() per room is last-window-wins: every room
+	// clobbers the same series, so the value reflects whichever room flushed most
+	// recently, not the platform. A per-document label would be correct but
+	// unbounded-cardinality (one series per document — a Prometheus anti-pattern).
+	// A histogram is bounded (fixed buckets) and aggregates correctly across all
+	// rooms: _count is total windows flushed, _sum is total actor-windows, and the
+	// buckets show the distribution of per-window contributor counts. Always emitted
+	// (independent of the RabbitMQ contribution event, which only fires in Alkemio
+	// mode). Wired by the room presence machinery (task T013).
+	ContributingActors = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "collaboration",
-		Name:      "contributing_actors",
-		Help:      "Distinct actors that contributed to a document in the last window.",
+		Name:      "contributing_actors_per_window",
+		Help:      "Distinct actors that contributed to a document in one flushed window (histogram, aggregated across rooms).",
+		Buckets:   []float64{0, 1, 2, 3, 5, 8, 13, 21, 34, 55},
 	})
 )
 
@@ -134,6 +143,8 @@ func (PrometheusMetrics) FanoutPublished(lag time.Duration) {
 // FanoutFailed counts a failed cross-pod publish.
 func (PrometheusMetrics) FanoutFailed() { FanoutTotal.WithLabelValues("error").Inc() }
 
-// ContributingActors sets the north-star contribution gauge to the number of
-// distinct actors in the window just flushed (FR-014).
-func (PrometheusMetrics) ContributingActors(n int) { ContributingActors.Set(float64(n)) }
+// ContributingActors observes the number of distinct actors in the window just
+// flushed for one room onto the north-star contribution histogram (FR-014). Each
+// flush is one observation, so the metric aggregates correctly across rooms (an
+// unlabeled .Set per room would be last-window-wins).
+func (PrometheusMetrics) ContributingActors(n int) { ContributingActors.Observe(float64(n)) }
