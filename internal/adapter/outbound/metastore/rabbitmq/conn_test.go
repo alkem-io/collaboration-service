@@ -113,6 +113,34 @@ func TestClientCallServerError(t *testing.T) {
 	}
 }
 
+func TestConsumeRepliesMalformedBodySurfacesError(t *testing.T) {
+	// A reply whose body is not a valid nestReply envelope must NOT be delivered as
+	// a zero-value (empty) success — it must reach the waiter as an error, so Call
+	// returns an error instead of nil-with-empty-data.
+	c := &Client{
+		replyQ: "r", serverQueue: "s", timeout: time.Second,
+		pending: make(map[string]chan nestReply),
+	}
+	waiter := make(chan nestReply, 1)
+	c.mu.Lock()
+	c.pending["corr-1"] = waiter
+	c.mu.Unlock()
+
+	deliveries := make(chan amqp.Delivery, 1)
+	deliveries <- amqp.Delivery{CorrelationId: "corr-1", Body: []byte("{not json")}
+	close(deliveries)
+	c.consumeReplies(deliveries)
+
+	select {
+	case r := <-waiter:
+		if len(r.Err) == 0 {
+			t.Fatalf("malformed reply must carry an error, got %+v", r)
+		}
+	default:
+		t.Fatal("expected a reply to be delivered for the malformed body")
+	}
+}
+
 func TestClientEmit(t *testing.T) {
 	c, ch := newFakeClient(nil)
 	if err := c.Emit(context.Background(), PatternContribution, ContributionData{ID: "d"}); err != nil {

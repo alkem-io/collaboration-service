@@ -97,12 +97,10 @@ func (s *Store) Put(ctx context.Context, prevPointer string, data []byte) (strin
 	}
 
 	// Drop the superseded snapshot (best-effort: a failed cleanup must not fail
-	// the save — the new snapshot is already durable and recorded).
+	// the save — the new snapshot is already durable and recorded, and the orphan
+	// is reclaimable).
 	if prevPointer != "" && prevPointer != id {
-		if delErr := s.Delete(ctx, prevPointer); delErr != nil {
-			// Not fatal; the orphan is reclaimable and the save succeeded.
-			_ = delErr
-		}
+		_ = s.Delete(ctx, prevPointer)
 	}
 	return id, nil
 }

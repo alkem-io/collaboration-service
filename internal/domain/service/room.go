@@ -257,8 +257,12 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 		r.content = meta.ContentType
 	}
 	if meta.BlobStore != "" {
-		// Rehydrate from the backend the document was last saved to, regardless
-		// of the running BLOB_STORE selection (T005.6).
+		// Record the backend the document was last saved to so subsequent saves
+		// re-persist it in the metadata row (the row stays truthful about where the
+		// snapshot lives). Note this does not re-route the read below: r.deps.Blob
+		// is the single adapter selected at startup, so a running config whose
+		// BLOB_STORE differs from meta.BlobStore must point that adapter at the same
+		// backing store to rehydrate (T005.6).
 		r.blobKind = meta.BlobStore
 	}
 

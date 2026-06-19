@@ -125,7 +125,13 @@ func Connect(cfg Config) (*Client, *Store, error) {
 func (c *Client) consumeReplies(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
 		var reply nestReply
-		_ = json.Unmarshal(d.Body, &reply)
+		if err := json.Unmarshal(d.Body, &reply); err != nil {
+			// A malformed reply must not be delivered as a zero-value (empty)
+			// success — that would make Call return nil with no data and mask the
+			// protocol error (e.g. a Load mapping to ErrNotFound). Surface it as a
+			// server error on the reply so the waiter's Call returns an error.
+			reply = nestReply{Err: json.RawMessage(`"malformed reply envelope"`)}
+		}
 		c.deliver(d.CorrelationId, reply)
 	}
 }
