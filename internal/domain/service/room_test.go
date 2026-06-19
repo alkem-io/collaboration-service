@@ -85,12 +85,21 @@ func (c *fakeClient) Send(frame []byte) error {
 		return nil
 	}
 	switch model.WireMessageType(msgType) {
-	case model.WireSync, model.WireAwareness:
-		// Apply to the local doc/awareness; a SyncStep1 from the server yields a
-		// SyncStep2 reply, which we forward back through the session.
+	case model.WireSync:
+		// Apply to the local doc; a SyncStep1 from the server yields a SyncStep2
+		// reply, which we forward back through the session.
 		var reply bytes.Buffer
 		if _, err := c.handler.HandleMessage(cp, &reply); err == nil && reply.Len() > 0 && c.session != nil {
 			c.session.Forward(reply.Bytes())
+		}
+	case model.WireAwareness:
+		// Decode the canonical y-protocols awareness framing
+		// ([type][writeVarUint8Array(body)], awareness_wire.go) and apply the body
+		// — modelling a real y-protocols client, which reads readVarUint8Array
+		// before applyAwarenessUpdate (the fork's SyncHandler does not, so we do it
+		// here rather than via c.handler).
+		if body, ok := decodeAwarenessBody(payload); ok {
+			ycrdt.ApplyAwarenessUpdate(c.aware, body, c.handler)
 		}
 	case model.WireEphemeral:
 		c.ephemeral = append(c.ephemeral, append([]byte(nil), payload...))

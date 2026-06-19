@@ -371,3 +371,107 @@ func TestDeleteNon200Surfaces(t *testing.T) {
 		t.Error("expected Delete to surface a 502")
 	}
 }
+
+// TestPutSucceedsWhenPreviousDeleteFails defends Put's best-effort cleanup
+// branch (store.go:102): the new snapshot upload succeeds, but deleting the
+// superseded one fails. The save MUST still succeed — the new snapshot is
+// already durable and recorded, and the orphan is reclaimable. A failed cleanup
+// must never fail the save.
+func TestPutSucceedsWhenPreviousDeleteFails(t *testing.T) {
+	var nextID int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			nextID++
+			writeJSON(w, createResponse{ID: idFromInt(nextID)})
+		case http.MethodDelete:
+			// The cleanup of the previous snapshot fails hard.
+			http.Error(w, "delete unavailable", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+
+	// prevPointer differs from the assigned id, so Put will attempt (and fail)
+	// the cleanup delete — yet must still return the new pointer with no error.
+	got, err := store.Put(context.Background(), "00000000-0000-0000-0000-000000000099", []byte("v2"))
+	if err != nil {
+		t.Fatalf("Put must succeed despite a failed previous-snapshot cleanup: %v", err)
+	}
+	if got == "" {
+		t.Error("expected the new content pointer to be returned")
+	}
+}
+
+// TestUploadBadBaseURLFailsRequestBuild defends upload's request-build branch
+// (store.go:136): a BaseURL carrying an illegal control character makes
+// http.NewRequestWithContext fail, which Put must surface rather than panic or
+// silently no-op. New does not validate URL syntax, so this is reachable.
+func TestUploadBadBaseURLFailsRequestBuild(t *testing.T) {
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+		t.Error("expected Put to fail building a request to a malformed BaseURL")
+	}
+}
+
+// TestUploadTransportErrorSurfaces defends upload's client.Do branch
+// (store.go:142): a closed server makes the POST fail at the transport layer,
+// which Put must surface.
+func TestUploadTransportErrorSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	srv.Close() // transport now fails
+	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+		t.Error("expected Put to surface a transport error on upload")
+	}
+}
+
+// TestGetBadBaseURLFailsRequestBuild defends Get's request-build branch
+// (store.go:165): a malformed BaseURL makes http.NewRequestWithContext fail.
+func TestGetBadBaseURLFailsRequestBuild(t *testing.T) {
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := store.Get(context.Background(), "id"); err == nil {
+		t.Error("expected Get to fail building a request to a malformed BaseURL")
+	}
+}
+
+// TestGetTruncatedBodySurfaces defends Get's read-body branch (store.go:181): a
+// 200 whose declared Content-Length exceeds the bytes actually delivered (the
+// connection is cut short) must surface as a read error, not return a silently
+// truncated snapshot that a reload would apply.
+func TestGetTruncatedBodySurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close() // cut the connection mid-body
+		}
+	}))
+	t.Cleanup(srv.Close)
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	if _, err := store.Get(context.Background(), "id"); err == nil {
+		t.Error("expected Get to surface a truncated-body read error")
+	}
+}
+
+// TestDeleteBadBaseURLFailsRequestBuild defends Delete's request-build branch
+// (store.go:190): a malformed BaseURL makes http.NewRequestWithContext fail.
+func TestDeleteBadBaseURLFailsRequestBuild(t *testing.T) {
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.Delete(context.Background(), "id"); err == nil {
+		t.Error("expected Delete to fail building a request to a malformed BaseURL")
+	}
+}

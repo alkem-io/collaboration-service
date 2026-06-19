@@ -219,3 +219,31 @@ func TestNewWrapsPool(t *testing.T) {
 		t.Error("New should wrap the pool in a querier")
 	}
 }
+
+// TestConnectPingFailureClosesPool defends Connect's ping-error branch
+// (store.go:65): a syntactically valid DSN whose host is unreachable passes the
+// lazy pgxpool.New but fails Ping. Connect must surface that error (so startup
+// fails loudly instead of handing back a store backed by a dead pool).
+func TestConnectPingFailureClosesPool(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// Port 1 is unreachable; connect_timeout keeps the test fast.
+	store, pool, err := Connect(ctx, "postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1")
+	if err == nil {
+		t.Error("expected Connect to fail pinging an unreachable database")
+	}
+	if store != nil || pool != nil {
+		t.Error("on a ping failure Connect must return nil store and pool (pool already closed)")
+	}
+}
+
+// TestMigrateRejectsMalformedDSN asserts Migrate fails fast with a clear,
+// non-panicking error when the DSN cannot be parsed (§XV: no half-configured
+// runs). This pins the fix for the prior latent panic: the old "nil-safe" empty
+// config was NOT nil-safe — pgx's connect() panics on an empty ConnConfig — so
+// Migrate now propagates the pgx.ParseConfig error instead.
+func TestMigrateRejectsMalformedDSN(t *testing.T) {
+	if err := Migrate("://not a dsn"); err == nil {
+		t.Fatal("Migrate with a malformed DSN must return a parse error, not panic")
+	}
+}

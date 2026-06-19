@@ -1,13 +1,14 @@
-// Package main boots the Alkemio collaboration-service: it wires the hexagonal
-// core (domain service + ports) to its selected adapters — cluster fan-out,
-// metadata store, blob store, and auth — and serves the operational HTTP
-// surface (/healthz, /metrics) plus the collaboration WebSocket endpoint
-// (/collab/{documentId}) until SIGINT/SIGTERM triggers a graceful shutdown.
+// Package main boots the Alkemio collaboration-service: it loads configuration,
+// assembles the hexagon via internal/app (domain service + selected adapters,
+// the operational HTTP surface, the collaboration WebSocket endpoint, and the
+// standalone REST API / RabbitMQ lifecycle consumer), and serves until
+// SIGINT/SIGTERM triggers a graceful shutdown that releases every live room
+// (persisting a final snapshot each).
 //
-// This is the Phase-1 (provisioning) wiring: the standalone-default adapters
-// (single-pod fan-out, in-process metadata/blob, open auth) are selected and
-// the server runs; the y-protocols room machinery behind the WS endpoint lands
-// with tasks T007–T016 of specs/003-unify-collab-yjs/tasks/collaboration-service.md.
+// The standalone-default adapters (single-pod fan-out, in-process metadata/blob,
+// open auth) keep this a single zero-dependency binary; any durable backend is
+// selected purely by configuration (SC-012). The composition root lives in
+// internal/app so cmd/server and the e2e suite boot through identical wiring.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/alkem-io/collaboration-service/internal/app"
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
@@ -36,12 +38,12 @@ func run() int {
 		return 1
 	}
 
-	deps, cleanup, err := buildDeps(cfg, logger)
+	application, err := app.New(cfg, logger)
 	if err != nil {
-		logger.Error("failed to wire adapters", zap.Error(err))
+		logger.Error("failed to assemble service", zap.Error(err))
 		return 1
 	}
-	defer cleanup()
+	defer application.Close()
 	logger.Info("collaboration core wired",
 		zap.String("fanout", string(cfg.Fanout)),
 		zap.String("metadata_store", string(cfg.MetaStore)),
@@ -49,22 +51,7 @@ func run() int {
 		zap.String("auth_mode", string(cfg.AuthMode)),
 	)
 
-	router, manager := buildRouter(cfg, deps, logger)
-
-	// In Alkemio mode, start the RabbitMQ lifecycle consumer (document.deleted
-	// cascade + optional created/access_changed). Standalone uses the HTTP API.
-	var lifecycleClosers []func()
-	if err := buildLifecycle(cfg, manager, logger, &lifecycleClosers); err != nil {
-		logger.Error("failed to start lifecycle consumer", zap.Error(err))
-		return 1
-	}
-	defer func() {
-		for _, c := range lifecycleClosers {
-			c()
-		}
-	}()
-
-	srv := newHTTPServer(cfg.Port, router)
+	srv := newHTTPServer(cfg.Port, application.Handler)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -87,9 +74,8 @@ func run() int {
 	}
 
 	// Stop accepting new connections, then release every live room (persisting a
-	// final snapshot per room) so in-flight edits survive the shutdown.
+	// final snapshot per room) via application.Close so in-flight edits survive.
 	shutdownServer(srv, logger)
-	manager.Close()
 	logger.Info("server stopped")
 	return exitCode
 }

@@ -1,0 +1,96 @@
+name: CI — Integration & Coverage Gate
+
+# Brings the build-tagged integration suites (redis / postgres / rabbitmq / s3)
+# and the e2e suite (incl. the real yjs + y-protocols JS-client interop harness)
+# into CI against live backends, then enforces the ≥95% combined coverage gate
+# (T017.5, SC-008/SC-011). The fast lint · race · build lane stays in ci-test.yml
+# (central go-ci@v1); this workflow is the durable-backend + coverage lane.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  integration-coverage:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: collab
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: collab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U collab -d collab_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_DEFAULT_BUCKETS: collab-test
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local || curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      # Integration-suite backend wiring (the build-tagged tests skip when unset).
+      POSTGRES_TEST_DSN: postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
+      RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
+      S3_TEST_ENDPOINT: http://localhost:9000
+      S3_TEST_BUCKET: collab-test
+      S3_TEST_REGION: us-east-1
+      S3_TEST_ACCESS_KEY: minioadmin
+      S3_TEST_SECRET_KEY: minioadmin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node (for the y-protocols JS-interop harness)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install JS-interop harness deps
+        working-directory: test/e2e/jsinterop
+        run: npm ci
+
+      - name: Wait for MinIO bucket
+        # bitnami/minio provisions MINIO_DEFAULT_BUCKETS on boot; give it a beat.
+        run: sleep 5
+
+      - name: Integration + e2e + coverage gate (≥95%)
+        run: ./.scripts/coverage-gate.sh 95.0
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage-merged.out
+          if-no-files-found: ignore

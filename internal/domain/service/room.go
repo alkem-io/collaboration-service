@@ -731,7 +731,7 @@ func (r *Room) forcedAwarenessRemoval(clientID ycrdt.Number) []byte {
 		"lastUpdated": ycrdt.GetUnixTime(),
 	}
 	update := ycrdt.EncodeAwarenessUpdate(r.awareness, []ycrdt.Number{clientID}, nil)
-	return protocol.EncodeAwarenessUpdateMessage(update)
+	return encodeAwarenessFrame(update)
 }
 
 // dropMember removes a member from the registry, evicts its awareness, and
@@ -784,12 +784,19 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		return r.handleSync(src, payload)
 
 	case model.WireAwareness:
-		// Learn the member's y-awareness client id (for server-forced eviction on
-		// leave), then apply to the room's awareness (so a late joiner gets a
-		// snapshot), fan the raw frame out to local members, and publish it to peer
-		// pods on the awareness:{id} channel. Never persisted (FR-008).
-		r.trackAwarenessID(src, payload)
-		ycrdt.ApplyAwarenessUpdate(r.awareness, payload, updateOrigin{src: src})
+		// The awareness payload is a canonical y-protocols length-prefixed body
+		// (awareness_wire.go). Decode it once to the raw update body, then learn
+		// the member's y-awareness client id (for server-forced eviction on
+		// leave) and apply it to the room's awareness (so a late joiner gets a
+		// snapshot). Fan the raw frame out to local members verbatim and publish
+		// it to peer pods on the awareness:{id} channel. Never persisted (FR-008).
+		body, ok := decodeAwarenessBody(payload)
+		if !ok {
+			r.logger.Warn("dropping malformed awareness frame")
+			return false
+		}
+		r.trackAwarenessID(src, body)
+		ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: src})
 		r.broadcast(frame, src)
 		r.publishToPeers(frame, true)
 		return false
@@ -876,7 +883,12 @@ func (r *Room) applyPeerEphemeral(frame []byte) {
 	}
 	switch model.WireMessageType(msgType) {
 	case model.WireAwareness:
-		ycrdt.ApplyAwarenessUpdate(r.awareness, payload, updateOrigin{src: 0, peer: true})
+		body, ok := decodeAwarenessBody(payload)
+		if !ok {
+			r.logger.Warn("dropping malformed peer awareness frame")
+			return
+		}
+		ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: 0, peer: true})
 		r.broadcast(frame, 0)
 	case model.WireEphemeral:
 		r.broadcast(frame, 0)
@@ -1147,7 +1159,7 @@ func awarenessSnapshot(aw *ycrdt.Awareness) []byte {
 		clients = append(clients, id)
 	}
 	update := ycrdt.EncodeAwarenessUpdate(aw, clients, nil)
-	return protocol.EncodeAwarenessUpdateMessage(update)
+	return encodeAwarenessFrame(update)
 }
 
 // stopTimer drains a timer's channel if it already fired, so a subsequent Reset

@@ -71,3 +71,13 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap exposes the wrapped http.ResponseWriter so that interfaces the wrapper
+// does not itself implement — notably http.Hijacker, which coder/websocket needs
+// to take over the connection for a WebSocket upgrade — are reachable through it.
+// This is the Go 1.20+ http.ResponseController convention; without it the
+// /collab/{documentId} upgrade fails with 501 ("does not implement
+// http.Hijacker") because statusWriter shadows the underlying Hijacker.
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

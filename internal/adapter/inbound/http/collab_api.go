@@ -46,6 +46,13 @@ type CreateDocumentRequest struct {
 	// OwnerRef is the parent Alkemio entity that owns the document's lifecycle.
 	// Optional.
 	OwnerRef string `json:"ownerRef,omitempty"`
+	// AuthorizationPolicyID is the Alkemio authorization policy the per-document
+	// authZ adapter evaluates against (OPEN-1). Optional in open/standalone mode
+	// (authZ grants everything); in authzeval mode it is required for the policy
+	// resolver to evaluate read/update-content. The bus pre-register
+	// (collaboration-save) carries the same field, so the standalone REST path
+	// keeps parity with it.
+	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 }
 
 // CreateDocumentResponse is returned by POST /collab/{documentId}: the registered
@@ -127,9 +134,10 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta := model.Metadata{
-		ID:          model.DocumentID(id),
-		ContentType: content,
-		OwnerRef:    req.OwnerRef,
+		ID:                    model.DocumentID(id),
+		ContentType:           content,
+		OwnerRef:              req.OwnerRef,
+		AuthorizationPolicyID: req.AuthorizationPolicyID,
 	}
 	if err := h.Lifecycle.PreRegister(r.Context(), meta); err != nil {
 		ErrorResponse{Error: "failed to register document"}.Render(w, http.StatusInternalServerError)

@@ -247,6 +247,62 @@ func TestEvaluateTransportDialErrorFailsClosed(t *testing.T) {
 	}
 }
 
+// TestEvaluateEmptyPolicyIDFailsClosed defends Evaluate's empty-policy branch
+// (auth.go:146): a document whose resolver yields an empty (but non-error)
+// policy id must be rejected with an error — evaluating against an empty policy
+// would ask the auth service an unanswerable question, so the adapter fails
+// closed instead of forwarding it.
+func TestEvaluateEmptyPolicyIDFailsClosed(t *testing.T) {
+	// The backend would grant if reached; it must NOT be reached.
+	var reached atomic.Bool
+	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Store(true)
+		writeEval(w, true, "")
+	}))
+	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": ""}})
+
+	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err == nil {
+		t.Error("expected an error for a document whose policy id resolves to empty")
+	}
+	if reached.Load() {
+		t.Error("the auth service must not be asked when the policy id is empty")
+	}
+}
+
+// TestEvaluateBadServiceURLFailsClosed defends doEvaluate's request-build branch
+// (auth.go:169): a ServiceURL carrying an illegal control character makes
+// http.NewRequestWithContext fail. New does not validate URL syntax, so this is
+// reachable, and the failure must surface as an error (fail closed), never a
+// clean allow.
+func TestEvaluateBadServiceURLFailsClosed(t *testing.T) {
+	adapter := New(Config{ServiceURL: "http://bad\x7fhost:1234"}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
+	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	if err == nil {
+		t.Error("expected an error building a request to a malformed ServiceURL")
+	}
+	if dec.Allowed {
+		t.Error("a request-build failure must never yield Allowed=true")
+	}
+}
+
+// TestEvaluate503WithoutStructuredBodyFailsClosed defends doEvaluate's
+// generic-unavailable branch (auth.go:191): a 503 with NO structured error body
+// still must be an error (service unavailable), not decoded as a decision —
+// distinct from the 503-with-error-body case already covered.
+func TestEvaluate503WithoutStructuredBodyFailsClosed(t *testing.T) {
+	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // empty body
+	}))
+	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
+	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	if err == nil {
+		t.Error("expected an error on a 503 with no structured error body")
+	}
+	if dec.Allowed {
+		t.Error("a 503 must never yield Allowed=true")
+	}
+}
+
 func writeEval(w http.ResponseWriter, allowed bool, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"allowed": allowed, "reason": reason})
