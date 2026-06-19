@@ -125,6 +125,21 @@ func TestCreateDocumentRejectsMalformedBody(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentRejectsUnknownField(t *testing.T) {
+	h := &CollabAPIHandler{Lifecycle: &fakeLifecycle{}}
+	r := newCollabRouter(h)
+
+	// An unknown field must be rejected (DisallowUnknownFields) so client mistakes
+	// surface instead of being silently ignored.
+	req := httptest.NewRequest(http.MethodPost, "/collab/doc-x",
+		strings.NewReader(`{"contentType":"memo","bogusField":"x"}`))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unknown field", rr.Code)
+	}
+}
+
 // TestDeleteDocumentCascades asserts DELETE /collab/{id} runs the same cascade
 // purge as the bus event and returns 200 (FR-023, T016).
 func TestDeleteDocumentCascades(t *testing.T) {
