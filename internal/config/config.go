@@ -80,6 +80,9 @@ type Config struct {
 	BlobStore BlobStoreMode
 	// AuthMode selects the auth adapter pair (open default for standalone).
 	AuthMode AuthMode
+	// Auth holds the handshake auth settings shared by every auth mode (the
+	// request header the WS handshake reads the identity token from).
+	Auth AuthConfig
 
 	// Redis holds the redis fan-out settings (FANOUT_MODE=redis).
 	Redis RedisConfig
@@ -150,6 +153,21 @@ type S3Config struct {
 	UsePathStyle    bool
 }
 
+// AuthConfig holds the handshake auth settings common to both auth modes.
+type AuthConfig struct {
+	// TokenHeader is the request header the WS handshake reads the Alkemio
+	// identity token from (AUTH_TOKEN_HEADER, default "Authorization"). The
+	// Alkemio deployment terminates auth at the gateway and forwards the resolved
+	// actor id in a header (e.g. X-Alkemio-Actor-Id), so it sets this to that
+	// header; standalone/open mode keeps the bearer-style Authorization default.
+	TokenHeader string
+}
+
+// DefaultAuthTokenHeader is the request header the WS handshake reads the
+// identity token from when AUTH_TOKEN_HEADER is unset — the bearer-style default
+// the standalone/open mode uses.
+const DefaultAuthTokenHeader = "Authorization"
+
 // AuthZEvalConfig configures the authzeval auth backend.
 type AuthZEvalConfig struct {
 	ServiceURL              string
@@ -195,6 +213,9 @@ func Load() (*Config, error) {
 		MetaStore: metaStore,
 		BlobStore: blobStore,
 		AuthMode:  authMode,
+		Auth: AuthConfig{
+			TokenHeader: getenv("AUTH_TOKEN_HEADER", DefaultAuthTokenHeader),
+		},
 	}
 
 	// Populate + fail-fast validate the settings for whichever non-default
