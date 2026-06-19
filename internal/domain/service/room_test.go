@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,8 @@ type fakeClient struct {
 	aware   *ycrdt.Awareness
 	handler *protocol.SyncHandler
 
+	partitioned atomic.Bool // when true, Send silently drops inbound frames
+
 	mu        sync.Mutex
 	session   *Session
 	received  [][]byte // every frame the room sent us, in order
@@ -45,12 +48,25 @@ func newFakeClient(t *testing.T) *fakeClient {
 	return &fakeClient{t: t, doc: doc, aware: aw, handler: h}
 }
 
+// goOffline simulates a network partition: inbound frames from the room are
+// silently dropped until goOnline is called. Outbound forwarding (observeUpdates)
+// is a separate concern and must be stopped by the caller (by not calling
+// observeUpdates before goOffline, or by disconnecting the observer).
+func (c *fakeClient) goOffline() { c.partitioned.Store(true) }
+
+// goOnline ends the simulated partition: subsequent Send calls apply normally.
+func (c *fakeClient) goOnline() { c.partitioned.Store(false) }
+
 // Send implements service.Conn: the room calls it (from the room's run loop
 // goroutine) to deliver a frame. It applies sync/awareness frames to the local
 // doc so the client converges, recording control/ephemeral frames for asserts.
 // All local-doc access is guarded by c.mu so the room goroutine and the test
 // goroutine never touch the doc concurrently (the doc is not thread-safe).
+// When the client is partitioned (goOffline), frames are silently dropped.
 func (c *fakeClient) Send(frame []byte) error {
+	if c.partitioned.Load() {
+		return nil // drop: simulated network partition
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cp := append([]byte(nil), frame...)
