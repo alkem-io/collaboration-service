@@ -64,8 +64,11 @@ func testAppHTTP(t *testing.T, cfg *config.Config) string {
 }
 
 // standaloneConfig is the zero-dependency single-pod config (open/inmemory/
-// inline) with fast room cadences so persistence/idle-release happen quickly in
-// a test. It mirrors what config.Load() produces for the standalone defaults.
+// inline). It sets deliberately fast room cadences — a short save debounce and a
+// short idle-release — so the persistence round-trip tests actually force a
+// snapshot persist AND an idle-release (cold reload) within test time, rather
+// than reconnecting to a still-live room. The production defaults (500ms / 30s)
+// are exercised by the unit suite.
 func standaloneConfig() *config.Config {
 	return &config.Config{
 		Port:      0,
@@ -80,6 +83,8 @@ func standaloneConfig() *config.Config {
 			UpdateBurst:                   50,
 			CollaboratorInactivitySeconds: 120,
 			ContributionWindowSeconds:     60,
+			SaveDebounceMillis:            20, // persist quickly so the round-trip is fast
+			IdleReleaseSeconds:            0,  // release the room immediately on last leave
 		},
 	}
 }

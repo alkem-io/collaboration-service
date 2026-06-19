@@ -125,6 +125,12 @@ type LimitsConfig struct {
 	// ContributionWindowSeconds is the contribution-metric flush cadence
 	// (CONTRIBUTION_WINDOW_SECONDS, default 60s; 0 disables).
 	ContributionWindowSeconds int
+	// IdleReleaseSeconds releases an empty room this long after its last member
+	// leaves (IDLE_RELEASE_SECONDS, default 30s; 0 releases immediately).
+	IdleReleaseSeconds int
+	// SaveDebounceMillis is the quiet period after the last edit before a snapshot
+	// is persisted (SAVE_DEBOUNCE_MILLIS, default 500ms).
+	SaveDebounceMillis int
 }
 
 // RedisConfig configures the redis fan-out broadcaster.
@@ -268,6 +274,8 @@ const (
 	defaultUpdateRatePerSec          = 50
 	defaultCollaboratorInactivitySec = 120
 	defaultContributionWindowSec     = 60
+	defaultIdleReleaseSec            = 30  // matches service.DefaultRoomConfig().IdleTimeout
+	defaultSaveDebounceMillis        = 500 // matches service.DefaultRoomConfig().SaveDebounce
 )
 
 // loadLimitsConfig reads the Wave-3 enforcement/presence tunables, applying the
@@ -281,6 +289,8 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		UpdateBurst:                   getenvInt("UPDATE_BURST", 0),
 		CollaboratorInactivitySeconds: getenvInt("COLLABORATOR_INACTIVITY_SECONDS", defaultCollaboratorInactivitySec),
 		ContributionWindowSeconds:     getenvInt("CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec),
+		IdleReleaseSeconds:            getenvInt("IDLE_RELEASE_SECONDS", defaultIdleReleaseSec),
+		SaveDebounceMillis:            getenvInt("SAVE_DEBOUNCE_MILLIS", defaultSaveDebounceMillis),
 	}
 	for name, v := range map[string]int{
 		"MAX_DOC_BYTES":                   lc.MaxDocBytes,
@@ -289,6 +299,8 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		"UPDATE_BURST":                    lc.UpdateBurst,
 		"COLLABORATOR_INACTIVITY_SECONDS": lc.CollaboratorInactivitySeconds,
 		"CONTRIBUTION_WINDOW_SECONDS":     lc.ContributionWindowSeconds,
+		"IDLE_RELEASE_SECONDS":            lc.IdleReleaseSeconds,
+		"SAVE_DEBOUNCE_MILLIS":            lc.SaveDebounceMillis,
 	} {
 		if v < 0 {
 			return LimitsConfig{}, fmt.Errorf("%s must be >= 0 (0 disables)", name)

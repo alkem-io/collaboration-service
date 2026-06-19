@@ -175,14 +175,16 @@ func TestFileServiceBlobOffloadRoundTrip(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	a.insertMemo("offloaded-to-file-service ")
 
-	// Let the debounce persist the snapshot to file-service, then disconnect so
-	// the room idle-releases (a final snapshot save).
-	time.Sleep(700 * time.Millisecond)
+	// Let the (short, test-configured) debounce persist the snapshot to
+	// file-service, then disconnect. With IdleReleaseSeconds=0 the room releases
+	// immediately on the last leave (final snapshot save) and drops out of the
+	// registry, so the reconnect below is a genuine cold reload.
+	time.Sleep(100 * time.Millisecond)
 	if stub.blobCount() == 0 {
 		t.Fatal("file-service received no snapshot — blob was not offloaded")
 	}
 	a.close()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// A fresh client reconnects; the room rehydrates by fetching the snapshot from
 	// file-service via the stored content pointer.
