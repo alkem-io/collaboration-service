@@ -101,8 +101,14 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 		MetaStore: config.MetaStoreRabbitMQ,
 		BlobStore: config.BlobStoreInline,
 		AuthMode:  config.AuthModeOpen,
-		// Per-run unique queue so concurrent/previous runs cannot leak state.
-		RabbitMQ: config.RabbitMQConfig{URL: url, Queue: "collab-app-int-" + strconv.FormatInt(time.Now().UnixNano(), 36)},
+		// Per-run unique queues so concurrent/previous runs cannot leak state. The
+		// lifecycle consumer binds its OWN queue, distinct from the metastore RPC
+		// queue (a shared queue round-robin-steals fetch/save RPCs).
+		RabbitMQ: config.RabbitMQConfig{
+			URL:            url,
+			Queue:          "collab-app-int-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+			LifecycleQueue: "collab-app-int-lifecycle-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		},
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
