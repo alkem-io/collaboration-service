@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"testing"
 )
 
@@ -87,6 +88,33 @@ func TestRabbitMQAssemblesURL(t *testing.T) {
 	}
 	if cfg.RabbitMQ.Queue != "alkemio-collaboration" {
 		t.Errorf("RabbitMQ.Queue = %q", cfg.RabbitMQ.Queue)
+	}
+}
+
+func TestRabbitMQEscapesCredentials(t *testing.T) {
+	// A password with reserved URL characters must be percent-escaped so the
+	// assembled amqp URL stays well-formed (and parseable by the amqp client).
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "q")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("RABBITMQ_USER", "u@ser")
+	t.Setenv("RABBITMQ_PASSWORD", "p@ss:w/rd")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	u, err := url.Parse(cfg.RabbitMQ.URL)
+	if err != nil {
+		t.Fatalf("assembled amqp URL is not parseable: %q (%v)", cfg.RabbitMQ.URL, err)
+	}
+	if u.User.Username() != "u@ser" {
+		t.Errorf("username round-trip = %q", u.User.Username())
+	}
+	if pw, _ := u.User.Password(); pw != "p@ss:w/rd" {
+		t.Errorf("password round-trip = %q", pw)
+	}
+	if u.Host != "rmq:5672" {
+		t.Errorf("host = %q", u.Host)
 	}
 }
 
