@@ -38,6 +38,7 @@ type fakeClient struct {
 	received  [][]byte // every frame the room sent us, in order
 	ephemeral [][]byte // type-2 ephemeral payloads (post-frame)
 	control   []model.ControlMessage
+	blocked   bool // simulates the inbound side of a network partition: Send drops frames
 }
 
 func newFakeClient(t *testing.T) *fakeClient {
@@ -76,6 +77,11 @@ func (c *fakeClient) Send(frame []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Drop all inbound frames while partitioned — simulates the client being
+	// unreachable on the network (it cannot receive the server's fan-out).
+	if c.blocked {
+		return nil
+	}
 	cp := append([]byte(nil), frame...)
 	c.received = append(c.received, cp)
 
