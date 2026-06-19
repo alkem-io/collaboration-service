@@ -120,6 +120,29 @@ func TestDocumentCreatedToleratesPreRegisterError(t *testing.T) {
 	c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-x", ContentType: "memo"}))
 }
 
+// TestDocumentCreatedNormalizesContentType asserts an unknown/empty content type
+// on a create event is defaulted to memo rather than persisted verbatim (which
+// would write invalid metadata that breaks convention application).
+func TestDocumentCreatedNormalizesContentType(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want model.ContentType
+	}{
+		{"", model.ContentTypeMemo},
+		{"bogus", model.ContentTypeMemo},
+		{"whiteboard", model.ContentTypeWhiteboard},
+	} {
+		mgr := &fakeManager{}
+		c := newConsumer(mgr)
+		c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-n", ContentType: tc.raw}))
+		mgr.mu.Lock()
+		if len(mgr.registered) != 1 || mgr.registered[0].ContentType != tc.want {
+			t.Errorf("contentType %q normalized to %v, want %v", tc.raw, mgr.registered, tc.want)
+		}
+		mgr.mu.Unlock()
+	}
+}
+
 // TestDocumentAccessChangedReEvaluates asserts document.access_changed triggers a
 // re-evaluation for the document (T014/T015).
 func TestDocumentAccessChangedReEvaluates(t *testing.T) {

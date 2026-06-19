@@ -144,9 +144,10 @@ type Room struct {
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
 	policyID string
-	// maxConns is the room's effective connection cap: the document metadata's
-	// maxCollaborators when known, else the configured fallback (T014). Zero
-	// disables the cap.
+	// maxConns is the room's effective connection cap. Today it is the configured
+	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
+	// document's maxCollaborators (carried on the bus metadata contract) is not yet
+	// wired into the join path (T014 follow-up). Zero disables the cap.
 	maxConns int
 
 	// contributors is the set of actor ids that mutated the document in the
@@ -218,9 +219,10 @@ type Limits struct {
 	// MaxDocBytes rejects an update that would grow the encoded snapshot past
 	// this size (epic R9 default ~32 MiB). Zero disables the size check.
 	MaxDocBytes int
-	// MaxConnsPerRoom caps concurrent connections to a room — sourced from the
-	// document metadata's maxCollaborators when known, else this fallback (epic
-	// R9 default 50). Zero disables the connection cap.
+	// MaxConnsPerRoom caps concurrent connections to a room (epic R9 default 50).
+	// This is the global fallback; per-document refinement from a document's
+	// maxCollaborators is a future enhancement (not yet wired into the cap). Zero
+	// disables the connection cap.
 	MaxConnsPerRoom int
 	// UpdateRatePerSec is the per-connection token-bucket refill rate in messages
 	// per second (epic R9 default ~50/s). Zero disables rate limiting.

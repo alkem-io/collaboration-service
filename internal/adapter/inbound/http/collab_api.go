@@ -40,10 +40,12 @@ const maxCreateBody = 4 << 10
 // content type and optional lifecycle owner. An absent content type defaults to
 // memo.
 type CreateDocumentRequest struct {
-	// ContentType selects the document convention (memo | whiteboard).
-	ContentType string `json:"contentType"`
+	// ContentType selects the document convention (memo | whiteboard). Optional —
+	// an absent/empty value defaults to memo.
+	ContentType string `json:"contentType,omitempty"`
 	// OwnerRef is the parent Alkemio entity that owns the document's lifecycle.
-	OwnerRef string `json:"ownerRef"`
+	// Optional.
+	OwnerRef string `json:"ownerRef,omitempty"`
 }
 
 // CreateDocumentResponse is returned by POST /collab/{documentId}: the registered
