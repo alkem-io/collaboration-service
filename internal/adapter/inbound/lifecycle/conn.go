@@ -14,8 +14,11 @@ import (
 type Config struct {
 	// URL is the amqp:// connection string (shared with the metastore bus).
 	URL string
-	// Queue is the queue the server publishes lifecycle events to. When it
-	// matches the metastore RPC queue the consumer ignores non-lifecycle traffic.
+	// Queue is the DEDICATED lifecycle queue the consumer binds — its own queue,
+	// distinct from the metastore RPC queue (config.RabbitMQ.LifecycleQueue,
+	// default alkemio-collaboration-lifecycle). It MUST NOT be the metastore RPC
+	// queue: RabbitMQ round-robins a queue across its consumers, so sharing one
+	// queue would let this consumer steal metastore fetch/save RPCs and drop them.
 	Queue string
 }
 
@@ -55,7 +58,12 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("declare lifecycle queue: %w", err)
 	}
-	deliveries, err := ch.Consume(cfg.Queue, "", true, false, false, false, nil)
+	// Manual ack (autoAck=false): a lifecycle event (e.g. document.deleted) must be
+	// acknowledged only AFTER its idempotent purge succeeds, so a crash or a backend
+	// failure between delivery and completion redelivers the event rather than
+	// silently dropping it (auto-ack is at-most-once; the cascade is a correctness
+	// requirement — no orphan documents).
+	deliveries, err := ch.Consume(cfg.Queue, "", false, false, false, false, nil)
 	if err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
@@ -67,11 +75,36 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	return c, nil
 }
 
-// consume routes each delivery to handle until the channel closes.
+// consume routes each delivery to handle and acks/nacks per the outcome, until
+// the channel closes. A successful (or idempotent / unactionable) event is acked;
+// a genuine processing failure is nacked with a bounded requeue — requeued once,
+// then dropped (nack without requeue) on the redelivery so a permanently failing
+// "poison" message cannot loop forever.
 func (c *Consumer) consume(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
-		c.handle(context.Background(), d.Body)
+		switch c.handle(context.Background(), d.Body) {
+		case ackSuccess:
+			if err := d.Ack(false); err != nil {
+				c.logger.Warn("lifecycle ack failed", zap.Error(err))
+			}
+		case nackRequeue:
+			requeue := shouldRequeue(d.Redelivered)
+			if !requeue {
+				c.logger.Warn("lifecycle event still failing on redelivery; dropping to avoid a poison loop")
+			}
+			if err := d.Nack(false, requeue); err != nil {
+				c.logger.Warn("lifecycle nack failed", zap.Error(err))
+			}
+		}
 	}
+}
+
+// shouldRequeue implements the bounded-requeue rule for a failed lifecycle event:
+// requeue only on the first attempt; on a redelivery, drop (no requeue) so a
+// permanently failing "poison" message cannot loop forever. The purge/pre-register
+// is idempotent, so re-processing on the single requeue is safe.
+func shouldRequeue(redelivered bool) bool {
+	return !redelivered
 }
 
 // Close tears down the channel and connection.

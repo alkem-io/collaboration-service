@@ -67,41 +67,63 @@ type Consumer struct {
 	ch   *amqp.Channel
 }
 
-// handle decodes one event body and routes it to the Manager. An unparseable
-// body or an unrelated pattern is ignored (the lifecycle consumer shares the bus
-// with metastore RPC replies and other traffic). A cascade error is logged and
-// dropped — idempotency means a redelivery or an absent document is not fatal.
-func (c *Consumer) handle(ctx context.Context, body []byte) {
+// ackAction tells consume how to acknowledge a delivery after handle processed it.
+type ackAction int
+
+const (
+	// ackSuccess acks the delivery: it was processed, idempotently a no-op, or is
+	// unactionable (unparseable / unrelated pattern) so requeuing it is pointless.
+	ackSuccess ackAction = iota
+	// nackRequeue nacks the delivery for a bounded requeue: a genuine processing
+	// failure that may succeed on retry (a transient backend error). consume
+	// requeues once, then drops the message to avoid a poison loop.
+	nackRequeue
+)
+
+// handle decodes one event body and routes it to the Manager, returning how the
+// delivery should be acknowledged. An unparseable body or an unrelated pattern is
+// acked (it shares the bus with metastore RPC replies and other traffic — there is
+// nothing to retry). A genuine cascade/pre-register failure returns nackRequeue so
+// the event is redelivered (bounded by consume) rather than silently lost — the
+// cascade is a correctness requirement, idempotent on redelivery.
+func (c *Consumer) handle(ctx context.Context, body []byte) ackAction {
 	var env envelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return
+		return ackSuccess // not a lifecycle envelope we can act on.
 	}
 	switch env.Pattern {
 	case PatternDocumentDeleted:
-		c.handleDeleted(ctx, env.Data)
+		return c.handleDeleted(ctx, env.Data)
 	case PatternDocumentCreated:
-		c.handleCreated(ctx, env.Data)
+		return c.handleCreated(ctx, env.Data)
 	case PatternDocumentAccessChanged:
 		c.handleAccessChanged(env.Data)
+		return ackSuccess
 	default:
-		// Not a lifecycle event — ignore.
+		// Not a lifecycle event — ack (nothing to retry).
+		return ackSuccess
 	}
 }
 
-func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) {
+func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackAction {
 	var ev DeletedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return
+		return ackSuccess // malformed payload: nothing to retry.
 	}
 	if err := c.mgr.Purge(ctx, model.DocumentID(ev.ID)); err != nil {
-		c.logger.Warn("document delete cascade failed", zap.String("doc", ev.ID), zap.Error(err))
+		// The purge is idempotent (a not-found delete is success), so a returned
+		// error is a transient backend failure worth retrying — nack/requeue rather
+		// than ack-and-drop, or the document is orphaned.
+		c.logger.Warn("document delete cascade failed; requeueing", zap.String("doc", ev.ID), zap.Error(err))
+		return nackRequeue
 	}
+	return ackSuccess
 }
 
-func (c *Consumer) handleCreated(ctx context.Context, data json.RawMessage) {
+func (c *Consumer) handleCreated(ctx context.Context, data json.RawMessage) ackAction {
 	var ev CreatedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return
+		return ackSuccess // malformed payload: nothing to retry.
 	}
 	meta := model.Metadata{
 		ID:          model.DocumentID(ev.ID),
@@ -109,8 +131,10 @@ func (c *Consumer) handleCreated(ctx context.Context, data json.RawMessage) {
 		OwnerRef:    ev.OwnerRef,
 	}
 	if err := c.mgr.PreRegister(ctx, meta); err != nil {
-		c.logger.Warn("document create pre-register failed", zap.String("doc", ev.ID), zap.Error(err))
+		c.logger.Warn("document create pre-register failed; requeueing", zap.String("doc", ev.ID), zap.Error(err))
+		return nackRequeue
 	}
+	return ackSuccess
 }
 
 // normalizeContentType maps a bus-supplied content-type string to a known domain
