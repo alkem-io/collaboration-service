@@ -65,6 +65,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -80,9 +82,18 @@ jobs:
         working-directory: test/e2e/jsinterop
         run: npm ci
 
-      - name: Wait for MinIO bucket
-        # bitnami/minio provisions MINIO_DEFAULT_BUCKETS on boot; give it a beat.
-        run: sleep 5
+      - name: Wait for MinIO
+        # bitnami/minio provisions MINIO_DEFAULT_BUCKETS on boot. Poll the health
+        # endpoint instead of a fixed sleep so a slower start does not flake.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "MinIO ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become ready in time" >&2
+          exit 1
 
       - name: Integration + e2e + coverage gate (≥95%)
         run: ./.scripts/coverage-gate.sh 95.0
