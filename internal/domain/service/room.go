@@ -476,10 +476,10 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 func (r *Room) handlePeer(payload []byte, ephemeral bool) (mutated bool) {
 	if ephemeral {
 		// Could be a y-awareness update (apply to local awareness so late
-		// joiners on THIS pod see the cursor) or a custom ephemeral frame. Both
-		// are framed messages; reuse handleMessage's parsing by re-dispatching
-		// as if from a non-member source. A non-member src never echoes back to
-		// the bus because handleMessage only publishes for local-origin frames.
+		// joiners on THIS pod see the cursor) or a custom ephemeral frame.
+		// applyPeerEphemeral fans it to local members only — it deliberately does
+		// NOT route through handleMessage (which would re-publish the frame to the
+		// bus and ping-pong it between pods).
 		r.applyPeerEphemeral(payload)
 		return false
 	}

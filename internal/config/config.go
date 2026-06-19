@@ -12,6 +12,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 )
@@ -287,14 +289,17 @@ func loadAuthConfig(cfg *Config) error {
 // rabbitURL assembles the amqp:// URL from RABBITMQ_* (the legacy convention),
 // or returns RABBITMQ_URL verbatim when set.
 func rabbitURL() string {
-	if url := os.Getenv("RABBITMQ_URL"); url != "" {
-		return url
+	if raw := os.Getenv("RABBITMQ_URL"); raw != "" {
+		return raw
 	}
 	host := getenv("RABBITMQ_HOST", "localhost")
 	port := getenv("RABBITMQ_PORT", "5672")
 	user := getenv("RABBITMQ_USER", "guest")
 	pass := getenv("RABBITMQ_PASSWORD", "guest")
-	return fmt.Sprintf("amqp://%s:%s@%s:%s/", user, pass, host, port)
+	// Build via net/url so a user/password containing reserved characters
+	// (@ : / # ?) is percent-escaped rather than producing an ambiguous URL.
+	u := url.URL{Scheme: "amqp", User: url.UserPassword(user, pass), Host: net.JoinHostPort(host, port), Path: "/"}
+	return u.String()
 }
 
 // postgresDSN assembles a postgres DSN from ALKEMIO_DATABASE_* (matching the
@@ -312,7 +317,16 @@ func postgresDSN() string {
 	port := getenv("ALKEMIO_DATABASE_PORT", "5432")
 	pass := os.Getenv("ALKEMIO_DATABASE_PASSWORD")
 	sslmode := getenv("ALKEMIO_DATABASE_SSLMODE", "disable")
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode)
+	// Build via net/url so credentials with reserved characters are escaped and
+	// the DSN stays well-formed for pgx.ParseConfig.
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, pass),
+		Host:     net.JoinHostPort(host, port),
+		Path:     "/" + name,
+		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
+	}
+	return u.String()
 }
 
 func parseFanout(v string) (FanoutMode, error) {

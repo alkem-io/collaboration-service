@@ -58,6 +58,10 @@ func Migrate(dsn string) error {
 	if err != nil {
 		return fmt.Errorf("init migrate: %w", err)
 	}
+	// Close the migrate instance (source + DB handle) so the startup migration does
+	// not leak the iofs source / driver connection. We deliberately do not return
+	// these close errors — the migration itself already succeeded/failed above.
+	defer func() { _, _ = m.Close() }()
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
