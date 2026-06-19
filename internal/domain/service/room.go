@@ -455,7 +455,14 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	switch cmd.kind {
 	case cmdJoin:
 		stopTimer(idleTimer)
-		cmd.done <- r.handleJoin(cmd.conn, cmd.identity)
+		res := r.handleJoin(cmd.conn, cmd.identity)
+		cmd.done <- res
+		// A refused join (room full / access denied / fail-closed) admits no
+		// member. If the room is still empty, re-arm the idle timer so a freshly
+		// materialized room does not leak its goroutine forever.
+		if res.err != nil && len(r.members) == 0 {
+			armIdle()
+		}
 
 	case cmdLeave:
 		r.handleLeave(cmd.src)
@@ -568,10 +575,9 @@ func (r *Room) resolveMode(ctx context.Context, identity model.Identity) (model.
 }
 
 // handleLeave drops a connection and tells the remaining members the count
-// changed. Awareness eviction for the departed client is not forced here (see
-// dropMember); peers converge its vanished cursor via the client's own
-// local-state-clear on a clean close and via awareness TTL otherwise, with
-// explicit server-side eviction deferred to presence (T013).
+// changed. dropMember forces a server-side awareness eviction for the departed
+// client (T013) so peers stop rendering its cursor immediately rather than
+// waiting out the y-awareness TTL.
 func (r *Room) handleLeave(id connID) {
 	if !r.dropMember(id) {
 		return
@@ -649,6 +655,14 @@ func (r *Room) dropMember(id connID) bool {
 // connection that breaches its token bucket is disconnected with a control
 // message; other collaborators are unaffected.
 func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
+	// Ignore late frames from an already-evicted source. After disconnect/leave
+	// the socket can still forward buffered frames before its close propagates;
+	// without this gate an evicted connection could keep publishing awareness or
+	// ephemeral payloads to peers.
+	if _, ok := r.members[src]; !ok {
+		return false
+	}
+
 	in := bytes.NewBuffer(frame)
 	msgType, payload, err := protocol.ReadMessage(in)
 	if err != nil {

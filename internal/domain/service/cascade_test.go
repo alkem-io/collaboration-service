@@ -10,6 +10,7 @@ import (
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
+	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
 // errInjectedBlobDelete is the sentinel a test blob store returns from Delete to
@@ -174,4 +175,67 @@ func (d deleteFailingBlob) Get(ctx context.Context, p string) ([]byte, error) {
 }
 func (deleteFailingBlob) Delete(context.Context, string) error {
 	return errInjectedBlobDelete
+}
+
+// errInjectedMetaDelete is the sentinel a test metadata store returns from Delete
+// to drive the cascade metadata-delete error path.
+var errInjectedMetaDelete = errors.New("metadata delete failed")
+
+// failingMetaDelete is a MetadataStore whose Delete errors with a non-NotFound
+// error, so the purge cascade must surface it (not swallow it as idempotent).
+type failingMetaDelete struct{ port.MetadataStore }
+
+func (failingMetaDelete) Delete(context.Context, model.DocumentID) error {
+	return errInjectedMetaDelete
+}
+
+// TestPurgeLiveRoomSurfacesMetadataDeleteError asserts that a non-NotFound
+// metadata delete failure during the live-room cascade propagates out rather
+// than being treated as idempotent success (mirrors the blob-delete error path,
+// T015; CR presence.go purge idempotency).
+func TestPurgeLiveRoomSurfacesMetadataDeleteError(t *testing.T) {
+	open := authopen.New()
+	deps := Deps{
+		Metadata: failingMetaDelete{metainmem.New()},
+		Blob:     blobinline.New(),
+		Auth:     open,
+		AuthZ:    open,
+	}
+	mgr := NewManager(deps, RoomConfig{
+		SaveDebounce: 10 * time.Millisecond,
+		IdleTimeout:  10 * time.Second,
+		SendBuffer:   64,
+	}, nil, nil)
+
+	a := newFakeClient(t)
+	a.join(mgr, "meta-del-err", model.ContentTypeMemo)
+	a.observeUpdates()
+	a.insertText("x ")
+	waitFor(t, "snapshot persisted", func() bool { return hasControlKind(a, model.ControlSaved) })
+
+	if err := mgr.Purge(context.Background(), "meta-del-err"); err == nil {
+		t.Fatal("expected purge to surface the metadata delete error")
+	}
+}
+
+// TestPurgeDurableSurfacesMetadataDeleteError asserts the no-live-room durable
+// purge also surfaces a non-NotFound metadata delete failure (purgeDurable),
+// rather than swallowing it.
+func TestPurgeDurableSurfacesMetadataDeleteError(t *testing.T) {
+	open := authopen.New()
+	inner := metainmem.New()
+	// Seed a row so purgeDurable's Load succeeds and it proceeds to Delete.
+	if err := inner.Save(context.Background(), model.Metadata{ID: "durable-del-err", ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	deps := Deps{
+		Metadata: failingMetaDelete{inner},
+		Blob:     blobinline.New(),
+		Auth:     open,
+		AuthZ:    open,
+	}
+	mgr := NewManager(deps, fastConfig(), nil, nil)
+	if err := mgr.Purge(context.Background(), "durable-del-err"); err == nil {
+		t.Fatal("expected durable purge to surface the metadata delete error")
+	}
 }

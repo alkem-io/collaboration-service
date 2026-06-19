@@ -225,11 +225,19 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		Logger:  logger.Named("ws"),
 	}
 
-	router := httpAdapter.NewRouter(httpAdapter.Deps{
+	routerDeps := httpAdapter.Deps{
 		CollabHandler: collab,
-		CollabAPI:     &httpAdapter.CollabAPIHandler{Lifecycle: manager},
 		Logger:        logger,
-	})
+	}
+	// The standalone create/delete REST API is the no-bus lifecycle equivalent
+	// (T016). In Alkemio/rabbitmq mode the server owns document lifecycle over the
+	// bus (the lifecycle consumer), so these unauthenticated endpoints must NOT be
+	// exposed — leaving CollabAPI nil omits the REST surface entirely.
+	if cfg.MetaStore != config.MetaStoreRabbitMQ {
+		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{Lifecycle: manager}
+	}
+
+	router := httpAdapter.NewRouter(routerDeps)
 	return router, manager
 }
 

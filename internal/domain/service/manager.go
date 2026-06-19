@@ -226,7 +226,10 @@ func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
 			return err
 		}
 	}
-	return m.deps.Metadata.Delete(ctx, id)
+	if err := m.deps.Metadata.Delete(ctx, id); err != nil && !errors.Is(err, model.ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 // ReEvaluate asks a live room to re-run per-document authorization for its
