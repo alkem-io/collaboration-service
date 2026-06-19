@@ -72,9 +72,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serve wires the accepted connection to a room and pumps frames until the read
 // loop ends, then leaves the room and closes the socket.
 func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.DocumentID, content model.ContentType) {
-	// The request context is cancelled once Accept returns, so the connection
-	// runs on its own lifetime; the read loop's error (client close / network)
-	// is the termination signal.
+	// net/http cancels the request context once ServeHTTP returns, so we detach
+	// the connection's lifetime from it: the hijacked WebSocket outlives the
+	// handler return, and the read loop's error (client close / network) is the
+	// termination signal.
 	connCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
 
@@ -89,6 +90,11 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 	}
 	defer session.Leave()
 
+	// Start the writer before enqueuing any frames so the bounded send queue is
+	// drained as it fills: the initial handshake batch then cannot overflow a
+	// small SendBuffer and trip the slow-consumer eviction before delivery.
+	wc.startWriter()
+
 	// Drive the handshake: the server sends SyncStep1 (+ awareness snapshot) so
 	// the client replies with SyncStep2 and its own SyncStep1.
 	for _, frame := range initial {
@@ -96,8 +102,6 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 			return
 		}
 	}
-
-	wc.startWriter()
 
 	h.readLoop(connCtx, conn, session)
 }
