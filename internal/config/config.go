@@ -111,7 +111,8 @@ type LimitsConfig struct {
 	// (MAX_DOC_BYTES, default 32 MiB).
 	MaxDocBytes int
 	// MaxConnsPerRoom caps concurrent connections per room (MAX_CONNS_PER_ROOM,
-	// default 50; refined per-document by metadata maxCollaborators when known).
+	// default 50). This is the global fallback; per-document refinement from a
+	// document's maxCollaborators is a future enhancement, not yet wired in.
 	MaxConnsPerRoom int
 	// UpdateRatePerSec is the per-connection token-bucket refill rate
 	// (UPDATE_RATE_PER_SEC, default 50 msg/s).

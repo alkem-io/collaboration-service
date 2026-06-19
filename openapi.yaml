@@ -6,9 +6,6 @@ components:
           type: string
         ownerRef:
           type: string
-      required:
-        - contentType
-        - ownerRef
       type: object
     http.CreateDocumentResponse:
       properties:

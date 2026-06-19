@@ -105,11 +105,28 @@ func (c *Consumer) handleCreated(ctx context.Context, data json.RawMessage) {
 	}
 	meta := model.Metadata{
 		ID:          model.DocumentID(ev.ID),
-		ContentType: model.ContentType(ev.ContentType),
+		ContentType: normalizeContentType(ev.ContentType, c.logger, ev.ID),
 		OwnerRef:    ev.OwnerRef,
 	}
 	if err := c.mgr.PreRegister(ctx, meta); err != nil {
 		c.logger.Warn("document create pre-register failed", zap.String("doc", ev.ID), zap.Error(err))
+	}
+}
+
+// normalizeContentType maps a bus-supplied content-type string to a known domain
+// ContentType, defaulting an empty or unrecognized value to memo (rather than
+// persisting an invalid type that would later break convention application). An
+// unexpected value is logged so producer drift is observable.
+func normalizeContentType(raw string, logger *zap.Logger, docID string) model.ContentType {
+	switch model.ContentType(raw) {
+	case model.ContentTypeMemo, model.ContentTypeWhiteboard:
+		return model.ContentType(raw)
+	case "":
+		return model.ContentTypeMemo
+	default:
+		logger.Warn("document.created carried an unknown contentType; defaulting to memo",
+			zap.String("doc", docID), zap.String("contentType", raw))
+		return model.ContentTypeMemo
 	}
 }
 
