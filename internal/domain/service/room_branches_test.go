@@ -95,6 +95,14 @@ func TestDecodeAwarenessBodyRejectsMalformed(t *testing.T) {
 	if _, ok := decodeAwarenessBody(nil); ok {
 		t.Fatal("an empty payload must be rejected")
 	}
+	// A well-formed array followed by trailing bytes is non-canonical and must be
+	// rejected (a valid awareness payload is exactly one length-prefixed array).
+	if body, ok := decodeAwarenessBody([]byte{0x02, 0xAA, 0xBB}); !ok || len(body) != 2 {
+		t.Fatalf("a clean length-2 array must decode: ok=%v body=%v", ok, body)
+	}
+	if _, ok := decodeAwarenessBody([]byte{0x02, 0xAA, 0xBB, 0xCC}); ok {
+		t.Fatal("a payload with trailing bytes after the array must be rejected")
+	}
 }
 
 // --- manager.go ---

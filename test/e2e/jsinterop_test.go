@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,10 +44,11 @@ func jsInteropDir(t *testing.T) string {
 }
 
 // runHarness runs the JS harness in the given mode and returns its parsed result.
-// A non-zero exit (e.g. a decode error or timeout) is reported through the
-// returned result's OK=false plus the raw output for triage.
-func runHarness(ctx context.Context, t *testing.T, dir, wsBase, docID, mode, marker, expect string) (jsResult, string) {
-	t.Helper()
+// It returns an error (rather than calling t.Fatalf) so it is safe to call from a
+// spawned goroutine: t.Fatal/FailNow from a non-test goroutine is undefined. The
+// caller decides how to fail. A non-zero exit (e.g. a decode error or timeout) is
+// reported through the returned result's OK=false plus the raw output for triage.
+func runHarness(ctx context.Context, dir, wsBase, docID, mode, marker, expect string) (jsResult, string, error) {
 	url := wsBase + "/collab/" + docID + "?type=memo"
 	args := []string{
 		"harness.mjs",
@@ -66,13 +68,12 @@ func runHarness(ctx context.Context, t *testing.T, dir, wsBase, docID, mode, mar
 	for _, line := range strings.Split(raw, "\n") {
 		if strings.HasPrefix(line, "RESULT ") {
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "RESULT ")), &res); err != nil {
-				t.Fatalf("parse harness result %q: %v", line, err)
+				return res, raw, fmt.Errorf("parse harness result %q: %w", line, err)
 			}
-			return res, raw
+			return res, raw, nil
 		}
 	}
-	t.Fatalf("harness (%s) produced no RESULT line; output:\n%s", mode, raw)
-	return res, raw
+	return res, raw, fmt.Errorf("harness (%s) produced no RESULT line; output:\n%s", mode, raw)
 }
 
 // TestJSInteropTwoJSClients is the headline interop proof: two ACTUAL yjs +
@@ -94,17 +95,26 @@ func TestJSInteropTwoJSClients(t *testing.T) {
 	type out struct {
 		res jsResult
 		raw string
+		err error
 	}
 	obsCh := make(chan out, 1)
 	go func() {
-		res, raw := runHarness(ctx, t, dir, base, docID, "observe", "", "JS-EDIT")
-		obsCh <- out{res, raw}
+		// runHarness returns an error rather than calling t.Fatal so it is safe
+		// here in a spawned goroutine; the main goroutine asserts on out.err.
+		res, raw, err := runHarness(ctx, dir, base, docID, "observe", "", "JS-EDIT")
+		obsCh <- out{res, raw, err}
 	}()
 
 	// Give the observer a moment to connect and sync first.
 	time.Sleep(700 * time.Millisecond)
-	edit, editRaw := runHarness(ctx, t, dir, base, docID, "edit", "JS-EDIT", "")
+	edit, editRaw, err := runHarness(ctx, dir, base, docID, "edit", "JS-EDIT", "")
+	if err != nil {
+		t.Fatalf("edit harness: %v", err)
+	}
 	observed := <-obsCh
+	if observed.err != nil {
+		t.Fatalf("observe harness: %v", observed.err)
+	}
 
 	for _, c := range []struct {
 		name string
@@ -154,7 +164,10 @@ func TestJSInteropJSEditorGoObserver(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	edit, raw := runHarness(ctx, t, dir, base, docID, "edit", "JS-TO-GO", "")
+	edit, raw, err := runHarness(ctx, dir, base, docID, "edit", "JS-TO-GO", "")
+	if err != nil {
+		t.Fatalf("edit harness: %v", err)
+	}
 
 	if len(edit.DecodeErrors) > 0 {
 		t.Errorf("JS editor reported decode errors against the Go server: %+v\n%s", edit.DecodeErrors, raw)

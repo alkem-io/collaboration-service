@@ -23,6 +23,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -312,5 +313,11 @@ func secondConnectionRefused(t *testing.T, base, documentID string) bool {
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	_, _, readErr := conn.Read(ctx)
-	return readErr != nil
+	// A genuine server-side refusal closes the socket; a context-deadline timeout
+	// means the read hung (the connection was NOT refused) — do not count that as
+	// a refusal, or a regression that fails to shed the connection would pass.
+	if readErr == nil || errors.Is(readErr, context.DeadlineExceeded) {
+		return false
+	}
+	return true
 }

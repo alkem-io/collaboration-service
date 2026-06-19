@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -72,7 +73,11 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	if url == "" {
 		t.Skip("RABBITMQ_TEST_URL not set")
 	}
-	const queue = "collab-lifecycle-int"
+	// Per-run unique queue + doc id so a stale message from a previous/concurrent
+	// run cannot satisfy the assertions below (false positive).
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	queue := "collab-lifecycle-int-" + suffix
+	docID := "live-doc-" + suffix
 
 	mgr := &recordingManager{}
 	consumer, err := Connect(Config{URL: url, Queue: queue}, mgr, zap.NewNop())
@@ -81,13 +86,13 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = consumer.Close() })
 
-	publishEvent(t, url, queue, PatternDocumentCreated, CreatedEvent{ID: "live-doc", ContentType: "memo"})
-	publishEvent(t, url, queue, PatternDocumentDeleted, DeletedEvent{ID: "live-doc"})
+	publishEvent(t, url, queue, PatternDocumentCreated, CreatedEvent{ID: docID, ContentType: "memo"})
+	publishEvent(t, url, queue, PatternDocumentDeleted, DeletedEvent{ID: docID})
 
-	if !eventually(func() bool { return mgr.has(&mgr.created, "live-doc") }) {
+	if !eventually(func() bool { return mgr.has(&mgr.created, docID) }) {
 		t.Fatal("consumer never pre-registered the published document.created")
 	}
-	if !eventually(func() bool { return mgr.has(&mgr.purged, "live-doc") }) {
+	if !eventually(func() bool { return mgr.has(&mgr.purged, docID) }) {
 		t.Fatal("consumer never cascaded the published document.deleted")
 	}
 }
@@ -108,9 +113,17 @@ func publishEvent(t *testing.T, url, queue, pattern string, data any) {
 	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
 		t.Fatalf("declare queue: %v", err)
 	}
-	raw, _ := json.Marshal(data)
-	body, _ := json.Marshal(map[string]any{"pattern": pattern, "data": json.RawMessage(raw), "id": "int"})
-	if err := ch.PublishWithContext(context.Background(), "", queue, false, false, amqp.Publishing{
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal event data: %v", err)
+	}
+	body, err := json.Marshal(map[string]any{"pattern": pattern, "data": json.RawMessage(raw), "id": "int"})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
 		ContentType: "application/json",
 		Body:        body,
 	}); err != nil {

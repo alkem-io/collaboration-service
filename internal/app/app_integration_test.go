@@ -17,6 +17,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -100,7 +101,8 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 		MetaStore: config.MetaStoreRabbitMQ,
 		BlobStore: config.BlobStoreInline,
 		AuthMode:  config.AuthModeOpen,
-		RabbitMQ:  config.RabbitMQConfig{URL: url, Queue: "collab-app-int"},
+		// Per-run unique queue so concurrent/previous runs cannot leak state.
+		RabbitMQ: config.RabbitMQConfig{URL: url, Queue: "collab-app-int-" + strconv.FormatInt(time.Now().UnixNano(), 36)},
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -112,11 +114,12 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New (rabbitmq) should wire against a live broker: %v", err)
 	}
+	// Register teardown immediately so a failing assertion below does not leak the
+	// lifecycle consumer + bus client.
+	t.Cleanup(application.Close)
 	if application.Manager == nil {
 		t.Fatal("rabbitmq-mode app has no manager")
 	}
-	// Close tears down the lifecycle consumer + the bus client cleanly.
-	application.Close()
 }
 
 // --- a minimal real WS client (the richer harness lives behind the e2e tag) ---

@@ -173,6 +173,9 @@ func TestNewFailsWhenRootCannotBeCreated(t *testing.T) {
 // cannot be created, and Put must surface that error rather than report a
 // success that never durably wrote the snapshot.
 func TestPutFailsWhenTempCannotBeCreated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory does not block writes, so this fault injection cannot be simulated")
+	}
 	root := t.TempDir()
 	store, _ := New(root)
 	// Make the root (the Put target dir for a top-level pointer) read-only so
