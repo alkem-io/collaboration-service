@@ -49,6 +49,12 @@ func decodeAwarenessBody(payload []byte) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// Reject a non-canonical tail: a well-formed awareness payload is exactly one
+	// length-prefixed array, so any trailing bytes mean a malformed frame that
+	// must be dropped rather than partially applied.
+	if dec.Len() != 0 {
+		return nil, false
+	}
 	body, ok := v.([]byte)
 	return body, ok
 }

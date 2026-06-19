@@ -237,11 +237,9 @@ func TestOfflineReconnectNoLostEdits(t *testing.T) {
 
 	// Client B connects and syncs the baseline, then "goes offline": it does NOT
 	// observe/forward its edits yet (the partition), so its edits buffer locally.
-	// goOffline also drops inbound frames so the partition is truly bidirectional.
 	b := newFakeClient(t)
 	b.join(mgr, docID, model.ContentTypeMemo)
 	waitFor(t, "B synced baseline", func() bool { return contains(b.text(), "base") })
-	b.goOffline() // bidirectional partition: B neither sends nor receives
 
 	// Simulate a network partition: block inbound delivery so the room's fan-out
 	// of A's subsequent edits cannot reach B (both inbound and outbound are cut —

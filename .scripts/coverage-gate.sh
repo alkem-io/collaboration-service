@@ -41,16 +41,19 @@ trap 'rm -rf "$COVDIR"' EXIT
 # package itself, which carries no production statements).
 COVERPKG="$(go list ./... | grep -v '/test/e2e$' | paste -sd, -)"
 
-GOTESTFLAGS="${GOTESTFLAGS:--count=1}"
+# Read GOTESTFLAGS into an array so a multi-flag value (e.g. "-count=1 -v
+# -timeout 5m") is word-split into separate args, not passed as one token, while
+# still being safe under set -u.
+read -r -a GOTESTFLAGS <<< "${GOTESTFLAGS:--count=1}"
 
 echo "==> unit + integration lane (-tags integration)"
 # The integration tag is additive: this single invocation runs the unit tests AND
 # the build-tagged integration tests (which t.Skip when their backend env is unset).
-go test $GOTESTFLAGS -tags integration -coverpkg="$COVERPKG" \
+go test "${GOTESTFLAGS[@]}" -tags integration -coverpkg="$COVERPKG" \
   -coverprofile="$COVDIR/integration.cov" ./...
 
 echo "==> e2e lane (-tags e2e)"
-go test $GOTESTFLAGS -tags e2e -coverpkg="$COVERPKG" \
+go test "${GOTESTFLAGS[@]}" -tags e2e -coverpkg="$COVERPKG" \
   -coverprofile="$COVDIR/e2e.cov" ./test/e2e/...
 
 echo "==> merging coverage profiles"

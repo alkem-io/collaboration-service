@@ -45,6 +45,9 @@ func TestNewStandaloneWiresAndCloses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New (standalone): %v", err)
 	}
+	// Register teardown immediately so a failing assertion below cannot leak the
+	// started manager/backends. Close must be safe to call and idempotent.
+	t.Cleanup(application.Close)
 	if application.Handler == nil {
 		t.Fatal("standalone app has no HTTP handler")
 	}
@@ -63,10 +66,6 @@ func TestNewStandaloneWiresAndCloses(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("/healthz status = %d, want 200", resp.StatusCode)
 	}
-
-	// Close releases the (zero) live rooms and the backends; it must not panic and
-	// must be safe to call.
-	application.Close()
 }
 
 // TestNewFailsOnBroadcasterError asserts a redis fan-out selection with a

@@ -64,7 +64,11 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "read part", http.StatusBadRequest)
 			return
 		}
-		b, _ := io.ReadAll(part)
+		b, rerr := io.ReadAll(part)
+		if rerr != nil {
+			http.Error(w, "read part body", http.StatusBadRequest)
+			return
+		}
 		if part.FormName() == "file" {
 			fileBytes = b
 		} else {
@@ -73,6 +77,10 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if fields["storageBucketId"] == "" || fields["authorizationId"] == "" {
 		http.Error(w, "missing required field", http.StatusBadRequest)
+		return
+	}
+	if fileBytes == nil {
+		http.Error(w, "missing file part", http.StatusBadRequest)
 		return
 	}
 
