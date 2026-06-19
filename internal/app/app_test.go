@@ -247,6 +247,48 @@ func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
 	}
 }
 
+// spyAuth records the token string the handshake reads, so a test can assert
+// buildRouter threads the configured header through to the ws handler. It rejects
+// (no upgrade) so the request resolves to a plain 401 over httptest.
+type spyAuth struct{ token string }
+
+func (s *spyAuth) Authenticate(_ context.Context, token string) (model.Identity, error) {
+	s.token = token
+	return model.Identity{}, errors.New("denied")
+}
+
+// TestBuildRouterThreadsAuthTokenHeader asserts buildRouter wires
+// cfg.Auth.TokenHeader into the ws handshake, so the Alkemio deployment can point
+// the handshake at the gateway's resolved actor-id header
+// (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id) while standalone keeps Authorization.
+// Driven through the real router + handler with a spy Auth recording what header
+// the token came from.
+func TestBuildRouterThreadsAuthTokenHeader(t *testing.T) {
+	cfg := standaloneConfig()
+	cfg.Auth.TokenHeader = "X-Alkemio-Actor-Id"
+
+	spy := &spyAuth{}
+	deps, cleanup, err := buildDeps(cfg, zap.NewNop())
+	if err != nil {
+		t.Fatalf("buildDeps: %v", err)
+	}
+	defer cleanup()
+	deps.Auth = spy // override the open auth with the recording spy
+
+	router, mgr := buildRouter(cfg, deps, zap.NewNop())
+	defer mgr.Close()
+
+	req := httptest.NewRequest("GET", "/collab/doc-route", nil)
+	req.Header.Set("Authorization", "auth-tok")
+	req.Header.Set("X-Alkemio-Actor-Id", "actor-tok")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if spy.token != "actor-tok" {
+		t.Fatalf("handshake read token %q, want %q (TokenHeader not threaded through buildRouter)", spy.token, "actor-tok")
+	}
+}
+
 // TestNewAuthZEvalModeWires asserts AUTH_MODE=authzeval selects the authzeval
 // adapter pair (buildAuth's non-open branch) and New still assembles — the breaker
 // is lazy, so no live auth-evaluation service is needed to wire it.

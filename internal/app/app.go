@@ -311,6 +311,11 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		Auth:    deps.Auth,
 		Manager: manager,
 		Logger:  logger.Named("ws"),
+		// The handshake reads the identity token from this header. The Alkemio
+		// deployment terminates auth at the gateway and forwards the resolved actor
+		// id in a header (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id); standalone/open mode
+		// keeps the bearer-style Authorization default.
+		TokenHeader: cfg.Auth.TokenHeader,
 	}
 
 	routerDeps := httpAdapter.Deps{
