@@ -107,9 +107,23 @@ type RedisConfig struct {
 type RabbitMQConfig struct {
 	// URL is the amqp:// connection string (assembled from RABBITMQ_*).
 	URL string
-	// Queue is the Alkemio server collaboration queue (RABBITMQ_QUEUE).
+	// Queue is the Alkemio server collaboration metastore RPC queue
+	// (RABBITMQ_QUEUE) — the save/fetch request queue the server's metastore
+	// responder consumes.
 	Queue string
+	// LifecycleQueue is the SEPARATE queue the document lifecycle consumer binds
+	// (LIFECYCLE_QUEUE, default alkemio-collaboration-lifecycle). It MUST NOT be the
+	// metastore RPC queue: RabbitMQ round-robins a queue across its consumers, so
+	// sharing one queue would let the lifecycle consumer steal metastore
+	// fetch/save RPCs and silently drop them (memo joins then time out). Giving the
+	// lifecycle consumer its own queue keeps the two consumers independent.
+	LifecycleQueue string
 }
+
+// DefaultLifecycleQueue is the default queue name the document lifecycle consumer
+// binds when LIFECYCLE_QUEUE is unset — distinct from the metastore RPC queue so
+// the two consumers never share (and round-robin-steal) a queue.
+const DefaultLifecycleQueue = "alkemio-collaboration-lifecycle"
 
 // PostgresConfig configures the standalone metadata DB.
 type PostgresConfig struct {
@@ -226,6 +240,14 @@ func loadMetaStoreConfig(cfg *Config) error {
 		cfg.RabbitMQ.Queue = getenv("RABBITMQ_QUEUE", "")
 		if cfg.RabbitMQ.Queue == "" {
 			return fmt.Errorf("METADATA_STORE=rabbitmq requires RABBITMQ_QUEUE")
+		}
+		// The lifecycle consumer gets its OWN queue, never the metastore RPC queue
+		// (sharing one queue round-robin-steals fetch/save RPCs). Reject an explicit
+		// LIFECYCLE_QUEUE that collides with RABBITMQ_QUEUE rather than silently
+		// re-introducing the shared-queue bug.
+		cfg.RabbitMQ.LifecycleQueue = getenv("LIFECYCLE_QUEUE", DefaultLifecycleQueue)
+		if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
+			return fmt.Errorf("LIFECYCLE_QUEUE must differ from RABBITMQ_QUEUE (%q) — a shared queue round-robin-steals metastore RPCs", cfg.RabbitMQ.Queue)
 		}
 	case MetaStorePostgres:
 		cfg.Postgres.DSN = postgresDSN()

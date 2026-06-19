@@ -91,6 +91,51 @@ func TestRabbitMQAssemblesURL(t *testing.T) {
 	}
 }
 
+// TestLifecycleQueueDefaultsToDedicatedQueue proves the lifecycle consumer gets
+// its OWN queue by default — distinct from the metastore RPC queue — so it never
+// round-robin-steals fetch/save RPCs (the shared-queue bug).
+func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RabbitMQ.LifecycleQueue != DefaultLifecycleQueue {
+		t.Errorf("RabbitMQ.LifecycleQueue = %q, want default %q", cfg.RabbitMQ.LifecycleQueue, DefaultLifecycleQueue)
+	}
+	if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
+		t.Errorf("lifecycle queue %q must differ from metastore queue %q", cfg.RabbitMQ.LifecycleQueue, cfg.RabbitMQ.Queue)
+	}
+}
+
+// TestLifecycleQueueOverride proves LIFECYCLE_QUEUE overrides the default.
+func TestLifecycleQueueOverride(t *testing.T) {
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "my-lifecycle-q")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RabbitMQ.LifecycleQueue != "my-lifecycle-q" {
+		t.Errorf("RabbitMQ.LifecycleQueue = %q, want %q", cfg.RabbitMQ.LifecycleQueue, "my-lifecycle-q")
+	}
+}
+
+// TestLifecycleQueueRejectsCollision proves an explicit LIFECYCLE_QUEUE equal to
+// RABBITMQ_QUEUE is rejected at load — re-introducing the shared queue is a
+// configuration error, not silently accepted.
+func TestLifecycleQueueRejectsCollision(t *testing.T) {
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "alkemio-collaboration")
+	if _, err := Load(); err == nil {
+		t.Fatal("LIFECYCLE_QUEUE == RABBITMQ_QUEUE: expected error, got nil")
+	}
+}
+
 func TestRabbitMQEscapesCredentials(t *testing.T) {
 	// A password with reserved URL characters must be percent-escaped so the
 	// assembled amqp URL stays well-formed (and parseable by the amqp client).
