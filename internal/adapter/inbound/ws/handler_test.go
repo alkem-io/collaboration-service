@@ -324,13 +324,16 @@ func (c *wsTestClient) hasElement(id string) bool {
 // client reconnect behaviour, so it is a real invariant.
 func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
 	cases := []struct {
-		name string
-		err  error
-		want websocket.StatusCode
+		name       string
+		err        error
+		want       websocket.StatusCode
+		wantReason string // exact reason to assert, or "" to only require non-empty
 	}{
-		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation},
-		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation},
-		{"fail-closed authZ", errors.New("authz transport failure"), websocket.StatusInternalError},
+		// A full room rides the canonical room-capacity-reached code (OPEN-1) on the
+		// close reason — the join is refused so no control frame carries it.
+		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached},
+		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation, ""},
+		{"fail-closed authZ", errors.New("authz transport failure"), websocket.StatusInternalError, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -340,6 +343,9 @@ func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
 			}
 			if reason == "" {
 				t.Error("close reason must not be empty")
+			}
+			if c.wantReason != "" && reason != c.wantReason {
+				t.Errorf("reason = %q, want %q", reason, c.wantReason)
 			}
 		})
 	}

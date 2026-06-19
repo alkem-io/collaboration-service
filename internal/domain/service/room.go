@@ -640,9 +640,16 @@ func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
 		frames = append(frames, aw)
 	}
 	// Tell a viewer it is read-only up front so the client disables local editing
-	// (the collaborator default needs no control — editing is the baseline).
+	// (the collaborator default needs no control — editing is the baseline). The
+	// reason mirrors today's read-only UX (OPEN-1): an authenticated actor denied
+	// update-content is no-update-access; an unauthenticated one is not-authenticated.
 	if mode == model.ModeViewer {
-		if ctrl := encodeControl(model.ControlMessage{Kind: model.ControlReadOnlyState, ReadOnly: true}); ctrl != nil {
+		ctrl := encodeControl(model.ControlMessage{
+			Kind:     model.ControlReadOnlyState,
+			ReadOnly: true,
+			Reason:   readOnlyReasonForIdentity(identity),
+		})
+		if ctrl != nil {
 			frames = append(frames, ctrl)
 		}
 	}
@@ -676,6 +683,18 @@ func (r *Room) resolveMode(ctx context.Context, identity model.Identity) (model.
 		return model.ModeCollaborator, nil
 	}
 	return model.ModeViewer, nil
+}
+
+// readOnlyReasonForIdentity maps a viewer's identity to its read-only reason
+// code (OPEN-1): an anonymous connection (empty ActorID) is read-only because it
+// is not-authenticated; an authenticated actor that was denied update-content is
+// read-only because it has no-update-access. This preserves the granularity of
+// today's read-only UX (the memo-footer readOnlyCode).
+func readOnlyReasonForIdentity(identity model.Identity) model.ReadOnlyReason {
+	if identity.ActorID == "" {
+		return model.ReasonNotAuthenticated
+	}
+	return model.ReasonNoUpdateAccess
 }
 
 // handleLeave drops a connection and tells the remaining members the count
