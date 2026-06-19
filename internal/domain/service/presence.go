@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -70,15 +71,42 @@ func (r *Room) flushContribution(ctx context.Context) {
 }
 
 // reEvaluateMembers re-runs per-document authZ for every connected member and
-// applies any mode change (lifecycle document.access_changed, T014): a member that
-// lost update-content is downgraded to viewer (read-only-state); a viewer that
-// gained it is upgraded to collaborator. A fail-closed authZ error downgrades the
-// member to viewer (never silently keeps a stale collaborator grant).
+// applies the result (lifecycle document.access_changed, T014):
+//
+//   - READ revoked (resolveMode → ErrForbidden): the member is DISCONNECTED, not
+//     downgraded. A viewer still receives every document update, so leaving a
+//     read-revoked member connected as a viewer would let them keep reading the
+//     document after their read access was pulled — an access-revocation leak
+//     (constitution §V fail-closed). Disconnect is the only correct response.
+//   - update-content lost but READ still granted: downgraded to viewer
+//     (read-only-state control) so the client disables local editing but stays
+//     connected.
+//   - viewer that regained update-content: upgraded to collaborator.
+//   - any other authZ error (transport failure / open breaker): fail closed by
+//     revoking write access (downgrade to viewer); a transient backend error must
+//     not silently keep a stale collaborator grant.
+//
+// Disconnecting mutates r.members, so iterate over a snapshot of the ids rather
+// than ranging the live map.
 func (r *Room) reEvaluateMembers(ctx context.Context) {
-	for id, m := range r.members {
+	ids := make([]connID, 0, len(r.members))
+	for id := range r.members {
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		m, ok := r.members[id]
+		if !ok {
+			continue // already disconnected in this pass.
+		}
 		newMode, err := r.resolveMode(ctx, model.Identity{ActorID: m.actorID})
-		if err != nil {
-			// Read denied or authZ failed: revoke write access (fail closed).
+		switch {
+		case errors.Is(err, ErrForbidden):
+			// Read access revoked: eject the member — a viewer still reads updates.
+			r.disconnect(id, "read access revoked")
+			continue
+		case err != nil:
+			// Transport/breaker failure: fail closed by revoking write access, but
+			// keep the member connected (read access could not be confirmed denied).
 			newMode = model.ModeViewer
 		}
 		if newMode == m.mode {
