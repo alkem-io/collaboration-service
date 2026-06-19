@@ -57,6 +57,24 @@ func TestLoadRejectsUnknownEnum(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnknownAdapterSelections asserts every pluggable-port selector
+// fails fast on an unrecognised value (§XV: no half-configured runs) — one bad
+// value per selector exercises each parse function's reject branch.
+func TestLoadRejectsUnknownAdapterSelections(t *testing.T) {
+	for _, c := range []struct{ key, val string }{
+		{"METADATA_STORE", "cassandra"},
+		{"BLOB_STORE", "gcs"},
+		{"AUTH_MODE", "ldap"},
+	} {
+		t.Run(c.key, func(t *testing.T) {
+			t.Setenv(c.key, c.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() with %s=%s: expected error, got nil", c.key, c.val)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsBadPort(t *testing.T) {
 	t.Setenv("PORT", "70000")
 	if _, err := Load(); err == nil {

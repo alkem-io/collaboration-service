@@ -139,7 +139,8 @@ func newTestServer(t *testing.T, auth interface {
 
 // newTestServerWithManager mounts the ws handler over a caller-supplied manager,
 // so a test can drive the refused-join paths (room full / forbidden) end to end.
-func newTestServerWithManager(t *testing.T, mgr *service.Manager) (*httptest.Server, string) {
+// It returns the ws:// base URL; the server is torn down via t.Cleanup.
+func newTestServerWithManager(t *testing.T, mgr *service.Manager) string {
 	t.Helper()
 	h := &Handler{
 		Auth:          authopen.New(),
@@ -151,7 +152,7 @@ func newTestServerWithManager(t *testing.T, mgr *service.Manager) (*httptest.Ser
 	r.Method(http.MethodGet, "/collab/{documentId}", h)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
-	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
+	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
 // TestRefusedJoinClosesSocket asserts that a second connection to a room at its
@@ -167,8 +168,7 @@ func TestRefusedJoinClosesSocket(t *testing.T) {
 	cfg := service.RoomConfig{SaveDebounce: 20 * time.Millisecond, IdleTimeout: 5 * time.Second, SendBuffer: 64}
 	cfg.Limits.MaxConnsPerRoom = 1
 	mgr := service.NewManager(deps, cfg, nil, zap.NewNop())
-	srv, base := newTestServerWithManager(t, mgr)
-	_ = srv
+	base := newTestServerWithManager(t, mgr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -315,6 +315,34 @@ func (c *wsTestClient) hasElement(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.doc.GetMap("elements").(*ycrdt.YMap).Has(id)
+}
+
+// TestJoinCloseStatusMapsRefusalToWSCloseCode asserts each refused-join error
+// maps to the right WebSocket close status: a full room and a forbidden actor are
+// policy violations (the client should not blindly retry), while any other
+// (fail-closed authZ) error is an internal-error close. The close code drives
+// client reconnect behaviour, so it is a real invariant.
+func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want websocket.StatusCode
+	}{
+		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation},
+		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation},
+		{"fail-closed authZ", errors.New("authz transport failure"), websocket.StatusInternalError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, reason := joinCloseStatus(c.err)
+			if got != c.want {
+				t.Errorf("status = %d, want %d", got, c.want)
+			}
+			if reason == "" {
+				t.Error("close reason must not be empty")
+			}
+		})
+	}
 }
 
 // TestHandshakeRejectedOn401 asserts a failed handshake auth never upgrades.

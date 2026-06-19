@@ -116,14 +116,40 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 ---
 
-## Phase 5 — E2E + coverage gate — ⬜ FORWARD (Wave 4)
+## Phase 5 — E2E + coverage gate — ✅ DONE (Wave 4)
+
+> Built on `feat/003-wave4` (off `feat/003-wave3`) → DRAFT PR stacked on #3. The
+> wiring (`buildDeps`/`buildRouter`) was lifted from `cmd/server` into an exported
+> **`internal/app`** composition root so the e2e suite boots the service through
+> the SAME wiring production uses (no duplicate assembly, anti-pattern 3). New
+> `test/e2e/` suite (build tag `e2e`) + a `test/e2e/jsinterop` Node harness
+> (real `yjs` + `y-protocols/sync` + `/awareness` + `ws`). Integration suites
+> (redis/postgres/rabbitmq/s3) + e2e wired into CI (`.github/workflows/ci-integration.yml`
+> with backend services) and the **≥95% combined coverage gate** enforced via
+> `.scripts/coverage-gate.sh` (unit + integration + e2e merged; **95.8%**). Gates
+> green: `go test -race ./...` (unit) + the integration/e2e suites with backends
+> up, `make openapi` clean, `golangci-lint run` = 0 issues.
+>
+> **High-value interop finding (FIXED).** The JS-interop harness surfaced a real
+> y-protocols **awareness-channel framing mismatch**: the server framed awareness
+> as `[type][rawBody]`, but canonical y-protocols/y-websocket clients expect
+> `[type][writeVarUint8Array(body)]` (length-prefixed) — so real `yjs` clients
+> failed to decode the server's awareness frames (presence/eviction broke against
+> actual clients; the sync channel was already canonical post-revert). Fixed at
+> the server's wire boundary (`service/awareness_wire.go`; encode + the three read
+> sites) without touching the vendored CRDT core. A second real bug — the request
+> **logging middleware's `statusWriter` shadowed `http.Hijacker`**, so the
+> `/collab/{id}` WebSocket upgrade returned **501** behind the real router — was
+> also caught by the e2e (added `Unwrap()` to `statusWriter`). A latent
+> `postgres.Migrate` panic on a malformed DSN (swallowed parse error → pgx panic)
+> was fixed to fail fast.
 
 ### T017 — Single-pod + two-pod e2e; ≥95% coverage gate — `test/e2e/`, CI
-- [ ] **T017.1** [W4] Single-pod e2e: spin up the service (`open`/`inmemory`/`inline`), drive ≥2 simulated WS clients, assert convergence within 1s for **both** memo and whiteboard, a persistence round-trip, and presence/awareness (SC-002/SC-009).
-- [ ] **T017.2** [W4] Two-pod e2e: two service instances behind `FANOUT_MODE=redis`, clients split across pods, assert **cross-instance convergence** with no code change vs single-pod (SC-007/SC-011).
-- [ ] **T017.3** [W4] file-service blob-offload e2e: persist with `BLOB_STORE=file-service`, assert reload-identical with the metadata row holding only metadata + a content pointer (SC-006/SC-012).
-- [ ] **T017.4** [W4] Limits/authZ e2e: viewer-cannot-mutate, collaborator-can, 401 handshake, limit-breach-disconnect (SC-008/SC-009).
-- [ ] **T017.5** [W4] Wire the **≥95% coverage gate** into CI (block merges below threshold) and verify `make openapi` is clean; run `golangci-lint` with zero violations across the whole tree (SC-011, §IX/§XII).
+- [X] **T017.1** [W4] Single-pod e2e (`test/e2e/singlepod_test.go`): boots the service via `app.New` (`open`/`inmemory`/`inline`), drives 2 real WS clients, asserts convergence for **both** memo and whiteboard, a persistence round-trip (debounce→idle-release→reload), presence + server-forced awareness eviction on disconnect, a limit-breach refusal (only the offender), and open-mode no-token handshake (SC-002/SC-003/SC-009).
+- [X] **T017.2** [W4] Two-pod e2e (`test/e2e/twopod_test.go`): two `app.New` instances sharing one Redis (in-process **miniredis** as the bus → hermetic), clients split across pods, assert **cross-instance** doc + awareness convergence via redis fan-out, no code change vs single-pod (SC-007/SC-011) — the WS-level extension of Wave-2 `TestTwoInstancesConverge`.
+- [X] **T017.3** [W4] file-service blob-offload e2e (`test/e2e/fileservice_test.go`): boots with `BLOB_STORE=file-service` against an in-process faithful stub file-service; persist→release→reload is identical, fetched back via the content pointer (metadata index inline, blob offloaded) (SC-006/SC-012).
+- [X] **T017.4** [W4] Limits/authZ e2e (`test/e2e/authz_test.go` + single-pod): authzeval mode against an **h2c** auth-eval stub — viewer-cannot-mutate / collaborator-can (read-only gate), unauthenticated handshake → **401**; limit-breach-disconnect in single-pod (SC-008/SC-009). The standalone create API gained an optional `authorizationPolicyId` (bus-path parity) so a policy can be seeded.
+- [X] **T017.5** [W4] **JS-interop e2e** (`test/e2e/jsinterop_test.go` + `jsinterop/harness.mjs`): two ACTUAL `yjs`+`y-protocols` JS clients converge over the Go server (sync + awareness, no custom framing), and a JS-editor↔Go-observer cross-impl proof. CI integration job (`ci-integration.yml`) runs the build-tagged suites + e2e against live backends; the **≥95% combined coverage gate** is enforced (`.scripts/coverage-gate.sh`, **95.8%**); `make openapi` clean; `golangci-lint` 0 issues (SC-008/SC-011, §IX/§XII).
 
 ---
 
@@ -132,7 +158,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 - **Wave 1 (T001–T003, T007–T012)** — DONE; no remaining dependency.
 - **Wave 2 (T004–T006)** — depends on Wave 1's held ports. T004/T005/T006 parallelize; resolve **OPEN-1/2/3** before the contract-touching sub-tasks (T006.3, T005.1, T005.3). Trusting the fork in production also depends on **WS-A's fuzz gate** (workspace, not a server task).
 - **Wave 3 (T013–T016)** — DONE. T014 (per-doc authZ) built on T006 (authzeval); T013/T015/T016 on Wave-1 lifecycle; **OPEN-4 resolved** (epic R9 defaults + Prom gauge *and* RMQ contribution event).
-- **Wave 4 (T017)** — depends on all prior waves; T017.2 needs T004; T017.3 needs T005.3; T017.4 needs T006/T014.
+- **Wave 4 (T017)** — DONE. Depends on all prior waves; T017.2 needs T004; T017.3 needs T005.3; T017.4 needs T006/T014. The e2e suite boots through `internal/app` (the composition root extracted from `cmd/server`), so it exercises real adapter selection, not a copy.
 
 ## Counts
 
@@ -141,5 +167,5 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 | 1 (Setup+ports, live-sync) | **DONE** | 9 (T001–T003, T007–T012) | — (each proven by named tests) |
 | 2 (durable adapters) | **DONE** | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
 | 3 (presence/limits/lifecycle/API) | **DONE** | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
-| 4 (e2e + gate) | Forward | 1 (T017) | 5 (T017.1–5) |
-| **Total** | 16 done / 1 forward | 17 | 5 forward sub-tasks |
+| 4 (e2e + gate) | **DONE** | 1 (T017) | 5 (T017.1–5) |
+| **Total** | **17 done** | 17 | **35 sub-tasks done** |

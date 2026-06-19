@@ -1,4 +1,4 @@
-.PHONY: build docker test lint vet openapi setup-hooks run clean
+.PHONY: build docker test e2e integration coverage-gate lint vet openapi setup-hooks run clean
 
 BINARY := collaboration-service
 GO := go
@@ -14,6 +14,24 @@ docker:
 test:
 	$(GO) test $(GOFLAGS) -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -1
+
+# Build-tagged e2e suite (full stack through internal/app over real WebSockets +
+# the yjs/y-protocols JS-interop harness). Hermetic — no external backends (the
+# two-pod test uses in-process miniredis). Requires the harness deps:
+#   ( cd test/e2e/jsinterop && npm ci )
+e2e:
+	$(GO) test $(GOFLAGS) -tags e2e ./test/e2e/...
+
+# Build-tagged integration suites (redis/postgres/rabbitmq/s3 + the app.New
+# durable wiring) against live backends — set POSTGRES_TEST_DSN / RABBITMQ_TEST_URL
+# / S3_TEST_* (unset ⇒ those tests skip).
+integration:
+	$(GO) test $(GOFLAGS) -tags integration ./...
+
+# Combined ≥95% coverage gate (unit + integration + e2e, merged + scoped), as CI
+# runs it. Pass a different threshold as the first arg if needed.
+coverage-gate:
+	./.scripts/coverage-gate.sh
 
 lint:
 	golangci-lint run

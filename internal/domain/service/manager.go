@@ -54,36 +54,6 @@ type Metrics interface {
 	ContributingActors(n int)
 }
 
-// NopMetrics is the no-op Metrics used when none is supplied.
-type NopMetrics struct{}
-
-// RoomOpened does nothing.
-func (NopMetrics) RoomOpened() {}
-
-// RoomClosed does nothing.
-func (NopMetrics) RoomClosed() {}
-
-// ConnOpened does nothing.
-func (NopMetrics) ConnOpened() {}
-
-// ConnClosed does nothing.
-func (NopMetrics) ConnClosed() {}
-
-// SnapshotSaved does nothing.
-func (NopMetrics) SnapshotSaved() {}
-
-// SnapshotFailed does nothing.
-func (NopMetrics) SnapshotFailed() {}
-
-// FanoutPublished does nothing.
-func (NopMetrics) FanoutPublished(time.Duration) {}
-
-// FanoutFailed does nothing.
-func (NopMetrics) FanoutFailed() {}
-
-// ContributingActors does nothing.
-func (NopMetrics) ContributingActors(int) {}
-
 // Manager is the room registry and lifecycle owner (T007). It lazily
 // materializes a Room on the first connect for a document id, shares it across
 // concurrent connections to the same document, and drops it from the registry

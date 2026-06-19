@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -260,5 +261,110 @@ func TestNewFromURL(t *testing.T) {
 func TestNewFromURLInvalid(t *testing.T) {
 	if _, err := New("not-a-redis-url", "pod-x"); err == nil {
 		t.Error("expected error for invalid REDIS_URL")
+	}
+}
+
+// TestNewDefaultsEmptySource defends New's source-defaulting branch
+// (broadcaster.go:58): an empty source id must be replaced with a generated one
+// so echo suppression still works (a pod with an empty tag could not distinguish
+// its own echoes). The broadcaster must be usable afterward.
+func TestNewDefaultsEmptySource(t *testing.T) {
+	mr := miniredis.RunT(t)
+	b, err := New("redis://"+mr.Addr(), "") // empty source → generated uuid
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+	if b.source == "" {
+		t.Error("New must generate a non-empty source id when none is supplied")
+	}
+}
+
+// TestNewWithClientDefaultsEmptySource defends newWithClient's source-defaulting
+// branch (broadcaster.go:67): the same invariant on the lower-level constructor.
+func TestNewWithClientDefaultsEmptySource(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	b := newWithClient(client, "") // empty source → generated uuid
+	if b.source == "" {
+		t.Error("newWithClient must generate a non-empty source id when none is supplied")
+	}
+}
+
+// TestPublishSurfacesClientError defends Publish's error branch
+// (broadcaster.go:85): when the underlying client is closed the publish fails,
+// and the broadcaster must surface that error rather than report a fan-out that
+// never reached Redis.
+func TestPublishSurfacesClientError(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	b := newWithClient(client, "pod-x")
+	_ = client.Close()
+	if err := b.Publish(context.Background(), "doc", []byte("x"), false); err == nil {
+		t.Error("expected Publish to surface a closed-client error")
+	}
+}
+
+// TestSubscribeSurfacesReceiveError defends Subscribe's confirmation-error
+// branch (broadcaster.go:102): if the subscription cannot be confirmed (closed
+// client) Subscribe must return an error and a nil cancel, never a half-live
+// subscription that silently drops frames.
+func TestSubscribeSurfacesReceiveError(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	b := newWithClient(client, "pod-x")
+	_ = client.Close()
+	cancel, err := b.Subscribe(context.Background(), "doc", func([]byte, bool) {})
+	if err == nil {
+		t.Error("expected Subscribe to fail confirming against a closed client")
+	}
+	if cancel != nil {
+		t.Error("a failed Subscribe must not return a cancel func")
+	}
+}
+
+// TestDecodeFrameRejectsTruncated defends decodeFrame's two malformed-frame
+// guards (broadcaster.go:186 too-short, :190 source-tag overruns the buffer). A
+// malformed frame must be reported invalid (ok=false) so the consumer drops it
+// rather than applying garbage as a document update.
+func TestDecodeFrameRejectsTruncated(t *testing.T) {
+	if _, _, ok := decodeFrame([]byte{0x00}); ok {
+		t.Error("a 1-byte frame (no length prefix) must be rejected")
+	}
+	// Length prefix claims 5 source bytes, but only 2 follow.
+	if _, _, ok := decodeFrame([]byte{0x00, 0x05, 'a', 'b'}); ok {
+		t.Error("a frame whose source length overruns the buffer must be rejected")
+	}
+}
+
+// TestEncodeFrameRoundTrips defends the encode/decode contract and exercises
+// encodeFrame's normal path; combined with the truncation test above it pins the
+// frame codec both pods rely on for echo suppression.
+func TestEncodeFrameRoundTrips(t *testing.T) {
+	frame := encodeFrame("pod-A", []byte("payload-bytes"))
+	src, payload, ok := decodeFrame(frame)
+	if !ok || src != "pod-A" || string(payload) != "payload-bytes" {
+		t.Errorf("round trip = (%q, %q, %v)", src, payload, ok)
+	}
+}
+
+// TestEncodeFrameTruncatesOversizedSource defends encodeFrame's source-truncation
+// branch (broadcaster.go:172): a source longer than the uint16 length prefix can
+// hold is truncated defensively. Truncation must affect only the source tag
+// (echo suppression), never the payload bytes, which must round-trip intact.
+func TestEncodeFrameTruncatesOversizedSource(t *testing.T) {
+	oversized := strings.Repeat("s", maxSourceLen+10)
+	payload := []byte("doc-bytes-must-survive")
+	frame := encodeFrame(oversized, payload)
+	src, got, ok := decodeFrame(frame)
+	if !ok {
+		t.Fatal("encoded frame must decode")
+	}
+	if len(src) != maxSourceLen {
+		t.Errorf("source truncated to %d bytes, want %d", len(src), maxSourceLen)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("payload corrupted by source truncation: got %q", got)
 	}
 }

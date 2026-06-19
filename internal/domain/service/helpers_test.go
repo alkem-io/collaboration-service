@@ -63,9 +63,11 @@ func ycrdtJSON(doc *ycrdt.Doc) string {
 
 // --- wire-frame helpers ---
 
-// encodeAwareness frames a full awareness update as a type-1 message.
+// encodeAwareness frames a full awareness update as a canonical y-protocols
+// type-1 message ([type][writeVarUint8Array(body)]) — the same framing real yjs
+// clients speak (awareness_wire.go), exercised end to end by the JS-interop e2e.
 func encodeAwareness(update []byte) []byte {
-	return protocol.EncodeAwarenessUpdateMessage(update)
+	return encodeAwarenessFrame(update)
 }
 
 // encodeEphemeral frames an arbitrary ephemeral payload as a type-2 message

@@ -46,7 +46,7 @@ func (f *fakeRPC) Emit(_ context.Context, pattern string, data any) error {
 		return f.emitErr
 	}
 	f.emits = append(f.emits, capturedCall{pattern: pattern, data: data})
-	return nil
+	return f.emitErr
 }
 
 func TestSavePublishesUnifiedContract(t *testing.T) {
@@ -208,6 +208,30 @@ func TestDeleteSuccessFalseWithoutErrorSurfaces(t *testing.T) {
 	}
 }
 
+// TestSaveUnsuccessfulWithoutErrorStringSurfaces defends Save's bare
+// !reply.Success branch (store.go:80): a reply that reports failure WITHOUT an
+// error string must still be surfaced as an error — distinct from the
+// reply.Error != "" path. Otherwise a silent server failure would look like a
+// successful save.
+func TestSaveUnsuccessfulWithoutErrorStringSurfaces(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: false}}} // no Error string
+	store := newWithRPC(f)
+	if err := store.Save(context.Background(), model.Metadata{ID: "d"}); err == nil {
+		t.Error("expected Save to surface a failure even when the server sent no error string")
+	}
+}
+
+// TestDeleteTransportErrorSurfaces defends Delete's transport-error branch
+// (store.go:90): a failed RPC Call (broker down) must surface as an error, so a
+// purge that never reached the server is not mistaken for a completed delete.
+func TestDeleteTransportErrorSurfaces(t *testing.T) {
+	f := &fakeRPC{callErr: errors.New("channel closed")}
+	store := newWithRPC(f)
+	if err := store.Delete(context.Background(), "d"); err == nil {
+		t.Error("expected Delete to surface the transport error")
+	}
+}
+
 func TestMarshalEnvelopeShape(t *testing.T) {
 	// The NestJS RMQ request envelope { pattern, data, id } must serialize with
 	// exactly those keys so a @MessagePattern consumer routes it.
@@ -256,14 +280,31 @@ func TestContributionEmitsEvent(t *testing.T) {
 	}
 }
 
-func TestContributionPropagatesEmitError(t *testing.T) {
-	// A bus emit failure must surface as a wrapped collaboration-contribution
-	// error so the caller can log/observe the dropped analytics event.
+// TestLoadTransportErrorSurfaces defends Load's transport-error branch
+// (store.go:37): a failed RPC Call (broker/transport down) must surface as a
+// non-NotFound error, so the caller does not mistake a transient outage for "the
+// document does not exist".
+func TestLoadTransportErrorSurfaces(t *testing.T) {
+	f := &fakeRPC{callErr: errors.New("channel closed")}
+	store := newWithRPC(f)
+	_, err := store.Load(context.Background(), "d")
+	if err == nil {
+		t.Fatal("expected Load to surface the transport error")
+	}
+	if errors.Is(err, model.ErrNotFound) {
+		t.Error("a transport failure must not be reported as ErrNotFound")
+	}
+}
+
+// TestContributionEmitErrorSurfaces defends Contribution's emit-error branch
+// (store.go:108): although the contribution event is fire-and-forget, a publish
+// failure must still be surfaced to the caller (the room decides whether to
+// retry the metric), not silently swallowed.
+func TestContributionEmitErrorSurfaces(t *testing.T) {
 	f := &fakeRPC{emitErr: errors.New("bus down")}
 	store := newWithRPC(f)
-	err := store.Contribution(context.Background(), "doc-c", []string{"actor-1"})
-	if err == nil || !contains(err.Error(), "collaboration-contribution") {
-		t.Fatalf("expected wrapped emit error, got %v", err)
+	if err := store.Contribution(context.Background(), "doc-c", []string{"actor-1"}); err == nil {
+		t.Error("expected Contribution to surface the emit error")
 	}
 }
 

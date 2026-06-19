@@ -102,5 +102,37 @@ Key Wave-1 proofs (see `tasks.md` for the full map):
 | Save-error control on persist failure | `TestSaveErrorOnMetadataFailure`, `TestSaveErrorControlOnBlobFailure` |
 | Handshake 401 / missing doc id 400 | `TestHandshakeRejectedOn401`, `TestMissingDocumentIDIs400` |
 
-The single-pod + two-pod **e2e suite** (cross-pod fan-out, presence, both content
-types, migration round-trip) and the **≥95% coverage gate** land in Wave 4 (T017).
+## E2E + coverage gate (Wave 4 ✅)
+
+The full service is proven end to end through its real composition root
+(`internal/app.New`) by the build-tagged e2e suite, including a real **JS-client
+y-protocols interop** harness:
+
+```bash
+# Install the JS-interop harness deps once (real yjs + y-protocols + ws).
+( cd test/e2e/jsinterop && npm ci )
+
+# Single-pod, two-pod (in-process miniredis), file-service offload, authZ/limits,
+# and the JS-interop convergence proof — all hermetic (no external backends):
+go test -tags e2e -race ./test/e2e/...
+
+# The build-tagged integration suites against live backends:
+export POSTGRES_TEST_DSN=postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
+export RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
+export S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=collab-test \
+       S3_TEST_REGION=us-east-1 S3_TEST_ACCESS_KEY=minioadmin S3_TEST_SECRET_KEY=minioadmin
+go test -tags integration -race ./...
+
+# The ≥95% combined coverage gate (unit + integration + e2e, merged), as CI runs it:
+./.scripts/coverage-gate.sh 95.0      # currently 95.8%
+```
+
+CI wires this in `.github/workflows/ci-integration.yml` (postgres/rabbitmq/minio
+service containers + the Node interop harness), alongside the central lint·race·
+build lane in `ci-test.yml`.
+
+> **y-protocols compatibility:** the JS-interop harness validates the Go server
+> against ACTUAL `yjs` clients. It caught (and the fix restored) the canonical
+> awareness-channel framing (`[type][writeVarUint8Array(body)]`); the sync channel
+> was already canonical post the codec revert. Any future framing regression fails
+> the harness immediately — the highest-value compat signal in the suite.

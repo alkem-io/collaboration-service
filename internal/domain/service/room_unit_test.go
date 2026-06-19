@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -77,7 +76,7 @@ func TestApplyPeerEphemeralAwareness(t *testing.T) {
 	other := ycrdt.NewAwareness(ycrdt.NewDoc("peer", true, ycrdt.DefaultGCFilter, nil, false))
 	other.SetLocalState(ycrdt.Object{"user": "remote"})
 	update := ycrdt.EncodeAwarenessUpdate(other, []ycrdt.Number{other.ClientID}, nil)
-	frame := protocol.EncodeAwarenessUpdateMessage(update)
+	frame := encodeAwarenessFrame(update)
 
 	room.applyPeerEphemeral(frame)
 	if local.count() == 0 {

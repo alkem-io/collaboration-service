@@ -46,7 +46,13 @@ func Migrate(dsn string) error {
 
 	// golang-migrate's postgres driver runs over database/sql; pgx's stdlib
 	// shim adapts the pgx driver to that interface so we keep a single driver.
-	db := stdlib.OpenDB(*mustParseConfig(dsn))
+	connCfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		// A bad DSN is a startup misconfiguration: fail fast with the offending
+		// detail (§XV) rather than letting pgx's stdlib panic on an empty config.
+		return fmt.Errorf("parse postgres DSN: %w", err)
+	}
+	db := stdlib.OpenDB(*connCfg)
 	defer func() { _ = db.Close() }()
 
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
@@ -66,17 +72,6 @@ func Migrate(dsn string) error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 	return nil
-}
-
-// mustParseConfig parses a pgx connection config from a DSN for the stdlib shim.
-func mustParseConfig(dsn string) *pgx.ConnConfig {
-	cfg, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		// A bad DSN is a startup misconfiguration; surface it via a nil-safe
-		// path by returning an empty config so OpenDB fails clearly at connect.
-		return &pgx.ConnConfig{}
-	}
-	return cfg
 }
 
 // ensure database/sql is linked (golang-migrate's postgres.WithInstance needs a

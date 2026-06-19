@@ -26,6 +26,7 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 	m.SnapshotFailed()
 	m.FanoutPublished(2 * time.Millisecond)
 	m.FanoutFailed()
+	m.ContributingActors(3) // north-star contribution gauge (FR-014)
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -39,6 +40,7 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 		`collaboration_fanout_total{outcome="published"}`,
 		`collaboration_fanout_total{outcome="error"}`,
 		"collaboration_fanout_lag_seconds",
+		"collaboration_contributing_actors 3",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)
