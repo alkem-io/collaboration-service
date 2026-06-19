@@ -67,6 +67,13 @@ func TestLoadRejectsUnknownAdapterSelections(t *testing.T) {
 		{"AUTH_MODE", "ldap"},
 	} {
 		t.Run(c.key, func(t *testing.T) {
+			// Pin every selector to a known-good value first, then override the one
+			// under test with the bad value — so the rejection is attributable to
+			// this selector and cannot be a false pass from unrelated ambient env.
+			t.Setenv("FANOUT_MODE", "inmemory")
+			t.Setenv("METADATA_STORE", "inmemory")
+			t.Setenv("BLOB_STORE", "inline")
+			t.Setenv("AUTH_MODE", "open")
 			t.Setenv(c.key, c.val)
 			if _, err := Load(); err == nil {
 				t.Fatalf("Load() with %s=%s: expected error, got nil", c.key, c.val)
