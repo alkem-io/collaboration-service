@@ -41,43 +41,6 @@ components:
       required:
         - status
       type: object
-    rabbitmq.SaveData:
-      properties:
-        authorizationPolicyId:
-          type: string
-        blobStore:
-          type: string
-        contentPointer:
-          type: string
-        contentType:
-          type: string
-        id:
-          type: string
-        ownerRef:
-          type: string
-        version:
-          type: integer
-      required:
-        - id
-        - contentType
-        - version
-        - contentPointer
-        - blobStore
-      type: object
-    rabbitmq.envelope:
-      properties:
-        data:
-          format: byte
-          type: string
-        id:
-          type: string
-        pattern:
-          type: string
-      required:
-        - pattern
-        - data
-        - id
-      type: object
 info:
   contact:
     email: info@alkem.io
@@ -144,12 +107,6 @@ paths:
               $ref: '#/components/schemas/http.CreateDocumentRequest'
         required: true
       responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/rabbitmq.envelope'
-          description: OK
         "201":
           content:
             application/json:
