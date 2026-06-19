@@ -319,8 +319,10 @@ func (r *Room) handleJoin(c Conn) joinResult {
 }
 
 // handleLeave drops a connection and tells the remaining members the count
-// changed. The departing client's awareness entry is removed and that removal is
-// fanned out so peers stop rendering its cursor.
+// changed. Awareness eviction for the departed client is not forced here (see
+// dropMember); peers converge its vanished cursor via the client's own
+// local-state-clear on a clean close and via awareness TTL otherwise, with
+// explicit server-side eviction deferred to presence (T013).
 func (r *Room) handleLeave(id connID) {
 	if !r.dropMember(id) {
 		return
