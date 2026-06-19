@@ -4,8 +4,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=
 github.com/alicebob/miniredis/v2 v2.38.0/go.mod h1:TcL7YfarKPGDAthEtl5NBeHZfeUQj6OXMm/+iu5cLMM=
-github.com/antst/y-crdt v0.0.0-20260618095206-a2c966d82c1a h1:GpHiOkzhlrFmmMrMVMV4W/41IdtihWCyoNoyDww+vDo=
-github.com/antst/y-crdt v0.0.0-20260618095206-a2c966d82c1a/go.mod h1:cuIqx3Ll8yLPx7P/iscUvqFd/uJs3XBzK53XeaceVEA=
+github.com/antst/y-crdt v0.0.0-20260619070703-86551ce22304 h1:NVMPOdjlrlHObZ2XJZUAsjMi5qCTjWuQBpDoKOT2zTY=
+github.com/antst/y-crdt v0.0.0-20260619070703-86551ce22304/go.mod h1:cuIqx3Ll8yLPx7P/iscUvqFd/uJs3XBzK53XeaceVEA=
 github.com/aws/aws-sdk-go-v2 v1.42.0 h1:XvXMJTkFQtpBKIWZnmr9ZEOc2InWM2yldjXEJ/bymhA=
 github.com/aws/aws-sdk-go-v2 v1.42.0/go.mod h1:27+ACypSLljLAEKsCYOmrjKh83vuTRkuAe9Uv/3A4bg=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.13 h1:p1BBrg/Hhp6uK7zpejeI8QFXHJeC/mynzi04Sl03k9g=
