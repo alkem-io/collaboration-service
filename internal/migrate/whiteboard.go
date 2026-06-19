@@ -73,7 +73,7 @@ type NodeRunner interface {
 // Convert runs the legacy Excalidraw JSON through the Node binding step and
 // re-encodes a v2 snapshot. An empty whiteboard (Content == "") yields Empty=true.
 // A nil Runner (build-ahead) returns ErrWhiteboardSeamUnavailable.
-func (c WhiteboardConverter) Convert(rec LegacyRecord) (Conversion, error) {
+func (c WhiteboardConverter) Convert(ctx context.Context, rec LegacyRecord) (Conversion, error) {
 	if strings.TrimSpace(rec.Content) == "" {
 		return Conversion{Empty: true}, nil
 	}
@@ -86,7 +86,10 @@ func (c WhiteboardConverter) Convert(rec LegacyRecord) (Conversion, error) {
 		return Conversion{}, fmt.Errorf("legacy whiteboard content is not valid JSON (%d bytes)", len(rec.Content))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Derive the per-record timeout from the caller's context so a run-level
+	// cancellation (SIGINT/SIGTERM, deadline) aborts the Node subprocess promptly
+	// rather than waiting out the full 60s.
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	v1, err := c.Runner.ToYUpdateV1(ctx, []byte(rec.Content))
@@ -140,13 +143,13 @@ func (r ExecNodeRunner) ToYUpdateV1(ctx context.Context, excalidrawJSON []byte) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("node step failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("node step failed: %w (stderr: %s)", err, truncate(strings.TrimSpace(stderr.String()), 500))
 	}
 
 	line := strings.TrimSpace(stdout.String())
 	const prefix = "BASE64 "
 	if !strings.HasPrefix(line, prefix) {
-		return nil, fmt.Errorf("node step: unexpected stdout %q (stderr: %s)", truncate(line, 120), strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("node step: unexpected stdout %q (stderr: %s)", truncate(line, 120), truncate(strings.TrimSpace(stderr.String()), 500))
 	}
 	b64 := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 	update, err := base64.StdEncoding.DecodeString(b64)

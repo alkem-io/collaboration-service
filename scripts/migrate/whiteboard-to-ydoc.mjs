@@ -25,8 +25,10 @@
 //     (cd ../../excalidraw-fork && yarn && yarn workspace @alkemio/excalidraw-yjs-binding build)
 //     npm install ../../excalidraw-fork/packages/yjs-binding
 // The import below is the ONLY line that depends on the published package; if it
-// is missing, `npm ci` here fails fast and the Go driver flags every whiteboard
-// with ErrWhiteboardSeamUnavailable rather than producing a wrong snapshot.
+// is missing, `npm install` here fails fast and the Go driver flags every
+// whiteboard with ErrWhiteboardSeamUnavailable rather than producing a wrong
+// snapshot. (No lockfile is committed for this one-shot tool — the binding is
+// pinned to an exact version in package.json instead.)
 
 import process from 'node:process'
 import * as Y from 'yjs'

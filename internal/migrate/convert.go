@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 
@@ -30,7 +31,9 @@ type Conversion struct {
 type Converter interface {
 	// Convert produces the v2 snapshot (and size baseline) for one legacy record,
 	// or Conversion{Empty:true} when the legacy content was empty/never-edited.
-	Convert(rec LegacyRecord) (Conversion, error)
+	// ctx carries the run's cancellation/deadline so a converter that shells out
+	// (whiteboard → Node) aborts promptly on SIGINT/SIGTERM.
+	Convert(ctx context.Context, rec LegacyRecord) (Conversion, error)
 }
 
 // MemoConverter converts a legacy memo. Legacy memo content is the base64 of a
@@ -46,7 +49,7 @@ type MemoConverter struct{}
 // Convert decodes the legacy memo update and re-encodes a v2 snapshot. An empty
 // Content (never-edited memo) yields Empty=true. Garbage that decodes as neither
 // v1 nor v2 is an error (the driver flags it — never silently drops).
-func (MemoConverter) Convert(rec LegacyRecord) (Conversion, error) {
+func (MemoConverter) Convert(_ context.Context, rec LegacyRecord) (Conversion, error) {
 	if rec.Content == "" {
 		return Conversion{Empty: true}, nil
 	}

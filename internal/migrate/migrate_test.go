@@ -90,7 +90,7 @@ func newDriver(src Source, dryRun bool, wb Converter) (*Driver, port.BlobStore, 
 
 func TestMemoConverter_V2RoundTrips(t *testing.T) {
 	rec := LegacyRecord{ID: "m1", ContentType: "memo", Content: memoUpdate(t, "m1", "hello v2", true)}
-	conv, err := MemoConverter{}.Convert(rec)
+	conv, err := MemoConverter{}.Convert(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestMemoConverter_V2RoundTrips(t *testing.T) {
 func TestMemoConverter_V1FallbackRoundTrips(t *testing.T) {
 	// A v1-encoded legacy update must decode via the v1 fallback and re-encode v2.
 	rec := LegacyRecord{ID: "m2", ContentType: "memo", Content: memoUpdate(t, "m2", "hello v1", false)}
-	conv, err := MemoConverter{}.Convert(rec)
+	conv, err := MemoConverter{}.Convert(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestMemoConverter_V1FallbackRoundTrips(t *testing.T) {
 }
 
 func TestMemoConverter_EmptyIsSkip(t *testing.T) {
-	conv, err := MemoConverter{}.Convert(LegacyRecord{ID: "m3", ContentType: "memo", Content: ""})
+	conv, err := MemoConverter{}.Convert(context.Background(), LegacyRecord{ID: "m3", ContentType: "memo", Content: ""})
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -130,14 +130,14 @@ func TestMemoConverter_EmptyIsSkip(t *testing.T) {
 func TestMemoConverter_CorruptIsError(t *testing.T) {
 	// Valid base64, but not a Yjs update of either version — must error (driver flags).
 	garbage := base64.StdEncoding.EncodeToString([]byte("definitely-not-a-yjs-update-payload"))
-	_, err := MemoConverter{}.Convert(LegacyRecord{ID: "m4", ContentType: "memo", Content: garbage})
+	_, err := MemoConverter{}.Convert(context.Background(), LegacyRecord{ID: "m4", ContentType: "memo", Content: garbage})
 	if err == nil {
 		t.Fatal("corrupt memo update should error, not silently succeed")
 	}
 }
 
 func TestMemoConverter_BadBase64IsError(t *testing.T) {
-	_, err := MemoConverter{}.Convert(LegacyRecord{ID: "m5", ContentType: "memo", Content: "!!!not base64!!!"})
+	_, err := MemoConverter{}.Convert(context.Background(), LegacyRecord{ID: "m5", ContentType: "memo", Content: "!!!not base64!!!"})
 	if err == nil {
 		t.Fatal("non-base64 content should error")
 	}
@@ -146,7 +146,7 @@ func TestMemoConverter_BadBase64IsError(t *testing.T) {
 // --- whiteboard conversion (cross-language seam) ---------------------------
 
 func TestWhiteboardConverter_SeamUnavailableWhenNoRunner(t *testing.T) {
-	_, err := WhiteboardConverter{Runner: nil}.Convert(
+	_, err := WhiteboardConverter{Runner: nil}.Convert(context.Background(),
 		LegacyRecord{ID: "w1", ContentType: "whiteboard", Content: `{"elements":[]}`})
 	if !errors.Is(err, ErrWhiteboardSeamUnavailable) {
 		t.Fatalf("want ErrWhiteboardSeamUnavailable, got %v", err)
@@ -154,7 +154,7 @@ func TestWhiteboardConverter_SeamUnavailableWhenNoRunner(t *testing.T) {
 }
 
 func TestWhiteboardConverter_EmptyIsSkip(t *testing.T) {
-	conv, err := WhiteboardConverter{Runner: fakeNodeRunner{}}.Convert(
+	conv, err := WhiteboardConverter{Runner: fakeNodeRunner{}}.Convert(context.Background(),
 		LegacyRecord{ID: "w2", ContentType: "whiteboard", Content: ""})
 	if err != nil {
 		t.Fatalf("convert: %v", err)
@@ -165,7 +165,7 @@ func TestWhiteboardConverter_EmptyIsSkip(t *testing.T) {
 }
 
 func TestWhiteboardConverter_InvalidJSONIsError(t *testing.T) {
-	_, err := WhiteboardConverter{Runner: fakeNodeRunner{}}.Convert(
+	_, err := WhiteboardConverter{Runner: fakeNodeRunner{}}.Convert(context.Background(),
 		LegacyRecord{ID: "w3", ContentType: "whiteboard", Content: "{not json"})
 	if err == nil {
 		t.Fatal("invalid JSON whiteboard content should error")
@@ -174,7 +174,7 @@ func TestWhiteboardConverter_InvalidJSONIsError(t *testing.T) {
 
 func TestWhiteboardConverter_RoundTripsViaRunner(t *testing.T) {
 	rec := LegacyRecord{ID: "w4", ContentType: "whiteboard", Content: `{"elements":[{"id":"a"},{"id":"b"}]}`}
-	conv, err := WhiteboardConverter{Runner: fakeNodeRunner{ids: []string{"a", "b"}}}.Convert(rec)
+	conv, err := WhiteboardConverter{Runner: fakeNodeRunner{ids: []string{"a", "b"}}}.Convert(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestWhiteboardConverter_RoundTripsViaRunner(t *testing.T) {
 }
 
 func TestWhiteboardConverter_RunnerErrorPropagates(t *testing.T) {
-	_, err := WhiteboardConverter{Runner: fakeNodeRunner{failWith: errors.New("boom")}}.Convert(
+	_, err := WhiteboardConverter{Runner: fakeNodeRunner{failWith: errors.New("boom")}}.Convert(context.Background(),
 		LegacyRecord{ID: "w5", ContentType: "whiteboard", Content: `{"elements":[]}`})
 	if err == nil || strings.Contains(err.Error(), "ErrWhiteboardSeamUnavailable") {
 		t.Fatalf("runner error should propagate as a convert error, got %v", err)
@@ -206,7 +206,7 @@ func TestWhiteboardConverter_RunnerErrorPropagates(t *testing.T) {
 func TestValidate_SizeRatioCeiling(t *testing.T) {
 	// A tiny legacy input with a snapshot above the floor and over the ratio is flagged.
 	rec := LegacyRecord{ID: "m1", ContentType: "memo", Content: memoUpdate(t, "m1", strings.Repeat("x", 2000), true)}
-	conv, err := MemoConverter{}.Convert(rec)
+	conv, err := MemoConverter{}.Convert(context.Background(), rec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}

@@ -19,6 +19,11 @@ metadata:
     app: collaboration-service
     release: prometheus
 spec:
+  # Source the Prometheus `job` label from the Service's `app` label so it equals
+  # "collaboration-service" — the CollaborationServiceDown alert matches on
+  # up{job="collaboration-service"}, which would never fire under the operator's
+  # default job label (namespace/service:port).
+  jobLabel: app
   selector:
     matchLabels:
       app: collaboration-service

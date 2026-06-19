@@ -95,11 +95,18 @@ func run() int {
 	rep, err := driver.Run(ctx)
 	// Always emit the (possibly partial) report — a resumable run wants to know
 	// what got done before an abort.
-	if writeErr := writeReport(f, rep); writeErr != nil {
+	writeErr := writeReport(f, rep)
+	if writeErr != nil {
 		logger.Error("write report", zap.Error(writeErr))
 	}
 	if err != nil {
 		logger.Error("migration aborted", zap.Error(err))
+		return 1
+	}
+	// The report is the primary artifact for resumability/triage; if it could not
+	// be written, fail the run (exit 1) even though the migration itself completed,
+	// so an operator/CI does not mistake a missing report for a clean run.
+	if writeErr != nil {
 		return 1
 	}
 	// A run that flagged documents is a non-fatal partial success: exit 2 so a

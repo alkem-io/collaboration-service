@@ -120,7 +120,7 @@ func (d *Driver) migrateOne(ctx context.Context, rec LegacyRecord, log *zap.Logg
 		return res
 	}
 
-	conv, err := d.convert(ct, rec)
+	conv, err := d.convert(ctx, rec, ct)
 	if err != nil {
 		if errors.Is(err, ErrWhiteboardSeamUnavailable) {
 			return flag(res, "whiteboard seam unavailable (build-ahead): "+err.Error())
@@ -155,13 +155,14 @@ func (d *Driver) migrateOne(ctx context.Context, rec LegacyRecord, log *zap.Logg
 	return res
 }
 
-// convert dispatches to the content-type converter.
-func (d *Driver) convert(ct model.ContentType, rec LegacyRecord) (Conversion, error) {
+// convert dispatches to the content-type converter, passing the run context so a
+// converter that shells out aborts on cancellation.
+func (d *Driver) convert(ctx context.Context, rec LegacyRecord, ct model.ContentType) (Conversion, error) {
 	switch ct {
 	case model.ContentTypeMemo:
-		return d.Memo.Convert(rec)
+		return d.Memo.Convert(ctx, rec)
 	case model.ContentTypeWhiteboard:
-		return d.Whitebrd.Convert(rec)
+		return d.Whitebrd.Convert(ctx, rec)
 	default:
 		return Conversion{}, fmt.Errorf("no converter for content type %q", ct)
 	}

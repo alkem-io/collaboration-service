@@ -8,7 +8,7 @@
     "convert": "node whiteboard-to-ydoc.mjs"
   },
   "dependencies": {
-    "@alkemio/excalidraw-yjs-binding": "^0.18.0",
+    "@alkemio/excalidraw-yjs-binding": "0.18.0",
     "yjs": "13.6.31"
   }
 }

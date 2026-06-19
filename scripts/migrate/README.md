@@ -63,7 +63,7 @@ only inside a built `excalidraw-fork` workspace.
 1. **Once the binding ships self-contained** (bundled, or its `@excalidraw/*`
    deps published) — the intended end state:
    ```bash
-   cd scripts/migrate && npm ci          # uses package.json here
+   cd scripts/migrate && npm install     # uses package.json here (no lockfile committed)
    ```
 
 2. **Today (build-ahead): from the local excalidraw-fork workspace build:**
