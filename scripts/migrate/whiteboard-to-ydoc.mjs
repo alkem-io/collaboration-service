@@ -58,9 +58,16 @@ async function main() {
     process.exit(4)
   }
 
-  // The binding expects { elements: [...], appState?, files? }. A legacy scene
-  // that lacks `elements` is normalized to an empty scene (which yields an empty
-  // doc; the Go side treats an empty result as nothing-to-migrate).
+  // The binding expects an object { elements: [...], appState?, files? }. Reject a
+  // JSON value that is not a non-null object (e.g. null, a number, or a bare
+  // array) with a clear validation error rather than letting `scene.elements`
+  // throw a TypeError reported as an "unexpected error".
+  if (scene === null || typeof scene !== 'object' || Array.isArray(scene)) {
+    process.stderr.write('invalid Excalidraw scene: expected a JSON object\n')
+    process.exit(4)
+  }
+  // A legacy scene that lacks `elements` is normalized to an empty scene (which
+  // yields an empty doc; the Go side treats an empty result as nothing-to-migrate).
   if (!Array.isArray(scene.elements)) {
     scene.elements = []
   }

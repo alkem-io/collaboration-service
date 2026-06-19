@@ -38,6 +38,9 @@ patches:
       - op: replace
         path: /data/FILE_SERVICE_STORAGE_BUCKET_ID
         value: "PROD-FILE-SERVICE-BUCKET-UUID"
+      - op: replace
+        path: /data/FILE_SERVICE_AUTHORIZATION_ID
+        value: "PROD-FILE-SERVICE-AUTHORIZATION-UUID"
   # Prod resource headroom (collaboration is connection-bound; give memory room
   # for many live Y.Docs in memory).
   - target:

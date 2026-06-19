@@ -49,8 +49,10 @@ kustomize build deploy/k8s/overlays/prod
 2. Copy `deploy/k8s/` into the repo's collaboration-service path, conforming to
    the repo's existing Kustomize/Helm layout (it may prefer per-service dirs or a
    Helm chart — adapt the base/overlay split accordingly).
-3. Replace the placeholder env-reference UUIDs (`*-FILE-SERVICE-BUCKET-UUID`) and
-   wire the real secrets via that environment's mechanism (sealed secrets today,
+3. Replace the placeholder env-reference UUIDs — both `*-FILE-SERVICE-BUCKET-UUID`
+   and `*-FILE-SERVICE-AUTHORIZATION-UUID` (config validation requires
+   `FILE_SERVICE_AUTHORIZATION_ID` when `BLOB_STORE=file-service`) — and wire the
+   real secrets via that environment's mechanism (sealed secrets today,
    Vault/Pulumi per the transition — T003).
 4. Set the image tag via the release-deploy flow (it bumps `newTag`).
 5. The PROD deploy PR stays **draft** and is human-merged (release-deploy / the

@@ -35,3 +35,6 @@ patches:
       - op: replace
         path: /data/FILE_SERVICE_STORAGE_BUCKET_ID
         value: "ACC-FILE-SERVICE-BUCKET-UUID"
+      - op: replace
+        path: /data/FILE_SERVICE_AUTHORIZATION_ID
+        value: "ACC-FILE-SERVICE-AUTHORIZATION-UUID"

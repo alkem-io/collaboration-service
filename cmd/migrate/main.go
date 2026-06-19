@@ -68,6 +68,15 @@ func parseFlags() flags {
 func run() int {
 	f := parseFlags()
 
+	// --seed runs the synthetic built-in corpus; persisting it into a real
+	// MetadataStore/BlobStore is almost always a mistake. Require --dry-run with
+	// --seed so a smoke test cannot accidentally write seed data into a live store.
+	if f.seed && !f.dryRun {
+		fmt.Fprintln(os.Stderr, "--seed runs the synthetic corpus and must be combined with --dry-run "+
+			"(it would otherwise persist seed data into the configured store)")
+		return 1
+	}
+
 	logger, err := config.NewLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init logger: %v\n", err)
