@@ -162,8 +162,83 @@ type Room struct {
 	// a no-op for the in-memory (single-pod) broadcaster.
 	cancelSub func()
 
+	// ctx is the room-lifetime context every backend call on the run loop derives
+	// from (authZ eval, persist, purge, peer publish). It is cancelled exactly once,
+	// on release (finish), so a hung backend call unblocks when the room tears down
+	// and a shutdown does not leave the single-writer loop wedged behind I/O. Each
+	// individual call is additionally bounded by cfg.BackendTimeout via opCtx, so a
+	// slow/hung backend cannot stall the loop (and thus every other member's
+	// joins/messages/disconnects) indefinitely.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// released guards against double release notification.
 	released atomic.Bool
+}
+
+// opCtx returns a timeout-bounded context for a single backend call made on the
+// run loop (authZ eval, persist, purge, publish), derived from the room-lifetime
+// context. The returned cancel MUST be called (defer) to release the timer. The
+// timeout bounds a slow/hung backend so it cannot stall the single-writer loop;
+// the parent ctx cancellation unblocks the call immediately on room release.
+func (r *Room) opCtx() (context.Context, context.CancelFunc) {
+	timeout := r.cfg.BackendTimeout
+	if timeout <= 0 {
+		timeout = defaultBackendTimeout
+	}
+	// A room built by newRoom always has r.ctx; tolerate a nil parent (a bare Room
+	// constructed directly in a unit test) by rooting at Background so opCtx never
+	// panics.
+	parent := r.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+// persistNow persists a snapshot under a bounded, room-scoped context. The run
+// loop calls this (never persist directly) so a slow/hung blob/metadata backend
+// cannot wedge the single-writer loop.
+func (r *Room) persistNow() {
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	r.persist(ctx)
+}
+
+// reEvaluateNow re-evaluates members under a bounded, room-scoped context so a
+// slow/hung authZ backend cannot wedge the loop.
+func (r *Room) reEvaluateNow() {
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	r.reEvaluateMembers(ctx)
+}
+
+// handleReEvaluate runs a re-evaluation and re-arms the idle timer if it emptied
+// the room. A re-evaluation can disconnect members whose read access was revoked;
+// if that left the room empty, the idle timer must be re-armed so the now-empty
+// room is released (and its goroutine reclaimed) rather than leaking — mirroring
+// cmdLeave.
+func (r *Room) handleReEvaluate(armIdle func()) {
+	r.reEvaluateNow()
+	if len(r.members) == 0 {
+		armIdle()
+	}
+}
+
+// flushContributionNow flushes the contribution window under a bounded,
+// room-scoped context (the bus Contributor call must not stall the loop).
+func (r *Room) flushContributionNow() {
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	r.flushContribution(ctx)
+}
+
+// purgeNow runs the owner-delete cascade under a bounded, room-scoped context so a
+// slow/hung blob/metadata backend cannot wedge the loop.
+func (r *Room) purgeNow() error {
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	return r.purge(ctx)
 }
 
 // enqueue submits a command to the run loop, returning false if the room has
@@ -210,6 +285,12 @@ type RoomConfig struct {
 	// metric/event: the set of actors that contributed in the window is emitted
 	// then reset (FR-014). Zero disables contribution flushing.
 	ContributionWindow time.Duration
+	// BackendTimeout bounds each backend call made on the room's single-writer run
+	// loop (authZ evaluation, snapshot persist, owner-delete purge, cross-pod
+	// publish). A slow or hung backend would otherwise stall the loop and block
+	// every other member's joins/messages/disconnects. Zero falls back to
+	// defaultBackendTimeout; the call is still cancelled when the room releases.
+	BackendTimeout time.Duration
 }
 
 // Limits are the configurable per-room enforcement bounds (FR-024, epic R9
@@ -239,6 +320,11 @@ const (
 	defaultUpdateRatePerSec        = 50
 	defaultCollaboratorInactivity  = 120 * time.Second
 	defaultContributionWindowEvery = 60 * time.Second
+	// defaultBackendTimeout bounds each backend call on the run loop (authZ,
+	// persist, purge, publish) so a hung backend cannot wedge the single-writer
+	// loop. Generous enough for a slow-but-alive backend; far below any human-
+	// noticeable room stall.
+	defaultBackendTimeout = 30 * time.Second
 )
 
 // DefaultLimits are the epic R9 defaults (all config-tunable, OPEN-4).
@@ -262,6 +348,7 @@ func DefaultRoomConfig() RoomConfig {
 		Limits:                 DefaultLimits(),
 		CollaboratorInactivity: defaultCollaboratorInactivity,
 		ContributionWindow:     defaultContributionWindowEvery,
+		BackendTimeout:         defaultBackendTimeout,
 	}
 }
 
@@ -281,7 +368,15 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	if deps.Contributor == nil {
 		deps.Contributor = noopContributor{}
 	}
+	if cfg.BackendTimeout <= 0 {
+		cfg.BackendTimeout = defaultBackendTimeout
+	}
 	doc := newRoomDoc(string(id))
+	// The room-lifetime context: every backend call on the run loop derives from
+	// it, and it is cancelled on release (finish) so a hung call unblocks at
+	// teardown. It is decoupled from any request lifetime (the caller already
+	// passes a context.WithoutCancel(reqCtx)).
+	roomCtx, cancel := context.WithCancel(ctx)
 	r := &Room{
 		id:           id,
 		content:      content,
@@ -297,9 +392,12 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		blobKind:     blobKind,
 		maxConns:     cfg.Limits.MaxConnsPerRoom,
 		contributors: make(map[string]struct{}),
+		ctx:          roomCtx,
+		cancel:       cancel,
 	}
 
 	if err := r.loadSnapshot(ctx); err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -314,17 +412,19 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		r.onDocUpdate(v...)
 	}))
 
-	// Subscribe to peer-pod fan-out (R4). The handler runs off the run loop, so
-	// it enqueues a cmdPeer onto the single-writer loop rather than touching the
-	// doc directly. The in-memory broadcaster's Subscribe is a no-op that never
-	// fires the handler, so single-pod deployments pay nothing here.
-	cancel, err := deps.Broadcaster.Subscribe(ctx, id, func(payload []byte, ephemeral bool) {
+	// Subscribe to peer-pod fan-out (R4) under the room-lifetime context so the
+	// subscription tracks the room (not the bootstrap request). The handler runs
+	// off the run loop, so it enqueues a cmdPeer onto the single-writer loop rather
+	// than touching the doc directly. The in-memory broadcaster's Subscribe is a
+	// no-op that never fires the handler, so single-pod deployments pay nothing.
+	cancelSub, err := deps.Broadcaster.Subscribe(roomCtx, id, func(payload []byte, ephemeral bool) {
 		r.enqueue(command{kind: cmdPeer, data: payload, ephemeral: ephemeral})
 	})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	r.cancelSub = cancel
+	r.cancelSub = cancelSub
 
 	return r, nil
 }
@@ -418,11 +518,11 @@ func (r *Room) run() {
 			}
 
 		case <-saveTimer.C:
-			r.persist(context.Background())
+			r.persistNow()
 
 		case <-idleTimer.C:
 			if len(r.members) == 0 {
-				r.persist(context.Background())
+				r.persistNow()
 				r.finish()
 				return
 			}
@@ -432,7 +532,7 @@ func (r *Room) run() {
 			sweepTimer.Reset(sweepEvery)
 
 		case <-contribTimer.C:
-			r.flushContribution(context.Background())
+			r.flushContributionNow()
 			contribTimer.Reset(contribEvery)
 		}
 	}
@@ -483,13 +583,13 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		}
 
 	case cmdPersist:
-		r.persist(context.Background())
+		r.persistNow()
 
 	case cmdReEvaluate:
-		r.reEvaluateMembers(context.Background())
+		r.handleReEvaluate(armIdle)
 
 	case cmdPurge:
-		err := r.purge(context.Background())
+		err := r.purgeNow()
 		if cmd.done2 != nil {
 			cmd.done2 <- err
 		}
@@ -497,7 +597,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		return false
 
 	case cmdClose:
-		r.persist(context.Background())
+		r.persistNow()
 		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
 		r.finish()
 		return false
@@ -516,7 +616,9 @@ func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
 		return joinResult{err: ErrRoomFull}
 	}
 
-	mode, err := r.resolveMode(context.Background(), identity)
+	joinCtx, cancel := r.opCtx()
+	mode, err := r.resolveMode(joinCtx, identity)
+	cancel()
 	if err != nil {
 		return joinResult{err: err}
 	}
@@ -809,14 +911,18 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		r.sendTo(src, reply.Bytes())
 	}
 
+	// MaxDocBytes is enforced pre-commit (dispatchSync), so an oversized update
+	// never mutated or broadcast the live doc. Disconnect only the offender
+	// (FR-024 offender-only impact); other collaborators are untouched.
+	if outcome.rejectedTooLarge {
+		r.disconnect(src, "document size limit exceeded")
+		return false
+	}
+
 	if outcome.applied {
 		// A collaborator just wrote: record activity (resets the inactivity
-		// downgrade timer), record the actor for the contribution window, and
-		// enforce the max-doc-size limit (FR-024).
+		// downgrade timer) and record the actor for the contribution window.
 		r.recordActivity(src)
-		if r.cfg.Limits.MaxDocBytes > 0 && r.docByteSize() > r.cfg.Limits.MaxDocBytes {
-			r.disconnect(src, "document size limit exceeded")
-		}
 	}
 
 	// onDocUpdate flips dirty=true synchronously inside ApplyUpdate when the
@@ -846,10 +952,26 @@ func (r *Room) recordActivity(src connID) {
 	}
 }
 
-// docByteSize is the encoded v2 size of the authoritative doc, the measure the
-// max-doc-size limit is enforced against (the persisted snapshot size, FR-024).
-func (r *Room) docByteSize() int {
-	return len(ycrdt.EncodeStateAsUpdateV2(r.doc, nil))
+// applyWouldExceedMaxDocBytes reports whether applying update to the authoritative
+// doc would grow its encoded v2 snapshot past MaxDocBytes — WITHOUT mutating the
+// live doc. It scratch-applies the update onto a throwaway clone built from the
+// current v2 snapshot and measures the clone, so an oversized write is rejected
+// pre-commit (no mutation, no broadcast of the live doc) rather than evicted after
+// the fact (FR-024 offender-only impact). Returns false when the limit is disabled
+// (MaxDocBytes <= 0). Runs on the single-writer run loop, so reading r.doc is
+// race-free.
+func (r *Room) applyWouldExceedMaxDocBytes(update []byte) bool {
+	limit := r.cfg.Limits.MaxDocBytes
+	if limit <= 0 {
+		return false
+	}
+	// Cheap lower bound first: the current snapshot already over the limit means a
+	// non-empty mutating write can only keep it there or grow it. (We still scratch-
+	// apply below for the exact answer in the common in-bounds case.)
+	scratch := newRoomDoc(string(r.id))
+	ycrdt.ApplyUpdateV2(scratch, ycrdt.EncodeStateAsUpdateV2(r.doc, nil), nil)
+	ycrdt.ApplyUpdate(scratch, update, nil)
+	return len(ycrdt.EncodeStateAsUpdateV2(scratch, nil)) > limit
 }
 
 // onDocUpdate is the doc "update" observer: it frames the v1 update and fans it
@@ -888,7 +1010,9 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 // single-pod (the in-memory broadcaster's Publish returns immediately).
 func (r *Room) publishToPeers(frame []byte, ephemeral bool) {
 	start := time.Now()
-	if err := r.deps.Broadcaster.Publish(context.Background(), r.id, frame, ephemeral); err != nil {
+	ctx, cancel := r.opCtx()
+	defer cancel()
+	if err := r.deps.Broadcaster.Publish(ctx, r.id, frame, ephemeral); err != nil {
 		r.logger.Warn("cluster fan-out publish failed", zap.Error(err))
 		r.metrics.FanoutFailed()
 		return
@@ -986,6 +1110,12 @@ func (r *Room) finish() {
 	}
 	if r.cancelSub != nil {
 		r.cancelSub()
+	}
+	// Cancel the room-lifetime context so any backend call still in flight on the
+	// run loop (or its subscription) unblocks. The final persist/purge already ran
+	// before finish, so this never aborts in-progress save-on-release work.
+	if r.cancel != nil {
+		r.cancel()
 	}
 	close(r.done)
 	if r.onReleased != nil {
