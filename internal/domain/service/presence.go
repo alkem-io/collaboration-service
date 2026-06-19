@@ -101,7 +101,10 @@ func (r *Room) purge(ctx context.Context) error {
 			return err
 		}
 	}
-	return r.deps.Metadata.Delete(ctx, r.id)
+	if err := r.deps.Metadata.Delete(ctx, r.id); err != nil && !isNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // mustReadOnlyControl frames a read-only-state control with the given value; it

@@ -190,8 +190,16 @@ func TestRefusedJoinClosesSocket(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
-	if _, _, readErr := conn.Read(ctx); readErr == nil {
+	_, _, readErr := conn.Read(ctx)
+	if readErr == nil {
 		t.Fatal("second connection should have been closed by the server")
+	}
+	// A refused-on-full join closes with policy-violation (joinCloseStatus); assert
+	// that specific status rather than accepting any read error, so a regression in
+	// the close mapping is caught.
+	if status := websocket.CloseStatus(readErr); status != websocket.StatusPolicyViolation {
+		t.Fatalf("close status = %d, want StatusPolicyViolation (%d): %v",
+			status, websocket.StatusPolicyViolation, readErr)
 	}
 }
 

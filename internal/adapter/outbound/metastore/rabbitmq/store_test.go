@@ -19,6 +19,7 @@ type fakeRPC struct {
 	// reply is unmarshalled into the Call's reply arg, keyed by pattern.
 	replies map[string]any
 	callErr error
+	emitErr error
 }
 
 type capturedCall struct {
@@ -41,6 +42,9 @@ func (f *fakeRPC) Call(_ context.Context, pattern string, data, reply any) error
 }
 
 func (f *fakeRPC) Emit(_ context.Context, pattern string, data any) error {
+	if f.emitErr != nil {
+		return f.emitErr
+	}
 	f.emits = append(f.emits, capturedCall{pattern: pattern, data: data})
 	return nil
 }
@@ -249,6 +253,17 @@ func TestContributionEmitsEvent(t *testing.T) {
 	if !ok || data.ID != "doc-c" || len(data.Users) != 2 ||
 		data.Users[0].ID != "actor-1" || data.Users[1].ID != "actor-2" {
 		t.Fatalf("contribution emit payload = %+v", f.emits[0].data)
+	}
+}
+
+func TestContributionPropagatesEmitError(t *testing.T) {
+	// A bus emit failure must surface as a wrapped collaboration-contribution
+	// error so the caller can log/observe the dropped analytics event.
+	f := &fakeRPC{emitErr: errors.New("bus down")}
+	store := newWithRPC(f)
+	err := store.Contribution(context.Background(), "doc-c", []string{"actor-1"})
+	if err == nil || !contains(err.Error(), "collaboration-contribution") {
+		t.Fatalf("expected wrapped emit error, got %v", err)
 	}
 }
 

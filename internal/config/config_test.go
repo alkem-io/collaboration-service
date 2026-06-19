@@ -263,6 +263,14 @@ func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
 }
 
 func TestLimitsDefaults(t *testing.T) {
+	// Clear any ambient limit overrides so the test asserts the built-in defaults
+	// regardless of the runner's environment (getenv treats "" as unset).
+	for _, k := range []string{
+		"MAX_DOC_BYTES", "MAX_CONNS_PER_ROOM", "UPDATE_RATE_PER_SEC", "UPDATE_BURST",
+		"COLLABORATOR_INACTIVITY_SECONDS", "CONTRIBUTION_WINDOW_SECONDS",
+	} {
+		t.Setenv(k, "")
+	}
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
