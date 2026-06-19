@@ -255,8 +255,8 @@ func TestOfflineReconnectNoLostEdits(t *testing.T) {
 
 	// B reconnects: it flushes its offline buffer (so A converges) and drives
 	// SyncStep1 (so the server replies with the delta B is missing — online-a).
-	b.goOnline()          // end partition: inbound frames apply again
-	b.observeUpdates()    // now B forwards local edits
+	b.goOnline()              // end partition: inbound frames apply again
+	b.observeUpdates()        // now B forwards local edits
 	b.pushBufferedAndResync() // flush offline buffer + SyncStep1
 
 	waitFor(t, "US5 convergence", func() bool {

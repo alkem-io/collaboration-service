@@ -93,6 +93,12 @@ func (s *Store) Delete(ctx context.Context, id model.DocumentID) error {
 	if reply.Error != "" {
 		return fmt.Errorf("collaboration-delete: %s", reply.Error)
 	}
+	// Mirror Save: a success=false reply with no error string is still a failure
+	// (the server reports success=true for an already-absent row, so this does
+	// not break delete idempotency).
+	if !reply.Success {
+		return fmt.Errorf("collaboration-delete: server reported failure")
+	}
 	return nil
 }
 

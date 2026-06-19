@@ -638,9 +638,11 @@ func (r *Room) persist(ctx context.Context) {
 		return
 	}
 
+	newVersion := r.version + 1
 	meta := model.Metadata{
 		ID:                    r.id,
 		ContentType:           r.content,
+		Version:               newVersion,
 		ContentPointer:        pointer,
 		BlobStore:             r.blobKind,
 		AuthorizationPolicyID: r.policyID,
@@ -653,7 +655,7 @@ func (r *Room) persist(ctx context.Context) {
 	}
 
 	r.pointer = pointer
-	r.version++
+	r.version = newVersion
 	r.dirty = false
 	r.metrics.SnapshotSaved()
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})

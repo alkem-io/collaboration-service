@@ -68,9 +68,17 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("s3 blob store: Region (or Endpoint) is required")
 	}
 
-	loadOpts := []func(*awsconfig.LoadOptions) error{}
-	if cfg.Region != "" {
-		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
+	// aws-sdk-go-v2 still requires a region even with a custom endpoint (unless
+	// AWS_REGION is set in the environment). Default to us-east-1 for the common
+	// custom-endpoint case (MinIO/localstack), where the region is irrelevant but
+	// must be non-empty for config loading to succeed.
+	region := cfg.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	loadOpts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
 	}
 	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
