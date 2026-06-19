@@ -233,3 +233,20 @@ func TestNewBuildsClientOffline(t *testing.T) {
 		t.Errorf("store = %+v", store)
 	}
 }
+
+func TestNewEndpointWithoutRegionDefaultsRegion(t *testing.T) {
+	// A custom-endpoint config (MinIO/localstack) with no region must still build:
+	// aws-sdk-go-v2 requires a non-empty region for config loading, so New defaults
+	// it to us-east-1 rather than failing.
+	store, err := New(context.Background(), Config{
+		Bucket:       "snapshots",
+		Endpoint:     "http://localhost:9000",
+		UsePathStyle: true,
+	})
+	if err != nil {
+		t.Fatalf("New with endpoint and no region: %v", err)
+	}
+	if store == nil || store.bucket != "snapshots" {
+		t.Errorf("store = %+v", store)
+	}
+}

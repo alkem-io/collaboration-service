@@ -194,6 +194,16 @@ func TestDeleteServerErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestDeleteSuccessFalseWithoutErrorSurfaces(t *testing.T) {
+	// A {success:false} reply with no error string must still fail (mirrors Save),
+	// rather than silently dropping the delete.
+	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Success: false}}}
+	store := newWithRPC(f)
+	if err := store.Delete(context.Background(), "d"); err == nil {
+		t.Error("expected Delete to fail when the server reports success=false")
+	}
+}
+
 func TestMarshalEnvelopeShape(t *testing.T) {
 	// The NestJS RMQ request envelope { pattern, data, id } must serialize with
 	// exactly those keys so a @MessagePattern consumer routes it.

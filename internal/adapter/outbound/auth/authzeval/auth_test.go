@@ -74,6 +74,24 @@ func TestEvaluateGrantedPrivilege(t *testing.T) {
 	}
 }
 
+func TestEvaluateTrimsTrailingSlashOnServiceURL(t *testing.T) {
+	// A ServiceURL configured with a trailing slash must not produce a
+	// "//internal/auth/evaluate" request path (which breaks routing on some
+	// gateways).
+	var gotPath string
+	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		writeEval(w, true, "")
+	}))
+	adapter := New(Config{ServiceURL: srv.URL + "/"}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
+	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if gotPath != "/internal/auth/evaluate" {
+		t.Errorf("request path = %q, want /internal/auth/evaluate", gotPath)
+	}
+}
+
 func TestEvaluateCleanDenial(t *testing.T) {
 	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeEval(w, false, "no grant")

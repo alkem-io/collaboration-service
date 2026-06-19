@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
@@ -116,7 +117,10 @@ func New(cfg Config, policies PolicyResolver) *Adapter {
 		},
 	})
 	return &Adapter{
-		baseURL:  cfg.ServiceURL,
+		// Trim a trailing slash so the request path is "/internal/auth/evaluate"
+		// and never "//internal/auth/evaluate" when ServiceURL is configured with
+		// a trailing slash (which can break routing on some gateways).
+		baseURL:  strings.TrimRight(cfg.ServiceURL, "/"),
 		client:   client,
 		breaker:  breaker,
 		policies: policies,
