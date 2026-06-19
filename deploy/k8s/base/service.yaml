@@ -1,0 +1,19 @@
+# collaboration-service Service (WS-E / infra-ops T001).
+# ClusterIP fronting the WebSocket + operational HTTP port. The Ingress upgrades
+# to WebSocket; in-cluster callers (server, health checks) use this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+    app.kubernetes.io/name: collaboration-service
+spec:
+  type: ClusterIP
+  selector:
+    app: collaboration-service
+  ports:
+    - name: http-ws
+      port: 4006
+      targetPort: http-ws
+      protocol: TCP

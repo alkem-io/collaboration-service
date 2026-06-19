@@ -1,0 +1,63 @@
+# collaboration-redis — the cross-pod fan-out bus (WS-E / infra-ops T001).
+#
+# FANOUT_MODE=redis: each pod publishes document updates on doc:{id} and
+# awareness/ephemeral on awareness:{id}; every other pod subscribes, so a client
+# may connect to ANY replica. This is a pure pub/sub relay — NO persistence
+# (snapshots live in file-service; the index in the main DB via RMQ). Loss of a
+# message is a momentary fan-out gap the y-protocols re-sync heals, so Redis here
+# is disposable (no PVC, no replication needed for correctness).
+#
+# A managed Redis (Scaleway) MAY replace this in prod — the overlay would drop
+# this manifest and point REDIS_URL at the managed instance. Kept in the base so a
+# self-hosted environment (acceptance) has a working fan-out out of the box.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collaboration-redis
+  labels:
+    app: collaboration-redis
+    app.kubernetes.io/name: collaboration-redis
+    app.kubernetes.io/part-of: alkemio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: collaboration-redis
+  template:
+    metadata:
+      labels:
+        app: collaboration-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--save", "", "--appendonly", "no"] # ephemeral relay: no persistence
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collaboration-redis
+  labels:
+    app: collaboration-redis
+spec:
+  type: ClusterIP
+  selector:
+    app: collaboration-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

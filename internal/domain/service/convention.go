@@ -44,3 +44,27 @@ func applyConvention(doc *ycrdt.Doc, content model.ContentType) {
 func isNotFound(err error) bool {
 	return errors.Is(err, model.ErrNotFound)
 }
+
+// NewMigrationDoc constructs an authoritative GC'd Y.Doc identical to the one a
+// live room uses (newRoomDoc), exported for the one-time migration tool
+// (internal/migrate) so a migrated snapshot is byte-shape-identical to a
+// room-persisted one. Migration runs off the run loop entirely, so there is no
+// concurrency to guard here.
+func NewMigrationDoc(guid string) *ycrdt.Doc {
+	return newRoomDoc(guid)
+}
+
+// ApplyMemoConvention materializes the memo root convention (Y.XmlFragment
+// "default") on doc — the migration-tool entry point to applyConvention for the
+// memo case, so a migrated memo rehydrates with the same root a fresh live room
+// would create.
+func ApplyMemoConvention(doc *ycrdt.Doc) {
+	applyConvention(doc, model.ContentTypeMemo)
+}
+
+// ApplyWhiteboardConvention materializes the whiteboard root convention
+// (id-keyed "elements" + "files" + "appState" maps) on doc, the migration-tool
+// entry point to applyConvention for the whiteboard case.
+func ApplyWhiteboardConvention(doc *ycrdt.Doc) {
+	applyConvention(doc, model.ContentTypeWhiteboard)
+}

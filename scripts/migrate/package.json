@@ -1,0 +1,14 @@
+{
+  "name": "collab-migrate-whiteboard-seam",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cross-language seam for the WS-E whiteboard migration: runs @alkemio/excalidraw-yjs-binding's populateYDoc over a legacy Excalidraw scene and emits a Yjs v1 update the Go cmd/migrate tool re-encodes to a v2 snapshot. See whiteboard-to-ydoc.mjs.",
+  "type": "module",
+  "scripts": {
+    "convert": "node whiteboard-to-ydoc.mjs"
+  },
+  "dependencies": {
+    "@alkemio/excalidraw-yjs-binding": "^0.18.0",
+    "yjs": "13.6.31"
+  }
+}

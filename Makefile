@@ -1,12 +1,24 @@
-.PHONY: build docker test e2e integration coverage-gate lint vet openapi setup-hooks run clean
+.PHONY: build build-migrate docker test e2e integration coverage-gate lint vet openapi setup-hooks run migrate-dryrun clean
 
 BINARY := collaboration-service
 GO := go
 GOFLAGS := -race
 
-build:
+build: build-migrate
 	mkdir -p bin/
 	$(GO) build -o bin/$(BINARY) ./cmd/server/
+
+# The one-time WS-E migration tool (cmd/migrate). HUMAN-GATED — building it does
+# not run it; see docs/migration-cutover-runbook.md.
+build-migrate:
+	mkdir -p bin/
+	$(GO) build -o bin/migrate ./cmd/migrate/
+
+# Smoke-test the migration end to end with the built-in seed corpus, writing
+# nothing (dry-run). Memos migrate Go-native; whiteboards flag unless --wb-script
+# is wired (the published-binding seam, scripts/migrate/README.md).
+migrate-dryrun:
+	$(GO) run ./cmd/migrate/ --seed --dry-run
 
 docker:
 	docker build -t alkemio/collaboration-service:latest .

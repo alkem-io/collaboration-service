@@ -1,0 +1,95 @@
+# collaboration-service Deployment (WS-E / infra-ops T001).
+#
+# Unified real-time collaboration backend (memos + whiteboards over Yjs). This is
+# a base manifest; the prod (Scaleway) and acceptance overlays patch replicas,
+# resources, env, and image tag. See deploy/k8s/overlays/.
+#
+# Key shape:
+#   - One long-lived WebSocket per document (wss://<host>/collab/<documentId>).
+#     The Service/Ingress MUST allow WebSocket upgrade + long idle (the
+#     y-protocols layer owns keepalive; there is no server write/idle timeout).
+#   - Multi-pod: Redis fan-out (FANOUT_MODE=redis) makes any pod able to serve any
+#     document; a client may land on any replica (no sticky sessions required for
+#     correctness — Redis fans updates/awareness across pods).
+#   - Metadata index rides the server RabbitMQ bus (METADATA_STORE=rabbitmq); the
+#     snapshot blob offloads to file-service (BLOB_STORE=file-service).
+#   - AuthZ via the authorization-evaluation-service (AUTH_MODE=authzeval).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+    app.kubernetes.io/name: collaboration-service
+    app.kubernetes.io/part-of: alkemio
+spec:
+  # Overlays set replicas (and the HPA owns the runtime count). Two pods minimum
+  # in real environments so the Redis fan-out path is always exercised.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: collaboration-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # WebSockets are long-lived; surge a new pod before draining an old one so
+      # reconnecting clients always have somewhere to land.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: collaboration-service
+        app.kubernetes.io/name: collaboration-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4006"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: collaboration-service
+          # Overlays pin the image tag (release flow bumps it).
+          image: ghcr.io/alkem-io/collaboration-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-ws
+              containerPort: 4006
+          envFrom:
+            - configMapRef:
+                name: collaboration-service-config
+            - secretRef:
+                name: collaboration-service-secrets
+          # Liveness/readiness on the operational HTTP surface (/healthz). A WS
+          # endpoint is not a health probe; /healthz reports the room manager up.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http-ws
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-ws
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      # A graceful drain: SIGTERM triggers App.Close, which releases every live
+      # room (persisting a final snapshot each). Give it room before SIGKILL.
+      terminationGracePeriodSeconds: 30

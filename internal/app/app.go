@@ -287,6 +287,53 @@ func blobKindFor(mode config.BlobStoreMode) model.BlobStoreKind {
 	}
 }
 
+// MigrationBackends is the subset of persistence the one-time migration tool
+// (cmd/migrate) writes through: the BlobStore (snapshot) and MetadataStore
+// (index), plus the BlobKind to stamp on each migrated row. It is exactly the
+// pair Room.persist uses, so a migrated document is indistinguishable from one a
+// live room saved.
+type MigrationBackends struct {
+	Blob     port.BlobStore
+	Metadata port.MetadataStore
+	BlobKind model.BlobStoreKind
+}
+
+// BuildMigrationBackends selects the BlobStore + MetadataStore from configuration
+// using the SAME adapter-selection logic as the running service (buildBlob /
+// buildMetadata), so the migration writes through identical wiring (no
+// hand-assembled copy — constitution anti-pattern 3). It returns a cleanup that
+// closes any connection-holding backend (rabbitmq/postgres). The lifecycle
+// consumer, fan-out, and auth are intentionally NOT wired — migration is a batch
+// writer, not a server.
+func BuildMigrationBackends(cfg *config.Config, logger *zap.Logger) (MigrationBackends, func(), error) {
+	var closers []func()
+	cleanup := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+
+	metadata, _, err := buildMetadata(cfg, &closers)
+	if err != nil {
+		cleanup()
+		return MigrationBackends{}, nil, err
+	}
+	blob, err := buildBlob(cfg)
+	if err != nil {
+		cleanup()
+		return MigrationBackends{}, nil, err
+	}
+	logger.Info("migration backends wired",
+		zap.String("metadata_store", string(cfg.MetaStore)),
+		zap.String("blob_store", string(cfg.BlobStore)),
+	)
+	return MigrationBackends{
+		Blob:     blob,
+		Metadata: metadata,
+		BlobKind: blobKindFor(cfg.BlobStore),
+	}, cleanup, nil
+}
+
 func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (http.Handler, *service.Manager) {
 	httpAdapter.InitMetrics()
 

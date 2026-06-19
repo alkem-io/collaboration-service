@@ -1,0 +1,66 @@
+# collaboration-service — PRODUCTION overlay (WS-E / infra-ops T001).
+#
+# Scaleway prod (GitOps target: the PROD deploy PR → main, which stays DRAFT and
+# is human-merged — release-deploy convention). Larger footprint, prod domain +
+# TLS, prod-scoped file-service bucket id. A managed Redis MAY replace the base
+# self-hosted Redis here (drop redis.yaml + point REDIS_URL at the managed
+# instance) — left using the base Redis until the managed instance is provisioned.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: alkemio
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/alkem-io/collaboration-service
+    newTag: latest # release-deploy bumps this to the released version tag
+
+replicas:
+  - name: collaboration-service
+    count: 3
+
+patches:
+  # Prod host (TLS managed by the cluster cert-manager / ingress default issuer).
+  - target:
+      kind: Ingress
+      name: collaboration-service
+    patch: |
+      - op: add
+        path: /spec/rules/0/host
+        value: collaboration.alkem.io
+  # Prod file-service bucket id.
+  - target:
+      kind: ConfigMap
+      name: collaboration-service-config
+    patch: |
+      - op: replace
+        path: /data/FILE_SERVICE_STORAGE_BUCKET_ID
+        value: "PROD-FILE-SERVICE-BUCKET-UUID"
+  # Prod resource headroom (collaboration is connection-bound; give memory room
+  # for many live Y.Docs in memory).
+  - target:
+      kind: Deployment
+      name: collaboration-service
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "250m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "256Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "2Gi"
+  # Prod HPA ceiling.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: collaboration-service
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 12

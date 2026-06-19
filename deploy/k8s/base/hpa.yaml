@@ -1,0 +1,50 @@
+# collaboration-service HPA (WS-E / infra-ops T001).
+#
+# Collaboration load is connection-bound (long-lived WebSockets) more than
+# CPU-bound, but CPU + memory are the portable signals every cluster exposes, so
+# the base scales on those. A connection-count custom metric (active rooms /
+# conns, emitted on /metrics) is the ideal driver — wire it via a Prometheus
+# adapter in the overlay where the metrics pipeline exists (noted in the
+# PrometheusRule). minReplicas keeps the multi-pod (Redis) path always live.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: collaboration-service
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      # WebSockets are long-lived; scale down slowly so we don't churn pods out
+      # from under connected clients. Pods drain gracefully (final snapshot) but
+      # every scale-down still forces reconnects.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30

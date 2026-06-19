@@ -1,0 +1,43 @@
+# collaboration-service Ingress — WS-CAPABLE (WS-E / infra-ops T001).
+#
+# The whole point: clients open a long-lived raw WebSocket at
+# wss://<host>/collab/<documentId>. The ingress MUST:
+#   - allow the HTTP→WebSocket Upgrade (handled natively by ingress-nginx for any
+#     backend that sends `Connection: Upgrade` — no special annotation needed for
+#     the upgrade itself, but the timeouts below are essential),
+#   - NOT time out idle connections quickly: a collaboration socket can sit idle
+#     (no edits) for long stretches while staying open. The y-protocols layer owns
+#     application keepalive; the proxy must not sever a quiet-but-live socket.
+#   - NOT buffer the response (streaming).
+#
+# Host + TLS are overlay concerns (prod vs. acceptance domains / cert issuers).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    # Long read/send timeouts so an idle-but-open WS is not severed (1h).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Do not buffer — collaboration traffic is bidirectional streaming.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Upgrade/Connection headers for the WebSocket handshake (explicit for clarity;
+    # ingress-nginx forwards them by default).
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  rules:
+    # Host is patched per overlay (collaboration.<env>.alkem.io).
+    - http:
+        paths:
+          - path: /collab
+            pathType: Prefix
+            backend:
+              service:
+                name: collaboration-service
+                port:
+                  name: http-ws

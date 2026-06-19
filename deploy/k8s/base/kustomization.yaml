@@ -1,0 +1,23 @@
+# collaboration-service Kustomize base (WS-E / infra-ops T001–T003).
+#
+# Environment-agnostic manifests. The prod (Scaleway) and acceptance overlays in
+# ../overlays/ patch image tag, replicas, resources, host/TLS, and the
+# environment-scoped config (file-service bucket id, domains). The example secret
+# is NOT included here — each environment supplies its own (sealed/Vault).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - configmap.yaml
+  - redis.yaml
+  - hpa.yaml
+  - observability.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: alkemio
+      app.kubernetes.io/component: collaboration
+    includeSelectors: false

@@ -1,0 +1,50 @@
+# collaboration-service non-secret config (WS-E / infra-ops T001).
+#
+# These are the NON-SECRET env values (the pluggable-port selections + endpoints +
+# limits). Secrets (Redis/RabbitMQ/Postgres credentials, file-service bucket/auth
+# ids) live in the collaboration-service-secrets Secret (see secret.example.yaml
+# / the Vault transition). Overlays patch endpoints + bucket ids per environment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collaboration-service-config
+  labels:
+    app: collaboration-service
+data:
+  PORT: "4006"
+
+  # Alkemio topology: multi-pod (Redis fan-out), metadata over the server RMQ bus,
+  # snapshot blob offloaded to file-service, authZ via the auth-evaluation-service.
+  FANOUT_MODE: "redis"
+  METADATA_STORE: "rabbitmq"
+  BLOB_STORE: "file-service"
+  AUTH_MODE: "authzeval"
+
+  # RabbitMQ metadata bus (the unified collaboration-save/-fetch/-delete/-info/
+  # -contribution contract). Host/credentials come from the Secret; the queue name
+  # is shared with the server.
+  RABBITMQ_QUEUE: "alkemio-collaboration"
+
+  # file-service blob offload (BLOB_STORE=file-service). The bucket + authorization
+  # ids are environment-scoped UUIDs — patched per overlay (they reference rows
+  # provisioned in that environment's DB). MAX_UPLOAD_SIZE matches file-service's
+  # 32 MiB ceiling (and the room MaxDocBytes default).
+  FILE_SERVICE_URL: "http://file-service:4003"
+  MAX_UPLOAD_SIZE: "33554432"
+  # Environment-scoped reference UUIDs (NOT secrets — they name rows provisioned in
+  # that environment's DB). Overlays replace these per environment.
+  FILE_SERVICE_STORAGE_BUCKET_ID: "REPLACE-PER-OVERLAY-bucket-uuid"
+  FILE_SERVICE_AUTHORIZATION_ID: "REPLACE-PER-OVERLAY-authorization-uuid"
+
+  # authorization-evaluation-service (AUTH_MODE=authzeval) — h2c HTTP/2.
+  AUTH_SERVICE_URL: "http://authorization-evaluation-service:6060"
+  AUTH_BREAKER_FAILURE_THRESHOLD: "3"
+  AUTH_BREAKER_TIMEOUT_SECONDS: "15"
+  AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS: "2"
+
+  # Enforcement limits + presence cadences (epic R9 / OPEN-4 defaults; tune per env).
+  MAX_DOC_BYTES: "33554432"
+  MAX_CONNS_PER_ROOM: "50"
+  UPDATE_RATE_PER_SEC: "50"
+  COLLABORATOR_INACTIVITY_SECONDS: "120"
+  CONTRIBUTION_WINDOW_SECONDS: "60"

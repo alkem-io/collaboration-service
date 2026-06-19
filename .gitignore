@@ -29,5 +29,12 @@ vendor/
 # JS-interop e2e harness deps (installed via `npm ci`; never committed)
 test/e2e/jsinterop/node_modules/
 
+# Whiteboard migration seam deps (installed via `npm ci`; never committed)
+scripts/migrate/node_modules/
+
+# Migration run reports / legacy export corpora (never committed)
+*-report.json
+legacy*.jsonl
+
 # Local Claude Code state
 .claude/

@@ -1,0 +1,122 @@
+# collaboration-service observability (WS-E / infra-ops T002).
+#
+# A ServiceMonitor (Prometheus Operator) scraping /metrics, plus a PrometheusRule
+# with the alerts the task calls for: rooms, conns, update rate, save
+# latency/failures, fan-out lag, convergence. The metric NAMES below follow the
+# domain's Prometheus surface (internal/adapter/inbound/http PrometheusMetrics +
+# the domain Metrics interface); confirm exact names against /metrics when wiring
+# (they are the load-bearing contract between this rule and the code).
+#
+# NOTE: ServiceMonitor/PrometheusRule require the Prometheus Operator CRDs. If a
+# given environment uses the prometheus.io/scrape annotations instead (already on
+# the Deployment pod template), the ServiceMonitor is redundant there — keep
+# whichever the cluster's monitoring stack consumes.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: collaboration-service
+  endpoints:
+    - port: http-ws
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: collaboration-service
+  labels:
+    app: collaboration-service
+    release: prometheus
+spec:
+  # Metric names below are VERBATIM from internal/adapter/inbound/http/metrics.go
+  # (Prometheus namespace "collaboration"): rooms_active, connections_active,
+  # snapshots_total{outcome="saved"|"error"}, fanout_total{outcome="published"|
+  # "error"}, fanout_lag_seconds (histogram), contributing_actors.
+  groups:
+    - name: collaboration-service.rules
+      rules:
+        # Save (snapshot persistence) failures — a sustained error rate means edits
+        # are not durable (crash-loss window grows). High severity.
+        - alert: CollaborationSnapshotSaveFailures
+          expr: |
+            rate(collaboration_snapshots_total{outcome="error"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "collaboration-service snapshot saves are failing"
+            description: "Snapshot persistence (blob/metadata) has been failing for 10m — collaboration edits are at risk of loss beyond the debounce window."
+
+        # Fan-out publish latency (the local publish duration histogram, R10) — a
+        # p99 climb is the cross-pod back-pressure / Redis-slowness signal.
+        - alert: CollaborationFanoutLagHigh
+          expr: |
+            histogram_quantile(0.99, sum(rate(collaboration_fanout_lag_seconds_bucket[5m])) by (le)) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "collaboration-service fan-out publish p99 latency high"
+            description: "p99 cross-pod fan-out publish latency > 100ms for 10m — Redis or network back-pressure; multi-pod convergence may lag."
+
+        # Cross-pod fan-out failures — a multi-pod correctness signal: a client on
+        # pod A may not see pod B's edits until re-sync. Warning (self-heals on
+        # reconnect) escalating if sustained.
+        - alert: CollaborationFanoutFailures
+          expr: |
+            rate(collaboration_fanout_total{outcome="error"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "collaboration-service cross-pod fan-out is failing"
+            description: "Redis fan-out publishes have been failing for 10m — multi-pod convergence may lag until clients re-sync."
+
+        # Connection saturation — active connections approaching the pod count ×
+        # per-room cap headroom is the scale-up signal (the HPA acts on CPU/mem;
+        # this surfaces connection pressure the resource metrics may lag).
+        - alert: CollaborationConnectionsHigh
+          expr: |
+            sum(collaboration_connections_active) > 2000
+          for: 15m
+          labels:
+            severity: info
+          annotations:
+            summary: "collaboration-service connection count elevated"
+            description: "Sustained high open-connection count — check HPA headroom (connections are long-lived; resource-based autoscaling can lag)."
+
+        # No active rooms while pods are up for a long stretch is suspicious only
+        # in prod with known traffic; left as info (info-only, env-tuned).
+        - alert: CollaborationNoActiveRooms
+          expr: |
+            sum(collaboration_rooms_active) == 0
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "collaboration-service has no active rooms"
+            description: "No active collaboration rooms for 30m — expected off-peak, investigate if traffic is anticipated."
+
+        # Liveness: the service is scraped but reporting unready.
+        - alert: CollaborationServiceDown
+          expr: |
+            up{job="collaboration-service"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "collaboration-service target is down"
+            description: "Prometheus cannot scrape collaboration-service for 5m."
+
+# CONVERGENCE (≤1s, SC-002) and FAN-OUT LAG are validated end to end by the WS-F
+# e2e suite (two-pod convergence test) rather than a production alert — there is no
+# single in-prod metric that proves convergence without a probe. If a synthetic
+# convergence probe is added (a canary client measuring round-trip apply latency),
+# alert on its histogram here.
