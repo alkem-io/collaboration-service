@@ -111,7 +111,9 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateDocumentRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxCreateBody)).Decode(&req); err != nil {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxCreateBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		ErrorResponse{Error: "malformed request body"}.Render(w, http.StatusBadRequest)
 		return
 	}

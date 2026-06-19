@@ -9,8 +9,9 @@ import (
 
 // syncOutcome reports what dispatchSync did with a sync sub-message so the caller
 // can enforce presence/limits (T013/T014): whether the sub-message was a mutating
-// update (SyncStep2 / Update) and, when applied, the byte size of the payload (for
-// the max-doc-size limit).
+// update (SyncStep2 / Update) and whether it was actually applied. The max-doc
+// limit is enforced on the whole-doc size after apply (handleSync), not on the
+// per-update payload size.
 type syncOutcome struct {
 	// mutating is true for a SyncStep2 / Update (a write); false for a SyncStep1
 	// (read-only catch-up).
@@ -18,8 +19,6 @@ type syncOutcome struct {
 	// applied is true when a mutating update was actually applied to the doc
 	// (false when canMutate was false and the write was dropped for a viewer).
 	applied bool
-	// updateBytes is the length of the applied update payload (0 for SyncStep1).
-	updateBytes int
 }
 
 // dispatchSync decodes one framed sync message (SyncStep1 / SyncStep2 / Update)
@@ -77,7 +76,7 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 			return syncOutcome{mutating: true, applied: false}, nil
 		}
 		ycrdt.ApplyUpdate(r.doc, update, updateOrigin{src: src})
-		return syncOutcome{mutating: true, applied: true, updateBytes: len(update)}, nil
+		return syncOutcome{mutating: true, applied: true}, nil
 	}
 
 	return syncOutcome{}, nil

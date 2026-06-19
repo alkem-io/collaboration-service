@@ -1,5 +1,15 @@
 components:
   schemas:
+    http.CreateDocumentRequest:
+      properties:
+        contentType:
+          type: string
+        ownerRef:
+          type: string
+      required:
+        - contentType
+        - ownerRef
+      type: object
     http.CreateDocumentResponse:
       properties:
         contentType:
@@ -130,6 +140,12 @@ paths:
           required: true
           schema:
             type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/http.CreateDocumentRequest'
+        required: true
       responses:
         "200":
           content:
