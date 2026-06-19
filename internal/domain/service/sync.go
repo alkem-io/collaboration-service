@@ -10,8 +10,9 @@ import (
 // syncOutcome reports what dispatchSync did with a sync sub-message so the caller
 // can enforce presence/limits (T013/T014): whether the sub-message was a mutating
 // update (SyncStep2 / Update) and whether it was actually applied. The max-doc
-// limit is enforced on the whole-doc size after apply (handleSync), not on the
-// per-update payload size.
+// size limit is enforced BEFORE the live apply (dispatchSync), so an oversized
+// update never mutates or broadcasts the authoritative doc — only the offending
+// connection is rejected (the "offender-only impact" contract, FR-024).
 type syncOutcome struct {
 	// mutating is true for a SyncStep2 / Update (a write); false for a SyncStep1
 	// (read-only catch-up).
@@ -19,6 +20,11 @@ type syncOutcome struct {
 	// applied is true when a mutating update was actually applied to the doc
 	// (false when canMutate was false and the write was dropped for a viewer).
 	applied bool
+	// rejectedTooLarge is true when a mutating update was refused because applying
+	// it would have grown the encoded snapshot past MaxDocBytes; the live doc was
+	// left untouched (no mutation, no broadcast). The caller disconnects the
+	// offender.
+	rejectedTooLarge bool
 }
 
 // dispatchSync decodes one framed sync message (SyncStep1 / SyncStep2 / Update)
@@ -74,6 +80,14 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 		update := data.([]byte)
 		if !canMutate {
 			return syncOutcome{mutating: true, applied: false}, nil
+		}
+		// Enforce MaxDocBytes BEFORE committing to the live doc (FR-024): an
+		// oversized update must never mutate or broadcast the authoritative doc and
+		// then get evicted "after the fact". Scratch-apply the update onto a clone
+		// of the current state and measure; reject without touching r.doc when the
+		// result would exceed the limit.
+		if r.applyWouldExceedMaxDocBytes(update) {
+			return syncOutcome{mutating: true, applied: false, rejectedTooLarge: true}, nil
 		}
 		ycrdt.ApplyUpdate(r.doc, update, updateOrigin{src: src})
 		return syncOutcome{mutating: true, applied: true}, nil
