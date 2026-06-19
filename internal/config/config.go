@@ -129,7 +129,8 @@ type LimitsConfig struct {
 	// leaves (IDLE_RELEASE_SECONDS, default 30s; 0 releases immediately).
 	IdleReleaseSeconds int
 	// SaveDebounceMillis is the quiet period after the last edit before a snapshot
-	// is persisted (SAVE_DEBOUNCE_MILLIS, default 500ms).
+	// is persisted (SAVE_DEBOUNCE_MILLIS, default 500ms; 0 disables the periodic
+	// debounce so a snapshot is persisted only on idle-release/close).
 	SaveDebounceMillis int
 }
 
