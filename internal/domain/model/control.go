@@ -39,8 +39,10 @@ const (
 	// ControlReadOnlyState tells a client whether it may mutate the document
 	// (viewer vs collaborator). Wired fully with AuthZ in T014; emitted here so
 	// the wire shape is exercised. When ReadOnly is true the Reason field carries
-	// a ReadOnlyReason code (OPEN-1) so the client can preserve its read-only UX
-	// granularity (e.g. the memo footer readOnlyCode).
+	// a granular code (OPEN-1) so the client can preserve its read-only UX
+	// granularity (e.g. the memo footer readOnlyCode): a ReadOnlyReason for an
+	// authZ-driven downgrade, or a CollaboratorModeReason (e.g. "inactivity") when
+	// the read-only state is the result of a collaborator-mode downgrade.
 	ControlReadOnlyState ControlKind = "read-only-state"
 	// ControlCollaboratorMode tells a client its collaborator mode changed with a
 	// reason (OPEN-1): a capacity/multi-user/inactivity downgrade carries a
@@ -103,10 +105,13 @@ type ControlMessage struct {
 	Error string `json:"error,omitempty"`
 	// ReadOnly is the viewer/collaborator state for ControlReadOnlyState.
 	ReadOnly bool `json:"readOnly,omitempty"`
-	// Reason is the granular code (OPEN-1) explaining a ControlReadOnlyState
-	// (a ReadOnlyReason) or a ControlCollaboratorMode (a CollaboratorModeReason).
-	// It is additive and backward-compatible: clients that ignore it still work.
-	// Omitted when empty.
+	// Reason is the granular code (OPEN-1) explaining a downgrade. On a
+	// ControlCollaboratorMode it is a CollaboratorModeReason; on a
+	// ControlReadOnlyState it is usually a ReadOnlyReason, but an inactivity (or
+	// other collaborator-mode) downgrade also rides on read-only-state carrying a
+	// CollaboratorModeReason such as "inactivity". Both reason vocabularies are
+	// string aliases, so the wire field is one string. It is additive and
+	// backward-compatible: clients that ignore it still work. Omitted when empty.
 	Reason string `json:"reason,omitempty"`
 	// Mode is the resulting collaborator mode for ControlCollaboratorMode
 	// (viewer/collaborator). Omitted when empty.
