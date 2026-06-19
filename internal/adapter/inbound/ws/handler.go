@@ -152,10 +152,14 @@ func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *s
 // joinCloseStatus maps a refused-join error to a WebSocket close status and
 // reason. A full room or access denial is a policy violation (the client should
 // not retry blindly); any other error (a fail-closed authZ failure) is internal.
+// The close reason for a full room is the canonical room-capacity-reached code
+// (OPEN-1) so the client preserves its read-only/collaborator-mode UX granularity
+// — the join is refused (no control frame is sent on a refused join), so the code
+// rides the close reason instead.
 func joinCloseStatus(err error) (websocket.StatusCode, string) {
 	switch {
 	case errors.Is(err, service.ErrRoomFull):
-		return websocket.StatusPolicyViolation, "room full"
+		return websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached
 	case errors.Is(err, service.ErrForbidden):
 		return websocket.StatusPolicyViolation, "forbidden"
 	default:

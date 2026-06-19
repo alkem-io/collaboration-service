@@ -30,7 +30,10 @@ func (r *Room) disconnect(id connID, reason string) {
 // sweepInactive downgrades every collaborator that has not mutated the document
 // within CollaboratorInactivity to viewer, emitting a read-only-state control so
 // the client disables local editing (FR-014, whiteboard collaborator_inactivity
-// parity). Runs on the room loop, so the member map access is race-free.
+// parity). The downgrade carries the `inactivity` reason (OPEN-1) on both the
+// read-only-state and the additive collaborator-mode frame, so the client mirrors
+// today's collaborator-mode UX. Runs on the room loop, so the member map access is
+// race-free.
 func (r *Room) sweepInactive() {
 	if r.cfg.CollaboratorInactivity <= 0 {
 		return
@@ -42,9 +45,29 @@ func (r *Room) sweepInactive() {
 		}
 		m.mode = model.ModeViewer
 		r.members[id] = m
-		if frame := encodeControl(model.ControlMessage{Kind: model.ControlReadOnlyState, ReadOnly: true}); frame != nil {
-			r.sendMember(m, frame)
-		}
+		r.sendModeDowngrade(m, model.ReasonInactivity)
+	}
+}
+
+// sendModeDowngrade tells a single member it is now read-only for the given
+// reason (OPEN-1). It sends the read-only-state frame (backward-compatible: a
+// client only reading readOnly keeps working) carrying the reason code, plus the
+// additive collaborator-mode frame {mode: viewer, reason} the WS-D client uses to
+// preserve its collaborator-mode UX granularity.
+func (r *Room) sendModeDowngrade(m roomMember, reason model.CollaboratorModeReason) {
+	if frame := encodeControl(model.ControlMessage{
+		Kind:     model.ControlReadOnlyState,
+		ReadOnly: true,
+		Reason:   reason,
+	}); frame != nil {
+		r.sendMember(m, frame)
+	}
+	if frame := encodeControl(model.ControlMessage{
+		Kind:   model.ControlCollaboratorMode,
+		Mode:   model.ModeViewer,
+		Reason: reason,
+	}); frame != nil {
+		r.sendMember(m, frame)
 	}
 }
 
@@ -114,7 +137,15 @@ func (r *Room) reEvaluateMembers(ctx context.Context) {
 		}
 		m.mode = newMode
 		r.members[id] = m
-		r.sendMember(m, mustReadOnlyControl(newMode == model.ModeViewer))
+		if newMode == model.ModeViewer {
+			// Lost update-content (or fail-closed): read-only with the access
+			// reason (OPEN-1) so the client mirrors today's read-only UX.
+			reason := readOnlyReasonForIdentity(model.Identity{ActorID: m.actorID})
+			r.sendMember(m, mustReadOnlyControl(true, reason))
+		} else {
+			// Regained update-content: clear read-only (no reason).
+			r.sendMember(m, mustReadOnlyControl(false, ""))
+		}
 	}
 }
 
@@ -135,9 +166,14 @@ func (r *Room) purge(ctx context.Context) error {
 	return nil
 }
 
-// mustReadOnlyControl frames a read-only-state control with the given value; it
-// never returns nil for these fixed inputs (JSON marshalling of a known struct
-// cannot fail), so callers may use it inline.
-func mustReadOnlyControl(readOnly bool) []byte {
-	return encodeControl(model.ControlMessage{Kind: model.ControlReadOnlyState, ReadOnly: readOnly})
+// mustReadOnlyControl frames a read-only-state control with the given value and
+// reason code (OPEN-1; reason is empty when clearing read-only). It never returns
+// nil for these fixed inputs (JSON marshalling of a known struct cannot fail), so
+// callers may use it inline.
+func mustReadOnlyControl(readOnly bool, reason model.ReadOnlyReason) []byte {
+	return encodeControl(model.ControlMessage{
+		Kind:     model.ControlReadOnlyState,
+		ReadOnly: readOnly,
+		Reason:   reason,
+	})
 }
