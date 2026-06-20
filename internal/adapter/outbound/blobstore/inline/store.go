@@ -28,8 +28,9 @@ func New() *Store {
 
 // Put stores the snapshot bytes under pointer, replacing any previous snapshot,
 // and echoes the pointer back (inline blobs are addressed by the stable pointer
-// the caller supplies — the document id).
-func (s *Store) Put(_ context.Context, pointer string, data []byte) (string, error) {
+// the caller supplies — the document id). bucketID is ignored: inline blobs are
+// not bucket-scoped.
+func (s *Store) Put(_ context.Context, pointer, _ string, data []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]byte, len(data))

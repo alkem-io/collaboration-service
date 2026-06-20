@@ -72,7 +72,7 @@ func TestPurgeDurableOnlyDocument(t *testing.T) {
 	mgr, deps := testManager(t, fastConfig())
 
 	// Seed a metadata row + blob directly (the "persisted, room released" state).
-	if _, err := deps.blob.Put(context.Background(), "durable-only", []byte("snap")); err != nil {
+	if _, err := deps.blob.Put(context.Background(), "durable-only", "", []byte("snap")); err != nil {
 		t.Fatalf("seed blob: %v", err)
 	}
 	if err := deps.meta.Save(context.Background(), model.Metadata{
@@ -167,8 +167,8 @@ func TestPurgeDurableSurfacesMetadataLoadError(t *testing.T) {
 // the cascade error path.
 type deleteFailingBlob struct{ inner *blobinline.Store }
 
-func (d deleteFailingBlob) Put(ctx context.Context, p string, data []byte) (string, error) {
-	return d.inner.Put(ctx, p, data)
+func (d deleteFailingBlob) Put(ctx context.Context, p, bucketID string, data []byte) (string, error) {
+	return d.inner.Put(ctx, p, bucketID, data)
 }
 func (d deleteFailingBlob) Get(ctx context.Context, p string) ([]byte, error) {
 	return d.inner.Get(ctx, p)

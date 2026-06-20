@@ -71,7 +71,13 @@ type BlobStore interface {
 	// assigns its own id (file-service) returns that id. The returned pointer is
 	// persisted in the metadata index and used by Get/Delete, so a document
 	// always rehydrates from the right location (data-model.md ContentPointer).
-	Put(ctx context.Context, pointer string, data []byte) (string, error)
+	//
+	// bucketID is the document's own storage bucket (from the metadata index):
+	// the file-service adapter uploads the snapshot into THIS bucket so blobs
+	// co-locate with the document, falling back to its configured bucket when
+	// bucketID is empty (standalone / no-metadata). Adapters that do not address
+	// blobs by bucket (inline, local, s3) ignore it.
+	Put(ctx context.Context, pointer, bucketID string, data []byte) (string, error)
 	// Get returns the snapshot bytes for pointer, or model.ErrNotFound when
 	// none has been stored.
 	Get(ctx context.Context, pointer string) ([]byte, error)

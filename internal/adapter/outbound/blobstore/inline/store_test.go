@@ -13,7 +13,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	want := []byte{0x01, 0x02, 0x03}
 
-	if _, err := s.Put(ctx, "p1", want); err != nil {
+	if _, err := s.Put(ctx, "p1", "", want); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, err := s.Get(ctx, "p1")
@@ -35,7 +35,7 @@ func TestPutCopiesInput(t *testing.T) {
 	s := New()
 	ctx := context.Background()
 	in := []byte{0xAA}
-	if _, err := s.Put(ctx, "p", in); err != nil {
+	if _, err := s.Put(ctx, "p", "", in); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	in[0] = 0xBB // mutate caller's slice after Put

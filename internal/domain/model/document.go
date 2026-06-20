@@ -65,6 +65,13 @@ type Metadata struct {
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
 	// the authorization-evaluation-service; empty in open/standalone mode.
 	AuthorizationPolicyID string
+	// StorageBucketID is the document's OWN storage bucket (its
+	// profile.storageBucket.id, carried on collaboration-fetch). The
+	// file-service BlobStore persists each snapshot into this per-document
+	// bucket so blobs co-locate with the document's other media rather than
+	// piling into one flat platform bucket. Empty in standalone / no-metadata
+	// mode, where the BlobStore falls back to its configured bucket.
+	StorageBucketID string
 	// OwnerRef is the parent Alkemio entity that owns this document's
 	// lifecycle; the delete cascade keys off it (FR-023).
 	OwnerRef  string

@@ -114,8 +114,9 @@ func (s *Store) key(pointer string) string { return s.prefix + pointer }
 
 // Put stores the snapshot under the object key derived from pointer and echoes
 // the pointer back (S3 objects are addressed by the stable key the caller
-// supplies — the document id).
-func (s *Store) Put(ctx context.Context, pointer string, data []byte) (string, error) {
+// supplies — the document id). bucketID is ignored: the S3 bucket is fixed by
+// configuration, not per document.
+func (s *Store) Put(ctx context.Context, pointer, _ string, data []byte) (string, error) {
 	k := s.key(pointer)
 	_, err := s.api.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: &s.bucket,

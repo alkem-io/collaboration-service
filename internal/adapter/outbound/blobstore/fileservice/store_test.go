@@ -28,10 +28,11 @@ type stubFileService struct {
 	authID   string
 
 	// captured from the last create, for assertions.
-	lastBucket  string
-	lastAuth    string
-	lastDisplay string
-	lastReused  bool
+	lastBucket     string
+	lastDisplay    string
+	lastReused     bool
+	lastAuthSent   bool // whether an authorizationId field was present at all
+	lastAuthNonEmp bool // whether that field carried a non-empty value
 }
 
 func newStub() *stubFileService {
@@ -80,15 +81,16 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing storageBucketId", http.StatusBadRequest)
 		return
 	}
-	if fields["authorizationId"] == "" {
-		http.Error(w, "missing authorizationId", http.StatusBadRequest)
-		return
-	}
+	// authorizationId is OPTIONAL (mirrors the real file-service): a snapshot is
+	// uploaded WITHOUT it so the row's authz column is NULL. The stub must accept
+	// its absence rather than 400 — this is exactly the behavior the fix relies on.
+	authVal, authSent := fields["authorizationId"]
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastBucket = fields["storageBucketId"]
-	s.lastAuth = fields["authorizationId"]
+	s.lastAuthSent = authSent
+	s.lastAuthNonEmp = authVal != ""
 	s.lastDisplay = fields["displayName"]
 
 	// Content-addressed dedup keyed on the raw bytes (a stand-in for SHA3-256).
@@ -160,7 +162,6 @@ func newTestStore(t *testing.T) (*Store, *stubFileService) {
 	store, err := New(Config{
 		BaseURL:         srv.URL,
 		StorageBucketID: stub.bucketID,
-		AuthorizationID: stub.authID,
 		MaxUploadSize:   32 << 20,
 	})
 	if err != nil {
@@ -176,7 +177,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 	want := []byte("snapshot-payload")
 	// On first save the hint is the document id; file-service assigns its own
 	// UUID, which the adapter returns as the content pointer.
-	pointer, err := store.Put(ctx, "doc-1", want)
+	pointer, err := store.Put(ctx, "doc-1", "", want)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -192,19 +193,39 @@ func TestPutGetRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPutSendsRequiredMultipartFields(t *testing.T) {
+// With no per-document bucket, the upload falls back to the configured bucket,
+// sends a displayName, and — critically — sends NO authorizationId so the
+// file-service row gets a NULL authz column (UNIQUE permits many NULLs, so every
+// snapshot persists). Sending a fixed authz would collide after the first row.
+func TestPutFallsBackToConfiguredBucketAndOmitsAuth(t *testing.T) {
 	store, stub := newTestStore(t)
-	if _, err := store.Put(context.Background(), "doc-x", []byte("x")); err != nil {
+	if _, err := store.Put(context.Background(), "doc-x", "", []byte("x")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if stub.lastBucket != stub.bucketID {
-		t.Errorf("storageBucketId = %q, want %q", stub.lastBucket, stub.bucketID)
+		t.Errorf("storageBucketId = %q, want fallback %q", stub.lastBucket, stub.bucketID)
 	}
-	if stub.lastAuth != stub.authID {
-		t.Errorf("authorizationId = %q, want %q", stub.lastAuth, stub.authID)
+	if stub.lastAuthSent {
+		t.Errorf("authorizationId must NOT be sent (NULL authz); got sent=%v nonEmpty=%v", stub.lastAuthSent, stub.lastAuthNonEmp)
 	}
 	if stub.lastDisplay == "" {
 		t.Error("displayName not sent")
+	}
+}
+
+// The per-document bucket passed to Put overrides the configured fallback, so a
+// snapshot lands in the document's OWN storage bucket (the core of the fix).
+func TestPutUsesPerDocumentBucket(t *testing.T) {
+	store, stub := newTestStore(t)
+	docBucket := "99999999-9999-9999-9999-999999999999"
+	if _, err := store.Put(context.Background(), "doc-y", docBucket, []byte("y")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if stub.lastBucket != docBucket {
+		t.Errorf("storageBucketId = %q, want per-document %q (not the configured fallback)", stub.lastBucket, docBucket)
+	}
+	if stub.lastAuthSent {
+		t.Error("authorizationId must NOT be sent even on the per-document path")
 	}
 }
 
@@ -215,11 +236,11 @@ func TestPutOverwriteDeletesPreviousSnapshot(t *testing.T) {
 	store, stub := newTestStore(t)
 	ctx := context.Background()
 
-	p1, err := store.Put(ctx, "doc-stable", []byte("v1"))
+	p1, err := store.Put(ctx, "doc-stable", "", []byte("v1"))
 	if err != nil {
 		t.Fatalf("Put v1: %v", err)
 	}
-	p2, err := store.Put(ctx, p1, []byte("v2-different"))
+	p2, err := store.Put(ctx, p1, "", []byte("v2-different"))
 	if err != nil {
 		t.Fatalf("Put v2: %v", err)
 	}
@@ -254,7 +275,7 @@ func TestGetMissingIsNotFound(t *testing.T) {
 func TestDeleteThenGetIsNotFound(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
-	pointer, err := store.Put(ctx, "doc-del", []byte("x"))
+	pointer, err := store.Put(ctx, "doc-del", "", []byte("x"))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -282,10 +303,9 @@ func TestPutRejectsOversize(t *testing.T) {
 	store, _ := New(Config{
 		BaseURL:         srv.URL,
 		StorageBucketID: stub.bucketID,
-		AuthorizationID: stub.authID,
 		MaxUploadSize:   8, // tiny ceiling
 	})
-	_, err := store.Put(context.Background(), "big", []byte("this is definitely more than eight bytes"))
+	_, err := store.Put(context.Background(), "big", "", []byte("this is definitely more than eight bytes"))
 	if err == nil {
 		t.Error("expected oversize Put to be rejected")
 	}
@@ -293,9 +313,8 @@ func TestPutRejectsOversize(t *testing.T) {
 
 func TestNewValidates(t *testing.T) {
 	cases := []Config{
-		{StorageBucketID: "b", AuthorizationID: "a"}, // missing BaseURL
-		{BaseURL: "http://x", AuthorizationID: "a"},  // missing bucket
-		{BaseURL: "http://x", StorageBucketID: "b"},  // missing auth id
+		{StorageBucketID: "b"}, // missing BaseURL
+		{BaseURL: "http://x"},  // missing fallback bucket
 	}
 	for i, c := range cases {
 		if _, err := New(c); err == nil {
@@ -304,13 +323,21 @@ func TestNewValidates(t *testing.T) {
 	}
 }
 
+// New must NOT require an authorizationId — snapshots are uploaded with NULL
+// authz, so a valid config needs only BaseURL + a fallback bucket.
+func TestNewSucceedsWithoutAuthorizationID(t *testing.T) {
+	if _, err := New(Config{BaseURL: "http://x", StorageBucketID: "b"}); err != nil {
+		t.Errorf("New without an authorizationId must succeed, got %v", err)
+	}
+}
+
 func TestServerErrorSurfaces(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to surface a 500")
 	}
 }
@@ -320,8 +347,8 @@ func TestUploadEmptyIDSurfaces(t *testing.T) {
 		writeJSON(w, createResponse{ID: ""}) // server returns no id
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail when the server returns an empty id")
 	}
 }
@@ -331,8 +358,8 @@ func TestUploadBadJSONSurfaces(t *testing.T) {
 		_, _ = w.Write([]byte("not json"))
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail on a malformed response body")
 	}
 }
@@ -340,7 +367,7 @@ func TestUploadBadJSONSurfaces(t *testing.T) {
 func TestGetNetworkErrorSurfaces(t *testing.T) {
 	// A closed server: requests fail at the transport layer.
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	srv.Close()
 	if _, err := store.Get(context.Background(), "id"); err == nil {
 		t.Error("expected Get to surface a transport error")
@@ -355,7 +382,7 @@ func TestGetNon200Surfaces(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if _, err := store.Get(context.Background(), "id"); err == nil {
 		t.Error("expected Get to surface a 500")
 	}
@@ -366,7 +393,7 @@ func TestDeleteNon200Surfaces(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if err := store.Delete(context.Background(), "id"); err == nil {
 		t.Error("expected Delete to surface a 502")
 	}
@@ -392,11 +419,11 @@ func TestPutSucceedsWhenPreviousDeleteFails(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 
 	// prevPointer differs from the assigned id, so Put will attempt (and fail)
 	// the cleanup delete — yet must still return the new pointer with no error.
-	got, err := store.Put(context.Background(), "00000000-0000-0000-0000-000000000099", []byte("v2"))
+	got, err := store.Put(context.Background(), "00000000-0000-0000-0000-000000000099", "", []byte("v2"))
 	if err != nil {
 		t.Fatalf("Put must succeed despite a failed previous-snapshot cleanup: %v", err)
 	}
@@ -410,11 +437,11 @@ func TestPutSucceedsWhenPreviousDeleteFails(t *testing.T) {
 // http.NewRequestWithContext fail, which Put must surface rather than panic or
 // silently no-op. New does not validate URL syntax, so this is reachable.
 func TestUploadBadBaseURLFailsRequestBuild(t *testing.T) {
-	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail building a request to a malformed BaseURL")
 	}
 }
@@ -424,9 +451,9 @@ func TestUploadBadBaseURLFailsRequestBuild(t *testing.T) {
 // which Put must surface.
 func TestUploadTransportErrorSurfaces(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	srv.Close() // transport now fails
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to surface a transport error on upload")
 	}
 }
@@ -434,7 +461,7 @@ func TestUploadTransportErrorSurfaces(t *testing.T) {
 // TestGetBadBaseURLFailsRequestBuild defends Get's request-build branch
 // (store.go:165): a malformed BaseURL makes http.NewRequestWithContext fail.
 func TestGetBadBaseURLFailsRequestBuild(t *testing.T) {
-	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -458,7 +485,7 @@ func TestGetTruncatedBodySurfaces(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if _, err := store.Get(context.Background(), "id"); err == nil {
 		t.Error("expected Get to surface a truncated-body read error")
 	}
@@ -467,7 +494,7 @@ func TestGetTruncatedBodySurfaces(t *testing.T) {
 // TestDeleteBadBaseURLFailsRequestBuild defends Delete's request-build branch
 // (store.go:190): a malformed BaseURL makes http.NewRequestWithContext fail.
 func TestDeleteBadBaseURLFailsRequestBuild(t *testing.T) {
-	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", AuthorizationID: "a", MaxUploadSize: 1 << 20})
+	store, err := New(Config{BaseURL: "http://bad\x7fhost:4003", StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

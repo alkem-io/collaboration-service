@@ -52,8 +52,9 @@ func (s *Store) resolve(pointer string) (string, error) {
 // Put writes data under pointer atomically: a temp file in the same directory is
 // written and fsync'd, then renamed over the target (rename is atomic on POSIX).
 // It echoes the pointer back — local blobs are addressed by the stable relative
-// path the caller supplies.
-func (s *Store) Put(_ context.Context, pointer string, data []byte) (string, error) {
+// path the caller supplies. bucketID is ignored: local blobs are rooted at a
+// fixed configured directory, not per document.
+func (s *Store) Put(_ context.Context, pointer, _ string, data []byte) (string, error) {
 	full, err := s.resolve(pointer)
 	if err != nil {
 		return "", err

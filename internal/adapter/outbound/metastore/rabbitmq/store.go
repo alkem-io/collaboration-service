@@ -50,6 +50,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 		ContentPointer:        reply.ContentPointer,
 		BlobStore:             model.BlobStoreKind(reply.BlobStore),
 		AuthorizationPolicyID: reply.AuthorizationPolicyID,
+		StorageBucketID:       reply.StorageBucketID,
 		OwnerRef:              reply.OwnerRef,
 	}, nil
 }

@@ -18,7 +18,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	want := []byte("snapshot-bytes-v2")
-	if _, err := store.Put(ctx, "doc-1", want); err != nil {
+	if _, err := store.Put(ctx, "doc-1", "", want); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	got, err := store.Get(ctx, "doc-1")
@@ -33,8 +33,8 @@ func TestPutGetRoundTrip(t *testing.T) {
 func TestPutOverwrites(t *testing.T) {
 	store, _ := New(t.TempDir())
 	ctx := context.Background()
-	_, _ = store.Put(ctx, "doc", []byte("v1"))
-	if _, err := store.Put(ctx, "doc", []byte("v2-longer")); err != nil {
+	_, _ = store.Put(ctx, "doc", "", []byte("v1"))
+	if _, err := store.Put(ctx, "doc", "", []byte("v2-longer")); err != nil {
 		t.Fatalf("Put overwrite: %v", err)
 	}
 	got, _ := store.Get(ctx, "doc")
@@ -54,7 +54,7 @@ func TestGetMissingIsNotFound(t *testing.T) {
 func TestDeleteIsIdempotent(t *testing.T) {
 	store, _ := New(t.TempDir())
 	ctx := context.Background()
-	_, _ = store.Put(ctx, "doc", []byte("x"))
+	_, _ = store.Put(ctx, "doc", "", []byte("x"))
 	if err := store.Delete(ctx, "doc"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 func TestAtomicWriteLeavesNoTempFiles(t *testing.T) {
 	root := t.TempDir()
 	store, _ := New(root)
-	_, _ = store.Put(context.Background(), "doc", []byte("x"))
+	_, _ = store.Put(context.Background(), "doc", "", []byte("x"))
 
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestPointerTraversalRejected(t *testing.T) {
 	store, _ := New(t.TempDir())
 	ctx := context.Background()
 	// A pointer that escapes the root must be rejected, not write outside it.
-	if _, err := store.Put(ctx, "../escape", []byte("x")); err == nil {
+	if _, err := store.Put(ctx, "../escape", "", []byte("x")); err == nil {
 		t.Error("expected Put to reject a traversal pointer")
 	}
 	if _, err := store.Get(ctx, "../escape"); err == nil {
@@ -102,7 +102,7 @@ func TestNestedPointer(t *testing.T) {
 	store, _ := New(t.TempDir())
 	ctx := context.Background()
 	// A pointer with a subdirectory component is created under the root.
-	if _, err := store.Put(ctx, "sub/doc", []byte("nested")); err != nil {
+	if _, err := store.Put(ctx, "sub/doc", "", []byte("nested")); err != nil {
 		t.Fatalf("Put nested: %v", err)
 	}
 	got, err := store.Get(ctx, "sub/doc")
@@ -138,7 +138,7 @@ func TestPutFailsWhenDirIsAFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sub"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if _, err := store.Put(context.Background(), "sub/doc", []byte("y")); err == nil {
+	if _, err := store.Put(context.Background(), "sub/doc", "", []byte("y")); err == nil {
 		t.Error("expected Put to fail when the parent path is a file")
 	}
 }
@@ -185,7 +185,7 @@ func TestPutFailsWhenTempCannotBeCreated(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o750) }) //nolint:gosec // restore for cleanup
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail when a temp file cannot be created in a read-only dir")
 	}
 }
@@ -201,7 +201,7 @@ func TestPutFailsWhenTargetIsADirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "doc", "inner"), 0o750); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail when the target path is a non-empty directory")
 	}
 }
