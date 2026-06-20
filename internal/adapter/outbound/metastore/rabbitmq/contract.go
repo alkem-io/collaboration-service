@@ -59,8 +59,15 @@ type FetchReply struct {
 	ContentPointer        string `json:"contentPointer,omitempty"`
 	BlobStore             string `json:"blobStore,omitempty"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
-	OwnerRef              string `json:"ownerRef,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
+	// the server FetchOutputData.storageBucketId). The file-service BlobStore
+	// uploads each snapshot into THIS bucket so blobs co-locate with the
+	// document rather than a single flat platform bucket. Absent for documents
+	// the server cannot resolve a bucket for; the BlobStore then falls back to
+	// its configured bucket.
+	StorageBucketID string `json:"storageBucketId,omitempty"`
+	OwnerRef        string `json:"ownerRef,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // DeleteData is the collaboration-delete request payload (the owner-delete

@@ -139,6 +139,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		ContentPointer:        "ptr",
 		BlobStore:             "s3",
 		AuthorizationPolicyID: "pol-1",
+		StorageBucketID:       "bucket-1",
 		OwnerRef:              "owner",
 	}}}
 	store := newWithRPC(f)
@@ -157,6 +158,11 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		meta.Version != 2 || meta.ContentPointer != "ptr" ||
 		meta.BlobStore != model.BlobStoreS3 || meta.AuthorizationPolicyID != "pol-1" {
 		t.Errorf("mapped metadata = %+v", meta)
+	}
+	// The document's own storage bucket must be carried through from the
+	// collaboration-fetch reply so the BlobStore can persist snapshots into it.
+	if meta.StorageBucketID != "bucket-1" {
+		t.Errorf("StorageBucketID = %q, want bucket-1", meta.StorageBucketID)
 	}
 }
 

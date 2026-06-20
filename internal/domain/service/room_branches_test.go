@@ -143,7 +143,7 @@ func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a durable document with a blob, but never materialize a room for it.
-	pointer, err := blob.Put(ctx, "orphan", []byte("snapshot"))
+	pointer, err := blob.Put(ctx, "orphan", "", []byte("snapshot"))
 	if err != nil {
 		t.Fatalf("seed blob: %v", err)
 	}
@@ -595,8 +595,8 @@ func TestSendBufferDefaultsWhenZeroWithOtherTimers(t *testing.T) {
 // to drive purgeDurable's blob-delete error branch.
 type failingDeleteBlob struct{ inner port.BlobStore }
 
-func (f failingDeleteBlob) Put(ctx context.Context, p string, d []byte) (string, error) {
-	return f.inner.Put(ctx, p, d)
+func (f failingDeleteBlob) Put(ctx context.Context, p, bucketID string, d []byte) (string, error) {
+	return f.inner.Put(ctx, p, bucketID, d)
 }
 func (f failingDeleteBlob) Get(ctx context.Context, p string) ([]byte, error) {
 	return f.inner.Get(ctx, p)

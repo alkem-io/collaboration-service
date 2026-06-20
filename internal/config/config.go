@@ -202,9 +202,11 @@ type PostgresConfig struct {
 
 // FileServiceConfig configures the file-service blob backend.
 type FileServiceConfig struct {
-	BaseURL         string
+	BaseURL string
+	// StorageBucketID is the FALLBACK snapshot bucket (standalone / no-metadata).
+	// The normal path uploads each snapshot into the document's OWN bucket,
+	// carried per document on the collaboration-fetch metadata.
 	StorageBucketID string
-	AuthorizationID string
 	MaxUploadSize   int64
 }
 
@@ -442,15 +444,17 @@ func loadBlobStoreConfig(cfg *Config) error {
 		cfg.FileService = FileServiceConfig{
 			BaseURL:         os.Getenv("FILE_SERVICE_URL"),
 			StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
-			AuthorizationID: os.Getenv("FILE_SERVICE_AUTHORIZATION_ID"),
 			MaxUploadSize:   getenvInt64("MAX_UPLOAD_SIZE", 0),
 		}
-		// AuthorizationID is OPTIONAL: snapshots are internal blobs whose access
-		// is governed by the bucket and the (unauthenticated) internal API, not a
-		// per-file authorization_policy row. When empty, the file-service create
-		// is sent without an authorizationId and the row's authz column is NULL.
-		// A fixed non-empty value MUST NOT be reused across snapshots — file's
-		// UNIQUE(authorizationId) would then admit only one row per bucket.
+		// No authorizationId is configured: snapshots are internal blobs whose
+		// access is governed by the document's own authz and the (unauthenticated)
+		// internal API, not a per-file authorization_policy row. The file-service
+		// create is sent without an authorizationId so the row's authz column is
+		// NULL — file's UNIQUE(authorizationId) permits many NULLs, so every
+		// snapshot persists (a reused fixed id would admit only one row per
+		// bucket). FILE_SERVICE_STORAGE_BUCKET_ID is the FALLBACK bucket only; the
+		// normal path uploads into the document's own bucket (per-document, from
+		// the collaboration-fetch metadata).
 		if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
 			return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
 		}

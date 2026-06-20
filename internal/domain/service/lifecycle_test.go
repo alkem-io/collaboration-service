@@ -20,7 +20,7 @@ import (
 // control path (R7: room keeps serving from memory, emits save-error).
 type failingBlob struct{ inner port.BlobStore }
 
-func (f failingBlob) Put(context.Context, string, []byte) (string, error) {
+func (f failingBlob) Put(context.Context, string, string, []byte) (string, error) {
 	return "", errors.New("disk full")
 }
 func (f failingBlob) Get(ctx context.Context, p string) ([]byte, error) {

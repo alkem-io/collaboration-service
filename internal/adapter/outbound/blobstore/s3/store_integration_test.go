@@ -44,7 +44,7 @@ func TestS3RoundTripAgainstRealEndpoint(t *testing.T) {
 
 	const id = "integration-doc"
 	want := []byte("real-s3-snapshot")
-	pointer, err := store.Put(ctx, id, want)
+	pointer, err := store.Put(ctx, id, "", want)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}

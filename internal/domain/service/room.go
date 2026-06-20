@@ -144,6 +144,11 @@ type Room struct {
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
 	policyID string
+	// bucketID is the document's own storage bucket, loaded from metadata and
+	// passed to BlobStore.Put so each snapshot is persisted into the document's
+	// own bucket (not a single flat platform bucket). Empty in standalone /
+	// no-metadata mode, where the BlobStore falls back to its configured bucket.
+	bucketID string
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
 	// document's maxCollaborators (carried on the bus metadata contract) is not yet
@@ -445,6 +450,7 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	r.version = meta.Version
 	r.pointer = meta.ContentPointer
 	r.policyID = meta.AuthorizationPolicyID
+	r.bucketID = meta.StorageBucketID
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
 	}
@@ -1102,7 +1108,7 @@ func (r *Room) persist(ctx context.Context) {
 		hint = string(r.id) // first save: hint the document id (inline pointer == id).
 	}
 
-	pointer, err := r.deps.Blob.Put(ctx, hint, snapshot)
+	pointer, err := r.deps.Blob.Put(ctx, hint, r.bucketID, snapshot)
 	if err != nil {
 		r.logger.Error("snapshot blob put failed", zap.String("doc", string(r.id)), zap.Error(err))
 		r.metrics.SnapshotFailed()
@@ -1118,6 +1124,7 @@ func (r *Room) persist(ctx context.Context) {
 		ContentPointer:        pointer,
 		BlobStore:             r.blobKind,
 		AuthorizationPolicyID: r.policyID,
+		StorageBucketID:       r.bucketID,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))

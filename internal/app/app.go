@@ -236,7 +236,6 @@ func buildBlob(cfg *config.Config) (port.BlobStore, error) {
 		return blobfileservice.New(blobfileservice.Config{
 			BaseURL:         cfg.FileService.BaseURL,
 			StorageBucketID: cfg.FileService.StorageBucketID,
-			AuthorizationID: cfg.FileService.AuthorizationID,
 			MaxUploadSize:   cfg.FileService.MaxUploadSize,
 		})
 	case config.BlobStoreS3:

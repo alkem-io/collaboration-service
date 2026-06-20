@@ -71,7 +71,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	want := []byte("v2-snapshot-bytes")
-	pointer, err := store.Put(ctx, "doc-1", want)
+	pointer, err := store.Put(ctx, "doc-1", "", want)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -90,10 +90,10 @@ func TestPutGetRoundTrip(t *testing.T) {
 func TestPutOverwrites(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
-	if _, err := store.Put(ctx, "doc", []byte("v1")); err != nil {
+	if _, err := store.Put(ctx, "doc", "", []byte("v1")); err != nil {
 		t.Fatalf("Put v1: %v", err)
 	}
-	if _, err := store.Put(ctx, "doc", []byte("v2")); err != nil {
+	if _, err := store.Put(ctx, "doc", "", []byte("v2")); err != nil {
 		t.Fatalf("Put v2: %v", err)
 	}
 	got, _ := store.Get(ctx, "doc")
@@ -113,7 +113,7 @@ func TestGetMissingIsNotFound(t *testing.T) {
 func TestDeleteIdempotent(t *testing.T) {
 	store, fake := newTestStore(t)
 	ctx := context.Background()
-	if _, err := store.Put(ctx, "doc", []byte("x")); err != nil {
+	if _, err := store.Put(ctx, "doc", "", []byte("x")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if err := store.Delete(ctx, "doc"); err != nil {
@@ -135,7 +135,7 @@ func TestKeyPrefix(t *testing.T) {
 	fake := newFakeS3("snapshots")
 	store := newWithAPIAndPrefix(fake, "snapshots", "collab/")
 	ctx := context.Background()
-	pointer, err := store.Put(ctx, "doc-1", []byte("x"))
+	pointer, err := store.Put(ctx, "doc-1", "", []byte("x"))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -174,7 +174,7 @@ func (f failingS3) DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(
 
 func TestPutErrorSurfaces(t *testing.T) {
 	store := newWithAPI(failingS3{err: errors.New("access denied")}, "b")
-	if _, err := store.Put(context.Background(), "doc", []byte("x")); err == nil {
+	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
 		t.Error("expected Put to surface the S3 error")
 	}
 }

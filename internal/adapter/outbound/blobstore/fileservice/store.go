@@ -8,8 +8,16 @@
 //   - Get    → GET /internal/file/{id}/content
 //   - Delete → DELETE /internal/file/{id}
 //
-// A fixed storageBucketId + authorizationId per deployment scope every snapshot
-// (config), and uploads are capped at MaxUploadSize (MAX_UPLOAD_SIZE). The
+// Each snapshot is uploaded into the DOCUMENT'S OWN storage bucket (the bucketID
+// passed to Put, resolved from the collaboration-fetch metadata), so blobs
+// co-locate with the document's other media; the configured StorageBucketID is
+// only a fallback for standalone / no-metadata uploads. The authorizationId
+// field is omitted entirely — a snapshot is an internal infra blob whose access
+// is governed by the document's own authz and the (unauthenticated) internal
+// API, not a per-file authorization_policy row. Omitting it makes file-service
+// write a NULL authz column; file's UNIQUE(authorizationId) permits any number
+// of NULLs, so every snapshot persists (reusing one fixed id would collide after
+// the first row). Uploads are capped at MaxUploadSize (MAX_UPLOAD_SIZE). The
 // internal API has no auth (in-cluster trust); transport is plain HTTP inside the
 // cluster mesh.
 package fileservice
@@ -29,15 +37,14 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
-// Config carries the fixed per-deployment file-service settings.
+// Config carries the per-deployment file-service settings.
 type Config struct {
 	// BaseURL is the file-service root, e.g. http://file-service:4003.
 	BaseURL string
-	// StorageBucketID scopes every snapshot upload (a UUID, per deployment).
+	// StorageBucketID is the FALLBACK bucket for snapshot uploads when the
+	// per-document bucket is unknown (standalone / no-metadata). The normal
+	// path uploads into the document's own bucket (the bucketID passed to Put).
 	StorageBucketID string
-	// AuthorizationID is the authorization row file-service requires on create
-	// (a UUID, per deployment). The internal API itself is unauthenticated.
-	AuthorizationID string
 	// MaxUploadSize caps a snapshot upload in bytes (MAX_UPLOAD_SIZE); zero
 	// falls back to file-service's own 32 MiB default ceiling.
 	MaxUploadSize int64
@@ -62,15 +69,16 @@ type createResponse struct {
 }
 
 // New constructs a file-service blob store, validating the required settings.
+// AuthorizationID is intentionally NOT a setting: snapshots are uploaded with no
+// authorizationId so file-service writes a NULL authz column (UNIQUE permits
+// many NULLs). StorageBucketID is only the fallback bucket; the per-document
+// bucket comes from Put.
 func New(cfg Config) (*Store, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("file-service blob store: BaseURL is required")
 	}
 	if cfg.StorageBucketID == "" {
 		return nil, fmt.Errorf("file-service blob store: StorageBucketID is required")
-	}
-	if cfg.AuthorizationID == "" {
-		return nil, fmt.Errorf("file-service blob store: AuthorizationID is required")
 	}
 	client := cfg.HTTPClient
 	if client == nil {
@@ -86,12 +94,21 @@ func New(cfg Config) (*Store, error) {
 // is a real previous UUID, its file is deleted after a successful upload so old
 // snapshots do not accumulate (latest-only). The document id on first save does
 // not match any file-service object, so the delete is harmlessly skipped.
-func (s *Store) Put(ctx context.Context, prevPointer string, data []byte) (string, error) {
+//
+// bucketID is the document's own storage bucket (from the metadata index); the
+// snapshot is uploaded into it so blobs co-locate with the document. An empty
+// bucketID (standalone / no-metadata) falls back to the configured bucket.
+func (s *Store) Put(ctx context.Context, prevPointer, bucketID string, data []byte) (string, error) {
 	if limit := s.cfg.MaxUploadSize; limit > 0 && int64(len(data)) > limit {
 		return "", fmt.Errorf("snapshot %d bytes exceeds MAX_UPLOAD_SIZE %d", len(data), limit)
 	}
 
-	id, err := s.upload(ctx, data)
+	bucket := bucketID
+	if bucket == "" {
+		bucket = s.cfg.StorageBucketID
+	}
+
+	id, err := s.upload(ctx, bucket, data)
 	if err != nil {
 		return "", err
 	}
@@ -105,8 +122,11 @@ func (s *Store) Put(ctx context.Context, prevPointer string, data []byte) (strin
 	return id, nil
 }
 
-// upload performs the multipart POST and returns the assigned file-service UUID.
-func (s *Store) upload(ctx context.Context, data []byte) (string, error) {
+// upload performs the multipart POST into bucket and returns the assigned
+// file-service UUID. authorizationId is deliberately omitted: file-service then
+// stores a NULL authz column, which UNIQUE(authorizationId) permits any number
+// of — so every snapshot persists.
+func (s *Store) upload(ctx context.Context, bucket string, data []byte) (string, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 
@@ -119,8 +139,7 @@ func (s *Store) upload(ctx context.Context, data []byte) (string, error) {
 	}
 	for name, value := range map[string]string{
 		"displayName":     "collaboration-snapshot",
-		"storageBucketId": s.cfg.StorageBucketID,
-		"authorizationId": s.cfg.AuthorizationID,
+		"storageBucketId": bucket,
 	} {
 		if err := mw.WriteField(name, value); err != nil {
 			return "", fmt.Errorf("write field %s: %w", name, err)
