@@ -4,11 +4,13 @@
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md
 **Tests**: Included — constitution mandates test-first (§VI) and ≥95% coverage (§XII/SC-011).
 
-> **Organized by the epic's waves.** Wave 1 (live-sync server + ports) is **DONE**
-> (commit `57b79db`, PR #1) — tasks below carry file anchors and the tests that
-> prove them. Waves 2–4 are **forward**, broken into concrete sub-tasks. Task ids
-> (T001–T017) align with the milestone ids in
-> `../agents-hq/specs/003-unify-collab-yjs/tasks/collaboration-service.md`.
+> **Organized by the epic's waves.** Waves 1–4 (live-sync server, durable adapters,
+> presence/auth/limits/lifecycle/API, e2e+gate) are **DONE** — tasks below carry
+> file anchors and the tests that prove them. **Wave 5** (T018, dual-adapter OIDC
+> handshake AuthN — option (c)) is **forward, spec/design only this pass** (all
+> sub-tasks `[ ]`). Task ids (T001–T017) align with the milestone ids in
+> `../agents-hq/specs/003-unify-collab-yjs/tasks/collaboration-service.md`; T018 is
+> a repo-local addition (the workspace epic mapping is a follow-up).
 
 ## Format: `[ID] [P?] [Wave] Description`
 - **[P]**: parallelizable (different files/packages, no ordering dependency).
@@ -153,12 +155,99 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 ---
 
+## Phase 6 — Dual-adapter handshake AuthN (option (c)) — ⏳ FORWARD (spec/design only this pass)
+
+> **Decision recorded (antst, Session 2026-06-20):** collab handshake-AuthN supports
+> **BOTH** `header` (option (a), gateway-terminated — the Wave-2 behaviour, renamed)
+> and a new `oidc` (option (b), direct credential validation), config-selectable,
+> with AuthZ unchanged. Realizes FR-021–FR-023; mirrors server
+> `forward-auth.controller.ts`. **This SpecKit pass writes the spec/plan/tasks ONLY
+> — every T018 sub-task below is `[ ]` (unimplemented). Implementation begins after
+> `/analyze` is clean.** Build TDD on `feat/oidc-dual-auth` (off `feat/003-open1-reason`).
+> **Resolve OPEN-5/6/7 before the credential-validating sub-tasks (T018.4/T018.5).**
+
+### T018 — `header`/`oidc`/`open` AuthN split + direct-OIDC adapter (FR-021/FR-022/FR-023) — `internal/adapter/outbound/auth/`, `internal/config/`, `internal/adapter/inbound/ws/`
+
+- [ ] **T018.1** [W5] Config split + backward-compat (`internal/config/config.go`):
+  split `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) from a new `AUTHZ_MODE`
+  (`authzeval`|`open`); derive `AUTHZ_MODE` from `AUTH_MODE` when unset
+  (`open`→`open`; `header`/`oidc`→`authzeval`); accept the retired
+  `AUTH_MODE=authzeval` as an alias (`header` AuthN + `authzeval` AuthZ); fail-fast
+  validate each enum and the `oidc`/`authzeval` required settings (OPEN-5). Tests:
+  `config_test.go` cases for the new enums, the alias, the derivation, and
+  fail-fast on bad/missing required config. **Tests first.**
+- [ ] **T018.2** [W5] Extract the `header` AuthN adapter
+  (`internal/adapter/outbound/auth/header/auth.go`) from the Wave-2
+  `authzeval.Authenticate` (`model.Identity{ActorID: <gateway header value>}`,
+  401/error on empty); leave `authzeval` as the AuthZ-only adapter. **No behaviour
+  change to the gateway-terminated path** (SC-014). Tests: `header/auth_test.go`
+  (non-empty header → actor id; empty → error), and the existing authzeval AuthZ
+  tests stay green. **Tests first.**
+- [ ] **T018.3** [W5] Generalize the WS-handshake credential read
+  (`internal/adapter/inbound/ws/handler.go` + a domain `model.HandshakeCredentials`
+  value object): the WS adapter populates `{CookieSID, BearerToken, GuestName}` from
+  the `Cookie`/`Authorization` headers + `?guestName=` (+ opt-in `?access_token=`,
+  OPEN-7) and passes it to `Auth.Authenticate`; `header`/`open` adapters read only
+  the field they need so the port stays infra-free (§I). Tests:
+  `handler_test.go`/model tests asserting the credential extraction + that
+  `header`/`open` modes are unaffected. **Tests first.**
+- [ ] **T018.4** [W5] `oidc` adapter — **BFF cookie session path**
+  (`internal/adapter/outbound/auth/oidc/{auth.go,session_redis.go}`): bare sid →
+  `GET alkemio:sid:<sid>` → decode `AlkemioSessionPayload` → `alkemio_actor_id`;
+  reject tombstoned (`terminated_at` set) and expired
+  (`expires_at`/`absolute_expires_at` past); Redis-unreachable on a cookie-bearing
+  handshake → reject (not silent anonymous). Mirrors server
+  `session-store.redis.ts`. Tests: `oidc/session_redis_test.go` against a faithful
+  Redis stub / miniredis (valid → actor id; tombstoned → 401; expired → 401;
+  store error → reject). **Tests first.** *(Gated on OPEN-7 session config.)*
+- [ ] **T018.5** [W5] `oidc` adapter — **Hydra RS256 bearer path**
+  (`internal/adapter/outbound/auth/oidc/hydra_jwks.go`): JWKS fetch+cache, RS256
+  verify (issuer + audience allow-list + `alkemio_actor_id` claim + clock
+  tolerance), extract `alkemio_actor_id`; presented-but-invalid (bad sig / expired
+  / wrong issuer-aud / missing claim) → **401**. Mirrors server
+  `hydra-bearer.validator.ts`. JWKS/JWT lib version-checked online at add time
+  (§XIV). Tests: `oidc/hydra_jwks_test.go` with a stub JWKS + signed/forged/expired
+  tokens. **Tests first.** *(Gated on OPEN-7 JWKS config.)*
+- [ ] **T018.6** [W5] `oidc` adapter — **priority + anonymous fall-through**
+  (`oidc/auth.go`): try cookie → bearer → guest (named-anonymous, OPEN-6) →
+  **anonymous sentinel** `ANONYMOUS_ACTOR_ID` (nil UUID, `model` constant mirroring
+  server `constants.ts`); missing credential → sentinel (not 401), presented-invalid
+  → 401 (FR-023). Each path inert when its config is unset (bearer-only /
+  cookie-only degrade). Tests: `oidc/auth_test.go` (priority order; missing →
+  sentinel; guest → named-anonymous; both-disabled config rejected at load). **Tests
+  first.**
+- [ ] **T018.7** [W5] Wiring (`internal/app` composition root + `cmd/server`):
+  select the AuthN adapter on `AUTH_MODE` (`header`/`oidc`/`open`) and the AuthZ
+  adapter on `AUTHZ_MODE` (`authzeval`/`open`) independently; construct the `oidc`
+  adapter with its session-Redis + JWKS clients from config; `.env.example`
+  documents `AUTH_MODE`/`AUTHZ_MODE` + the `oidc` settings. The zero-dep `open`
+  default still boots. Tests: an `internal/app` wiring test that `oidc` mode
+  constructs and `open` needs nothing.
+- [ ] **T018.8** [W5] e2e (`test/e2e/oidc_test.go`, build tag `e2e`): boot with
+  `AUTH_MODE=oidc` against an in-process stub BFF-Redis + stub JWKS; a valid cookie
+  and a valid bearer each authenticate end-to-end over the WS handshake, a
+  tombstoned/expired session and a forged bearer are 401'd, and a no-credential
+  handshake resolves to the anonymous sentinel (read of a public-read doc succeeds);
+  assert `header` mode is byte-for-byte the prior gateway-terminated behaviour
+  (SC-013/SC-014). Keep the ≥95% combined coverage gate green.
+
+---
+
 ## Dependencies & execution order
 
 - **Wave 1 (T001–T003, T007–T012)** — DONE; no remaining dependency.
 - **Wave 2 (T004–T006)** — depends on Wave 1's held ports. T004/T005/T006 parallelize; resolve **OPEN-1/2/3** before the contract-touching sub-tasks (T006.3, T005.1, T005.3). Trusting the fork in production also depends on **WS-A's fuzz gate** (workspace, not a server task).
 - **Wave 3 (T013–T016)** — DONE. T014 (per-doc authZ) built on T006 (authzeval); T013/T015/T016 on Wave-1 lifecycle; **OPEN-4 resolved** (epic R9 defaults + Prom gauge *and* RMQ contribution event).
 - **Wave 4 (T017)** — DONE. Depends on all prior waves; T017.2 needs T004; T017.3 needs T005.3; T017.4 needs T006/T014. The e2e suite boots through `internal/app` (the composition root extracted from `cmd/server`), so it exercises real adapter selection, not a copy.
+- **Wave 5 (T018)** — **FORWARD, spec/design only this pass (all sub-tasks `[ ]`).**
+  Depends on Wave-2 `authzeval` (T018.2 extracts the `header` AuthN from it; T018.7
+  selects `authzeval` AuthZ independently) and the Wave-1 `Auth` port + WS handshake
+  (T018.3). Sub-task order: T018.1 (config) → T018.2/T018.3 (header extract + handshake
+  read, parallel) → T018.4/T018.5 (cookie + bearer paths, parallel, **gated on
+  OPEN-7**) → T018.6 (priority + sentinel, **gated on OPEN-6**) → T018.7 (wiring) →
+  T018.8 (e2e). **Implementation begins only after `/analyze` is clean.** Prod
+  rollout coupled to the OIDC cutover; the collab k8s manifest is a separate
+  follow-up, not a T018 sub-task.
 
 ## Counts
 
@@ -168,4 +257,5 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 | 2 (durable adapters) | **DONE** | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
 | 3 (presence/limits/lifecycle/API) | **DONE** | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
 | 4 (e2e + gate) | **DONE** | 1 (T017) | 5 (T017.1–5) |
-| **Total** | **17 done** | 17 | **35 sub-tasks done** |
+| 5 (dual-adapter OIDC AuthN) | **FORWARD (spec/design only)** | 1 (T018) | 8 (T018.1–8) — all `[ ]` |
+| **Total** | **17 done + 1 forward** | 18 | **35 done + 8 forward** |

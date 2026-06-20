@@ -86,6 +86,42 @@ bookkeeping projection (`model/room.go`).
   **error** means "could not answer" → callers **fail closed** (never treat an
   error as a clean denial). `Reason` carries no secrets.
 
+#### AuthN mode + credential resolution (Wave 5 — config-driven adapter selection)
+
+The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized by a
+**config-selected** adapter; AuthZ (the `AuthZ` port) is selected **independently**.
+
+| AuthN mode (`AUTH_MODE`) | Adapter | How `Identity.ActorID` is resolved | 401 condition |
+|---|---|---|---|
+| `header` *(Alkemio default; option (a))* | `header` (the Wave-2 header-trusting `Authenticate`, renamed) | **Trust** the actor id in the gateway-stamped header (`AUTH_TOKEN_HEADER`, e.g. `X-Alkemio-Actor-Id`); the gateway already validated the credential | header missing/empty (gateway didn't run) |
+| `oidc` *(new; option (b))* | `oidc` (direct validation) | **Validate the credential itself** — see the credential table below | a *presented* credential is invalid (bad sig / expired / tombstoned / missing claim); **missing** credential → anonymous sentinel, not 401 |
+| `open` *(standalone default)* | `open` | empty actor id (everyone anonymous) | never |
+
+**`oidc`-mode validated-credential surface** (mirrors the server's
+`forward-auth.controller.ts`; tried in order):
+
+| Order | Credential | Read from | Validation | Yields |
+|---|---|---|---|---|
+| 1 | **BFF session** | `Cookie: alkemio_session[_<env>]` (bare sid) | Redis `GET alkemio:sid:<sid>` → `AlkemioSessionPayload`; reject if `terminated_at` set (tombstone) or `expires_at`/`absolute_expires_at` in the past | `alkemio_actor_id` |
+| 2 | **Hydra bearer** | `Authorization: Bearer <jwt>` (+ optional `?access_token=` query fallback, OPEN-7) | RS256 JWKS verify (issuer + audience allow-list + `alkemio_actor_id` present + clock tolerance) | `alkemio_actor_id` claim |
+| 3 | **Guest** | `?guestName=` query param | none (named anonymous, OPEN-6) | anonymous sentinel (display name → presence only) |
+| 4 | **None** | — | — | **anonymous sentinel** `ANONYMOUS_ACTOR_ID` (nil UUID) → auth-eval `GLOBAL_ANONYMOUS` |
+
+- **`ANONYMOUS_ACTOR_ID`** — the nil-UUID sentinel
+  (`00000000-0000-0000-0000-000000000000`), mirroring server
+  `oidc/constants.ts`. Distinct from `open`-mode's empty `ActorID`: the sentinel is
+  a *resolvable* anonymous principal auth-eval maps to `GLOBAL_ANONYMOUS` (so a
+  public-read document is reachable), whereas an empty `ActorID` only occurs in
+  `open` mode where AuthZ is bypassed.
+- **Dependencies** (oidc mode only, behind the `Auth` port, never imported by the
+  domain core): a **Redis** session-store reader (cookie path) and a **Hydra JWKS**
+  fetcher/cache (bearer path). Either path is **disabled** when its config is unset.
+  Redis-unreachable on a cookie-bearing handshake → reject (503-equivalent), never a
+  silent anonymous downgrade.
+- **Backward compatibility:** the retired `AUTH_MODE=authzeval` value aliases to
+  `header` AuthN + `authzeval` AuthZ (OPEN-5), so existing deployments are
+  unchanged.
+
 ### Awareness / Presence (ephemeral) — `model.{Awareness,CollaboratorMode}` (`model/room.go`)
 Per-participant: `ClientID` (y awareness client id), `ActorID`, `Mode`
 (`viewer`\|`collaborator`). Broadcast via awareness (type 1) + the ephemeral
@@ -119,3 +155,5 @@ same envelope.
 - Wave-1 convention code: `internal/domain/service/convention.go`
 - Wave-1 domain types: `internal/domain/model/{document,room,control,auth,errors}.go`
 - Persistence contract: `../agents-hq/specs/003-unify-collab-yjs/contracts/persistence-ports.md`
+- Wave-5 forward-auth mirror (server): `server/src/core/auth/oidc/{forward-auth.controller.ts,constants.ts,session-store.redis.ts,strategies/hydra-bearer.validator.ts}` — the cookie→bearer→guest→anonymous resolution, `HEADER_ACTOR_ID`, nil-UUID `ANONYMOUS_ACTOR_ID`, `AlkemioSessionPayload` (tombstone/TTL), and Hydra RS256 JWKS validation the `oidc` adapter mirrors.
+- Wave-5 header-mode mirror (file-service): `file-service/internal/adapter/inbound/http/middleware.go` (`ActorHeaderExtractor`).
