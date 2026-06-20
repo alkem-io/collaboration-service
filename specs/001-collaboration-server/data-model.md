@@ -102,9 +102,9 @@ The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized b
 
 | Order | Credential | Read from | Validation | Yields |
 |---|---|---|---|---|
-| 1 | **BFF session** | `Cookie: alkemio_session[_<env>]` (bare sid) | Redis `GET alkemio:sid:<sid>` → `AlkemioSessionPayload`; reject if `terminated_at` set (tombstone) or `expires_at`/`absolute_expires_at` in the past | `alkemio_actor_id` |
-| 2 | **Hydra bearer** | `Authorization: Bearer <jwt>` (+ optional `?access_token=` query fallback, OPEN-7) | RS256 JWKS verify (issuer + audience allow-list + `alkemio_actor_id` present + clock tolerance) | `alkemio_actor_id` claim |
-| 3 | **Guest** | `?guestName=` query param | none (named anonymous, OPEN-6) | anonymous sentinel (display name → presence only) |
+| 1 | **BFF session** | `Cookie: alkemio_session[_<env>]` (bare sid) | Redis `GET alkemio:sid:<sid>` (`SESSION_REDIS_URL`, defaults to `REDIS_URL`) → `AlkemioSessionPayload`; reject if `terminated_at` set (tombstone) or `expires_at`/`absolute_expires_at` in the past | `alkemio_actor_id` |
+| 2 | **Hydra bearer** | `Authorization: Bearer <jwt>` **only** (no `?access_token=` query fallback — DROPPED, OPEN-7) | RS256 JWKS verify (issuer + audience allow-list + `alkemio_actor_id` present + clock tolerance) | `alkemio_actor_id` claim |
+| 3 | **Guest** | `?guestName=` query param | none (named anonymous, OPEN-6 DECIDED) | anonymous sentinel (display name → presence only) |
 | 4 | **None** | — | — | **anonymous sentinel** `ANONYMOUS_ACTOR_ID` (nil UUID) → auth-eval `GLOBAL_ANONYMOUS` |
 
 - **`ANONYMOUS_ACTOR_ID`** — the nil-UUID sentinel
@@ -114,10 +114,14 @@ The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized b
   public-read document is reachable), whereas an empty `ActorID` only occurs in
   `open` mode where AuthZ is bypassed.
 - **Dependencies** (oidc mode only, behind the `Auth` port, never imported by the
-  domain core): a **Redis** session-store reader (cookie path) and a **Hydra JWKS**
-  fetcher/cache (bearer path). Either path is **disabled** when its config is unset.
+  domain core): a **Redis** session-store reader (cookie path, via
+  **`SESSION_REDIS_URL`** which **defaults to the fan-out `REDIS_URL`** when unset)
+  and a **Hydra JWKS** fetcher/cache (bearer path, JWKS URL / issuer / audience
+  env names **mirroring the server's** OIDC config). Either path is **disabled** when
+  its config is unset (no session Redis → cookie off; no JWKS URL → bearer off).
   Redis-unreachable on a cookie-bearing handshake → reject (503-equivalent), never a
-  silent anonymous downgrade.
+  silent anonymous downgrade. The bearer is read **only** from `Authorization:` (the
+  `?access_token=` query fallback is DROPPED, OPEN-7).
 - **Backward compatibility:** the retired `AUTH_MODE=authzeval` value aliases to
   `header` AuthN + `authzeval` AuthZ (OPEN-5), so existing deployments are
   unchanged.

@@ -164,7 +164,11 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 > `forward-auth.controller.ts`. **This SpecKit pass writes the spec/plan/tasks ONLY
 > — every T018 sub-task below is `[ ]` (unimplemented). Implementation begins after
 > `/analyze` is clean.** Build TDD on `feat/oidc-dual-auth` (off `feat/003-open1-reason`).
-> **Resolve OPEN-5/6/7 before the credential-validating sub-tasks (T018.4/T018.5).**
+> **OPEN-5/6/7 are ✅ DECIDED (antst, 2026-06-20)** — no open questions remain; the
+> credential-validating sub-tasks (T018.4/T018.5) build to the locked decisions
+> (`AUTH_MODE`/`AUTHZ_MODE` split; named-anonymous guest; BOTH cookie+bearer with
+> `SESSION_REDIS_URL` defaulting to `REDIS_URL`, mirrored JWKS env names, no
+> `?access_token=` query fallback).
 
 ### T018 — `header`/`oidc`/`open` AuthN split + direct-OIDC adapter (FR-021/FR-022/FR-023) — `internal/adapter/outbound/auth/`, `internal/config/`, `internal/adapter/inbound/ws/`
 
@@ -186,28 +190,31 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 - [ ] **T018.3** [W5] Generalize the WS-handshake credential read
   (`internal/adapter/inbound/ws/handler.go` + a domain `model.HandshakeCredentials`
   value object): the WS adapter populates `{CookieSID, BearerToken, GuestName}` from
-  the `Cookie`/`Authorization` headers + `?guestName=` (+ opt-in `?access_token=`,
-  OPEN-7) and passes it to `Auth.Authenticate`; `header`/`open` adapters read only
-  the field they need so the port stays infra-free (§I). Tests:
-  `handler_test.go`/model tests asserting the credential extraction + that
-  `header`/`open` modes are unaffected. **Tests first.**
+  the `Cookie`/`Authorization` headers + `?guestName=` and passes it to
+  `Auth.Authenticate`; `header`/`open` adapters read only the field they need so the
+  port stays infra-free (§I). The bearer is read **only** from `Authorization:` —
+  the `?access_token=` query-param token fallback is **NOT implemented** (DROPPED,
+  OPEN-7 DECIDED). Tests: `handler_test.go`/model tests asserting the credential
+  extraction + that `header`/`open` modes are unaffected. **Tests first.**
 - [ ] **T018.4** [W5] `oidc` adapter — **BFF cookie session path**
   (`internal/adapter/outbound/auth/oidc/{auth.go,session_redis.go}`): bare sid →
-  `GET alkemio:sid:<sid>` → decode `AlkemioSessionPayload` → `alkemio_actor_id`;
+  `GET alkemio:sid:<sid>` (via **`SESSION_REDIS_URL`**, defaulting to `REDIS_URL`
+  when unset — OPEN-7 DECIDED) → decode `AlkemioSessionPayload` → `alkemio_actor_id`;
   reject tombstoned (`terminated_at` set) and expired
   (`expires_at`/`absolute_expires_at` past); Redis-unreachable on a cookie-bearing
   handshake → reject (not silent anonymous). Mirrors server
   `session-store.redis.ts`. Tests: `oidc/session_redis_test.go` against a faithful
   Redis stub / miniredis (valid → actor id; tombstoned → 401; expired → 401;
-  store error → reject). **Tests first.** *(Gated on OPEN-7 session config.)*
+  store error → reject). **Tests first.**
 - [ ] **T018.5** [W5] `oidc` adapter — **Hydra RS256 bearer path**
   (`internal/adapter/outbound/auth/oidc/hydra_jwks.go`): JWKS fetch+cache, RS256
   verify (issuer + audience allow-list + `alkemio_actor_id` claim + clock
   tolerance), extract `alkemio_actor_id`; presented-but-invalid (bad sig / expired
-  / wrong issuer-aud / missing claim) → **401**. Mirrors server
-  `hydra-bearer.validator.ts`. JWKS/JWT lib version-checked online at add time
-  (§XIV). Tests: `oidc/hydra_jwks_test.go` with a stub JWKS + signed/forged/expired
-  tokens. **Tests first.** *(Gated on OPEN-7 JWKS config.)*
+  / wrong issuer-aud / missing claim) → **401**. JWKS URL / issuer / audience /
+  cookie-name env names **mirror the server's** OIDC config (OPEN-7 DECIDED).
+  Mirrors server `hydra-bearer.validator.ts`. JWKS/JWT lib version-checked online at
+  add time (§XIV). Tests: `oidc/hydra_jwks_test.go` with a stub JWKS +
+  signed/forged/expired tokens. **Tests first.**
 - [ ] **T018.6** [W5] `oidc` adapter — **priority + anonymous fall-through**
   (`oidc/auth.go`): try cookie → bearer → guest (named-anonymous, OPEN-6) →
   **anonymous sentinel** `ANONYMOUS_ACTOR_ID` (nil UUID, `model` constant mirroring
@@ -243,9 +250,10 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   Depends on Wave-2 `authzeval` (T018.2 extracts the `header` AuthN from it; T018.7
   selects `authzeval` AuthZ independently) and the Wave-1 `Auth` port + WS handshake
   (T018.3). Sub-task order: T018.1 (config) → T018.2/T018.3 (header extract + handshake
-  read, parallel) → T018.4/T018.5 (cookie + bearer paths, parallel, **gated on
-  OPEN-7**) → T018.6 (priority + sentinel, **gated on OPEN-6**) → T018.7 (wiring) →
-  T018.8 (e2e). **Implementation begins only after `/analyze` is clean.** Prod
+  read, parallel) → T018.4/T018.5 (cookie + bearer paths, parallel) → T018.6
+  (priority + sentinel) → T018.7 (wiring) → T018.8 (e2e). **OPEN-5/6/7 are DECIDED**
+  — no clarification gate remains; sub-tasks build to the locked decisions.
+  **Implementation begins only after `/analyze` is clean.** Prod
   rollout coupled to the OIDC cutover; the collab k8s manifest is a separate
   follow-up, not a T018 sub-task.
 

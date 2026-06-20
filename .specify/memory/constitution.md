@@ -1,7 +1,16 @@
 <!--
 Sync Impact Report
-- Version change: N/A → 1.0.0 (initial ratification)
-- Adapted from the Alkemio File Service (Go) constitution v1.3.0, inheriting
+- Version change: 1.0.0 → 1.0.1 (PATCH — §V clarification, no principle change)
+- 1.0.1 (2026-06-20): §V Security by Design — clarify the handshake-AuthN
+  rule that *missing ≠ failed*. A credential that was **presented but is
+  invalid** (malformed/expired/signature-rejected/tombstoned) is a FAILED
+  handshake → 401; a **missing** credential (no cookie/bearer/guestName) is
+  NOT a failure → it resolves to the anonymous sentinel and the per-document
+  `AuthZ` port decides. Preserves the original intent (never silently
+  downgrade a FAILED auth to anonymous); encodes the missing-vs-failed
+  distinction the Wave-5 `oidc` AuthN adapter relies on (spec FR-022/FR-023).
+- 1.0.0 (2026-06-18): initial ratification.
+  Adapted from the Alkemio File Service (Go) constitution v1.3.0, inheriting
   the fleet's §I–XV principles verbatim where applicable, with service-specific
   adjustments for a CRDT/WebSocket service:
   - II. Storage Abstraction → Pluggable Ports (fan-out / persistence / auth)
@@ -10,9 +19,9 @@ Sync Impact Report
     per-document authZ, fail-closed
   - Technology Stack Constraints → CRDT/WS stack (coder/websocket, the forked
     y-crdt core, Prometheus); Postgres path keeps pgx/sqlc/golang-migrate
-- Added principles: I–XV (see Core Principles)
-- Added sections: Technology Stack Constraints, Integration Requirements,
-  Anti-Patterns — Quick Reference, Governance
+  - Added principles: I–XV (see Core Principles)
+  - Added sections: Technology Stack Constraints, Integration Requirements,
+    Anti-Patterns — Quick Reference, Governance
 - Follow-up TODOs: none
 -->
 
@@ -91,9 +100,22 @@ The service mediates document access and holds authoritative document
 state, making security a non-negotiable concern at every layer.
 
 - The server is authoritative and holds **plaintext** Y.Docs (FR-021).
-- Authentication MUST happen at the WebSocket handshake; a failed
-  handshake MUST be rejected (401), never downgraded to anonymous
-  (except in `open` standalone mode, which is anonymous by design).
+- Authentication MUST happen at the WebSocket handshake. A **failed**
+  authentication MUST NOT be silently downgraded to anonymous. A failed
+  authentication means a credential was **presented but is invalid** —
+  malformed, expired, signature-rejected, or tombstoned — and MUST be
+  rejected (401). This is distinct from a **missing** credential (no
+  cookie, no bearer, no `guestName`): a missing credential is not a
+  failed handshake; it resolves to the **anonymous sentinel** and lets
+  the per-document `AuthZ` port decide (a public-read document remains
+  reachable, a protected one is refused by authorization). The principle
+  is *missing ≠ failed*: never treat a credential that failed validation
+  as anonymous, but absence of a credential is a legitimate anonymous
+  identity, not a failure. (In `open` standalone mode everyone is
+  anonymous by design; in `oidc` mode a presented-but-invalid credential
+  is the 401 case while absence resolves to the sentinel; in `header`
+  mode a missing/empty header means the gateway did not run and is
+  rejected.)
 - Per-document authorization (read vs. update-content → viewer vs.
   collaborator) MUST be evaluated via the `AuthZ` port and re-evaluated
   on `document.access_changed`.
@@ -332,4 +354,4 @@ informal conventions and ad-hoc decisions.
 - **Review cadence**: The constitution SHOULD be reviewed quarterly or
   when significant architectural decisions arise.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-18
+**Version**: 1.0.1 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-20

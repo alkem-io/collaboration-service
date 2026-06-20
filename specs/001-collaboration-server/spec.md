@@ -108,7 +108,11 @@ The AuthN/AuthZ split, made explicit:
 - **WS handshake credential surface** — the handshake reader is generalized from a
   single `AUTH_TOKEN_HEADER` to a credential set the `oidc` adapter inspects in the
   same priority order the server's forward-auth controller uses: **cookie →
-  bearer → `?guestName=` → anonymous** (see OPEN-7 for the exact set defaulted).
+  bearer → `?guestName=` → anonymous** (OPEN-7 — DECIDED). The bearer is read
+  **only** from the `Authorization:` header; the `?access_token=` query-param token
+  fallback is **deliberately NOT supported** (DROPPED — the browser cookie already
+  rides the same-site WS upgrade, so a query token is unnecessary (YAGNI) and a
+  URL-token log-leak surface).
 - **Rollout coupling** — collab has **no k8s manifest yet**, and prod is **still on
   oathkeeper** (the OIDC cutover has not landed). Therefore the `header`-mode prod
   rollout is **coupled to the prod OIDC cutover** (the forward-auth gateway must be
@@ -117,6 +121,33 @@ The AuthN/AuthZ split, made explicit:
   Hydra/BFF credentials directly — and is therefore also the defense-in-depth
   option behind the gateway. This decision is **SPEC/DESIGN only**; the adapter
   implementation is deferred to Wave 5 tasks (T018), gated on a clean `/analyze`.
+
+#### Wave-5 OPENs — ✅ ALL RESOLVED (antst, 2026-06-20 confirm pass)
+
+The three Wave-5 OPENs are **DECIDED**, not open. The detailed grounding/rationale
+remains under `## Clarifications → OPEN`; the locked decisions are:
+
+- **OPEN-5 (AuthN/AuthZ mode split): DECIDED →** split the single
+  `AUTH_MODE=authzeval|open` into **`AUTH_MODE`** (AuthN: `header`|`oidc`|`open`)
+  and **`AUTHZ_MODE`** (AuthZ: `authzeval`|`open`). When `AUTHZ_MODE` is unset it is
+  **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`). The
+  retired `AUTH_MODE=authzeval` value is accepted as a backward-compat **alias** for
+  `header` AuthN + `authzeval` AuthZ. (See FR-021; plan.md "AuthN/AuthZ split".)
+- **OPEN-6 (guest in `oidc` mode): DECIDED →** `?guestName=` in `oidc` mode is a
+  **named anonymous** — the display name flows to awareness/presence only; the
+  authorization principal is the **anonymous sentinel** (`ANONYMOUS_ACTOR_ID`). No
+  real/distinct guest principal is minted. (See FR-022.)
+- **OPEN-7 (validated-credential set + transport): DECIDED →** `oidc` validates
+  **BOTH** the `alkemio_session` BFF cookie (→ Redis session → `alkemio_actor_id`)
+  **AND** a Hydra **RS256** `Authorization: Bearer` token (→ JWKS → `alkemio_actor_id`
+  claim); each path is **inert when its config is absent** (so the adapter degrades
+  to cookie-only or bearer-only). Config: a separate **`SESSION_REDIS_URL`** for the
+  cookie-session store that **defaults to `REDIS_URL`** when unset; the JWKS/issuer/
+  audience/cookie-name env var names **mirror the server's** (see plan.md and
+  data-model.md for the exact names). The **`?access_token=` query-param token
+  fallback is DROPPED** — the bearer is read only from `Authorization:`; the
+  browser cookie already rides the same-site WS upgrade (YAGNI) and a URL token is a
+  log-leak surface. (See FR-022/FR-023.)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -257,8 +288,8 @@ tasks in `tasks.md`. **[Wave N]** marks the wave that delivers it.
 
 #### Wave 5 — dual-adapter handshake AuthN (option (c)) — forward, SPEC/DESIGN this pass
 
-- **FR-021** [Wave 5]: The server MUST select its **handshake-AuthN strategy by configuration** from **three** modes — **`header`** (option (a), gateway-terminated: trust the actor id in the gateway-stamped header; the existing Wave-2 behaviour, now named; **Alkemio prod default**), **`oidc`** (option (b), direct credential validation at the handshake; FR-022), and **`open`** (anonymous; zero-dependency standalone default) — **independently of the AuthZ adapter selection** (`AUTH_MODE` selects AuthN; `AUTHZ_MODE` selects AuthZ). Renaming the existing AuthN posture to `header` MUST NOT change the gateway-terminated path's behaviour (Session 2026-06-20; T018; OPEN-5).
-- **FR-022** [Wave 5]: In **`oidc`** mode the server MUST **validate the handshake credential itself** and resolve `model.Identity{ActorID}`, mirroring the server's `forward-auth.controller.ts`, trying credentials in order: **(1)** the **`alkemio_session` BFF cookie** — bare session id → Redis lookup (`alkemio:sid:<id>`) → `alkemio_actor_id`, rejecting **tombstoned** (`terminated_at` set) and **expired** (`expires_at`/`absolute_expires_at` past) sessions; **(2)** a **Hydra-issued RS256 `Authorization: Bearer` token** — JWKS-validated (issuer + audience allow-list + `alkemio_actor_id` claim + clock tolerance), extract `alkemio_actor_id`; **(3)** **`?guestName=`** — anonymous guest (OPEN-6); **(4)** **no credential** → the **nil-UUID anonymous sentinel** (`ANONYMOUS_ACTOR_ID`) which auth-eval resolves to `GLOBAL_ANONYMOUS`. The exact validated credential set (cookie / bearer / both) and the WS-handshake transport for each are OPEN-7's defaulted decision (epic FR-021/R13; T018; FR-013/FR-015; OPEN-6/OPEN-7).
+- **FR-021** [Wave 5]: The server MUST select its **handshake-AuthN strategy by configuration** from **three** modes — **`header`** (option (a), gateway-terminated: trust the actor id in the gateway-stamped header; the existing Wave-2 behaviour, now named; **Alkemio prod default**), **`oidc`** (option (b), direct credential validation at the handshake; FR-022), and **`open`** (anonymous; zero-dependency standalone default) — **independently of the AuthZ adapter selection** (`AUTH_MODE` selects AuthN; `AUTHZ_MODE` selects AuthZ). **`AUTHZ_MODE`** is `authzeval|open` and, when unset, is **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`); the retired `AUTH_MODE=authzeval` value is accepted as a backward-compat **alias** for `header` AuthN + `authzeval` AuthZ. Renaming the existing AuthN posture to `header` MUST NOT change the gateway-terminated path's behaviour (Session 2026-06-20; T018; **OPEN-5 DECIDED**).
+- **FR-022** [Wave 5]: In **`oidc`** mode the server MUST **validate the handshake credential itself** and resolve `model.Identity{ActorID}`, mirroring the server's `forward-auth.controller.ts`, trying credentials in order: **(1)** the **`alkemio_session` BFF cookie** — bare session id → Redis lookup (`alkemio:sid:<id>`, via `SESSION_REDIS_URL` defaulting to `REDIS_URL`) → `alkemio_actor_id`, rejecting **tombstoned** (`terminated_at` set) and **expired** (`expires_at`/`absolute_expires_at` past) sessions; **(2)** a **Hydra-issued RS256 `Authorization: Bearer` token** — JWKS-validated (issuer + audience allow-list + `alkemio_actor_id` claim + clock tolerance), extract `alkemio_actor_id`, read **only** from the `Authorization:` header (no `?access_token=` query fallback — DROPPED); **(3)** **`?guestName=`** — **named anonymous** (display name → presence only; principal = anonymous sentinel; **OPEN-6 DECIDED**); **(4)** **no credential** → the **nil-UUID anonymous sentinel** (`ANONYMOUS_ACTOR_ID`) which auth-eval resolves to `GLOBAL_ANONYMOUS`. The server MUST validate **BOTH** the cookie and the bearer (full forward-auth parity); each path is **inert when its config is absent** (no `SESSION_REDIS_URL`/`REDIS_URL` → cookie path off; no JWKS URL → bearer path off). The JWKS/issuer/audience/cookie-name env var names **mirror the server's** (**OPEN-7 DECIDED**) (epic FR-021/R13; T018; FR-013/FR-015; **OPEN-6/OPEN-7 DECIDED**).
 - **FR-023** [Wave 5]: In **`oidc`** mode the server MUST treat AuthN failure exactly as the gateway forward-auth does: a **presented-but-invalid** credential (bad signature, expired/tombstoned session, missing `alkemio_actor_id` claim) → **401** at the handshake; a **missing** credential → resolve to the **anonymous sentinel** (never 401 for absence), so a public-read document remains reachable. The Redis-session and Hydra-JWKS dependencies MUST be behind the `Auth` port so the domain core is unchanged, MUST fail safely (Redis unreachable → 503/handshake-reject, not silent anonymous), and the `oidc` adapter MUST NOT be required for `header`/`open` modes (epic FR-021; T018; OPEN-7).
 
 ### Key Entities *(server view; details in `data-model.md`)*
@@ -299,18 +330,21 @@ Server-level, directly testable in this repo. Each traces to an epic SC.
 - **Wave-1 additive ports** — `service.Metrics` and `service.Conn` extend the port surface without breaking the epic's five; the epic's "ports held" finding is recorded in `tasks/collaboration-service.md`.
 - **Out of scope (server)** — the migration job and big-bang cutover (WS-E, owned by `server`/infra); the CRDT core internals and fuzz harness (WS-A); the client bindings (WS-B/WS-D); cross-session version history (FR-025 forward-compat only). Standalone S3/local blob and Postgres metastore exist so the service is reusable outside Alkemio, not because Alkemio needs them.
 
-## Clarifications → OPEN (decisions needed, with recommendations)
+## Clarifications → OPEN-block grounding (ALL RESOLVED — retained as rationale)
 
 Grounded by reading the sibling services (see `research.md` for the file
-anchors). Each is a Wave-2/3 implementation detail inside an already-frozen
-contract; none blocks Wave 1.
+anchors). Each was an implementation detail inside an already-frozen contract; none
+blocks Wave 1.
 
-> **✅ All four were resolved in the 2026-06-18 clarify pass (antst)** — see the
-> "OPEN — ALL RESOLVED" summary above for the decisions. The detailed analysis
-> below is retained as the grounding/rationale that informed each choice. The
-> chosen option matches the **Recommendation** in each block, except where the
-> summary notes otherwise. OPEN-3 carries a tracked cross-repo follow-up (the
-> `server`-side consumer for the new unified `collaboration-save`/`-fetch`).
+> **✅ ALL SEVEN OPENs are RESOLVED — none is open.** OPEN-1–4 were resolved in the
+> 2026-06-18 clarify pass; **OPEN-5/6/7 are DECIDED in the 2026-06-20 confirm pass
+> (antst)** — see the "OPEN — ✅ ALL RESOLVED" and "Wave-5 OPENs — ✅ ALL RESOLVED"
+> summaries above for the locked decisions. The detailed analysis below is retained
+> only as the grounding/rationale that informed each choice; it is **not** a list of
+> open questions. The chosen option matches the **Recommendation** in each block,
+> except where the summary notes otherwise. OPEN-3 carries a tracked cross-repo
+> follow-up (the `server`-side consumer for the new unified
+> `collaboration-save`/`-fetch`).
 
 ### OPEN-1 — authzeval request mapping (Wave 2, T006)
 
@@ -336,7 +370,8 @@ which privilege names mean read vs. collaborate — `read` + `update-content`
 `authzeval` adapter calls `evaluate(actorId, "read"|"update-content", policyId)`.
 This reuses the file-service/wopi h2c+gobreaker client verbatim and keeps the
 collab service from duplicating Alkemio's authorization model (DRY, constitution
-§VIII). **Confirm the policy-id source and the exact privilege strings.**
+§VIII). **Resolved & built (T006):** the policy id is sourced from `MetadataStore`
+(`PolicyResolver`) and the privilege strings are `read` / `update-content`.
 
 ### OPEN-2 — fileservice BlobStore: existing API vs. expansion (Wave 2, T005)
 
@@ -357,8 +392,9 @@ for v1 server persistence.
 content pointer, with `externalID` for dedup), `Get` = `GET /{id}/content`,
 `Delete` = `DELETE /{id}`. Pick a fixed `storageBucketId` per deployment. Snapshot
 sizes (≈1–10 MB) sit well under 32 MiB; if a board can exceed that, set
-`MAX_UPLOAD_SIZE` accordingly. **No file-service expansion for v1.** Confirm the
-bucket-id convention and the size ceiling.
+`MAX_UPLOAD_SIZE` accordingly. **No file-service expansion for v1.** **Resolved &
+built (T005.3):** a fixed `storageBucketId`+`authorizationId` per deployment, with
+the `MAX_UPLOAD_SIZE` ceiling.
 
 ### OPEN-3 — RabbitMQ metastore dialect (Wave 2, T005)
 
@@ -386,10 +422,12 @@ will accept is not determinable from the collab side alone.
 `{id, contentType, version, contentPointer, blobStore}` (index only; the blob goes
 to the BlobStore), with `info`/`contribution` carried forward. This matches
 `persistence-ports.md` (metadata/blob split) and avoids baking two legacy dialects
-into the new service (constitution §X, no-legacy). **This is a cross-repo contract
-with `server` — confirm with the `server` owner before implementing T005.** If
-`server` cannot expose the unified contract in time, the fallback is a
-content-type-routed adapter speaking both legacy dialects with the blob inline.
+into the new service (constitution §X, no-legacy). **Resolved & built (T005.1):**
+the collab adapter targets this unified contract (`contracts/unified-metadata-rmq.md`).
+**Tracked cross-repo follow-up:** the `server`-side consumer for the unified
+patterns does not exist yet (recorded in the Wave-2 phase note); if `server` cannot
+expose the unified contract in time, the fallback is a content-type-routed adapter
+speaking both legacy dialects with the blob inline.
 
 ### OPEN-4 — limits defaults + presence/collaborator-mode + FR-014 metric (Wave 3, T013/T014)
 
@@ -413,65 +451,69 @@ counter** (or both).
 `CONTRIBUTION_WINDOW=…` carried from the legacy config. Emit the contribution metric
 **both** as a Prometheus gauge (`collaboration_contributing_actors`) *and*, in
 Alkemio mode, as the RabbitMQ `contribution` event (so `server` analytics are
-unbroken). **Confirm the default values and the metric transport.**
+unbroken). **Resolved & built (T013/T014):** the R9 defaults are adopted
+(`MAX_DOC_BYTES=32MiB`, `MAX_CONNS_PER_ROOM=50`, `UPDATE_RATE_PER_SEC≈50`,
+`COLLABORATOR_INACTIVITY_SECONDS=120`, `CONTRIBUTION_WINDOW_SECONDS=60`) and the
+metric ships **both** transports (Prometheus gauge + RMQ `collaboration-contribution`
+event).
 
-### OPEN-5 — AuthN-mode enum shape + AuthZ-mode independence (Wave 5, T018) — DEFAULTED
+### OPEN-5 — AuthN-mode enum shape + AuthZ-mode independence (Wave 5, T018) — ✅ DECIDED
 
-**Decision recorded (antst):** AuthN is `header` | `oidc` | `open`, `header` =
-Alkemio default. **Defaulted sub-decision (confirm):** the existing single
-`AUTH_MODE=authzeval|open` enum is **split** into `AUTH_MODE` (AuthN:
-`header`|`oidc`|`open`) and a separate **`AUTHZ_MODE`** (`authzeval`|`open`). The
-Wave-2 `authzeval` *adapter* is decomposed: its header-trusting `Authenticate`
-becomes the `header` AuthN adapter; its `Evaluate` becomes the `authzeval` AuthZ
-adapter (selected by `AUTHZ_MODE`). **Default coupling for backward-compat:** when
-`AUTHZ_MODE` is unset, derive it from `AUTH_MODE` (`open`→`open` AuthZ,
-`header`/`oidc`→`authzeval` AuthZ) so existing `AUTH_MODE=authzeval` deployments
-keep working via a compatibility alias (`authzeval`→`header` AuthN + `authzeval`
-AuthZ). **Confirm:** the env names (`AUTH_MODE`/`AUTHZ_MODE`) and the
-backward-compat alias for the retired `AUTH_MODE=authzeval` value.
+**DECIDED (antst, 2026-06-20):** AuthN is `header` | `oidc` | `open`, `header` =
+Alkemio default. The existing single `AUTH_MODE=authzeval|open` enum is **split**
+into `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) and a separate **`AUTHZ_MODE`**
+(`authzeval`|`open`). The Wave-2 `authzeval` *adapter* is decomposed: its
+header-trusting `Authenticate` becomes the `header` AuthN adapter; its `Evaluate`
+becomes the `authzeval` AuthZ adapter (selected by `AUTHZ_MODE`). **Coupling for
+backward-compat:** when `AUTHZ_MODE` is unset, derive it from `AUTH_MODE`
+(`open`→`open` AuthZ, `header`/`oidc`→`authzeval` AuthZ) so existing
+`AUTH_MODE=authzeval` deployments keep working via a compatibility alias
+(`authzeval`→`header` AuthN + `authzeval` AuthZ). **Env names:** `AUTH_MODE` /
+`AUTHZ_MODE`; the `authzeval` alias is preserved. (Grounding below retained.)
 
-### OPEN-6 — guest handling in standalone-direct `oidc` mode (Wave 5, T018) — DEFAULTED
+### OPEN-6 — guest handling in standalone-direct `oidc` mode (Wave 5, T018) — ✅ DECIDED
 
 **Found in code:** the gateway mints a synthetic `guest-<uuid>` actor id
 (`ActorContextService.createGuest`) for `?guestName=` callers; collab never sees
 the minting, only the resolved header today. In `oidc` mode collab is *off-gateway*,
-so it must decide what a `?guestName=` handshake resolves to. **Defaulted
-sub-decision (confirm):** `oidc` mode treats `?guestName=` as a **named anonymous**
-— it resolves to the **anonymous sentinel** (`ANONYMOUS_ACTOR_ID`) and carries the
+so it must decide what a `?guestName=` handshake resolves to. **DECIDED (antst,
+2026-06-20):** `oidc` mode treats `?guestName=` as a **named anonymous** — it
+resolves to the **anonymous sentinel** (`ANONYMOUS_ACTOR_ID`) and carries the
 display name only in awareness/presence (it is **not** a distinct authorization
-principal). Reason: minting a `guest-<uuid>` principal that auth-eval would not
-recognize standalone gains nothing for authZ; the display-name UX is presence-only.
-**Confirm:** whether standalone-direct guests need a distinct principal (e.g. for a
-"guests may contribute" policy) or named-anonymous suffices.
+principal). No real/distinct guest principal is minted. Reason: minting a
+`guest-<uuid>` principal that auth-eval would not recognize standalone gains nothing
+for authZ; the display-name UX is presence-only.
 
-### OPEN-7 — `oidc` validated-credential set + WS-handshake transport (Wave 5, T018) — DEFAULTED
+### OPEN-7 — `oidc` validated-credential set + WS-handshake transport (Wave 5, T018) — ✅ DECIDED
 
 **Found in code:** the server's `forward-auth.controller.ts` tries **cookie →
 bearer → guestName → anonymous**; both the cookie (BFF Redis session) and the
 bearer (Hydra RS256 JWKS) are validated. A browser WebSocket cannot set arbitrary
 request headers, but **does** send cookies on same-site upgrades and can pass query
-params; native/M2M clients can set `Authorization`. **Genuinely unknown / defaulted
-(confirm):**
+params; native/M2M clients can set `Authorization`. **DECIDED (antst, 2026-06-20):**
 
 1. **Which credentials does `oidc` validate — bearer-only, session-only, or both?**
-   **Defaulted: BOTH** (full forward-auth parity — cookie session *and* Hydra
+   **DECIDED: BOTH** (full forward-auth parity — cookie session *and* Hydra
    bearer), so the same adapter serves browser (cookie) and M2M/native (bearer)
-   clients. Either dependency can be disabled by leaving its config unset
-   (no `REDIS_URL` → cookie path off; no JWKS URL → bearer path off).
-2. **Where does the WS handshake read each credential?** **Defaulted, mirroring the
+   clients. Either dependency is **disabled** by leaving its config unset
+   (no `SESSION_REDIS_URL`/`REDIS_URL` → cookie path off; no JWKS URL → bearer path
+   off), so the adapter degrades to cookie-only or bearer-only.
+2. **Where does the WS handshake read each credential?** **DECIDED, mirroring the
    forward-auth priority:** cookie from the `Cookie:` header
-   (`alkemio_session[_<env>]`, same-site upgrade); bearer from `Authorization:`;
-   guest from `?guestName=`; **plus** `?access_token=` (or `?token=`) as a query
-   fallback for the bearer **only when** a browser client cannot set `Authorization`
-   on the upgrade. **Open risk:** a token in a query string is logged/cached more
-   readily than a header — the query-token fallback should be **opt-in** (a config
-   flag) and the value redacted from logs. **Confirm:** enable the query-token
-   fallback at all, and under what flag.
-3. **JWKS / issuer / audience / cookie-name config** — defaulted to the same env the
-   server uses (`OIDC_HYDRA_JWKS_URL`/issuer, audience allow-list, cookie name
-   `alkemio_session` env-suffixed, `REDIS_URL` for the session store). **Confirm**
-   the exact env var names and whether the session-store Redis is the **same**
-   instance as the fan-out `REDIS_URL` or a separate `SESSION_REDIS_URL`.
+   (`alkemio_session[_<env>]`, same-site upgrade); bearer from `Authorization:`
+   **only**; guest from `?guestName=`. The **`?access_token=` (and `?token=`)
+   query-param token fallback is DROPPED** — not supported. Rationale: the browser
+   cookie already rides the same-site WS upgrade, so a query token is unnecessary
+   (YAGNI), and a token in a URL is logged/cached far more readily than a header (a
+   log-leak surface we decline to open). The corresponding T018 sub-task is removed.
+3. **JWKS / issuer / audience / cookie-name config** — **DECIDED:** **mirror the
+   server's** env var names — the Hydra JWKS URL / issuer, the audience allow-list,
+   and the cookie name (`alkemio_session`, env-suffixed) use the **same names the
+   server's OIDC config uses** (recorded in plan.md / data-model.md). The
+   cookie-session store uses a **separate `SESSION_REDIS_URL`** that **defaults to
+   the fan-out `REDIS_URL`** when unset — so a single-Redis deployment needs no extra
+   config, while a deployment that isolates the session store can point it
+   elsewhere.
 
 ## Wave map (server delivery)
 
