@@ -81,16 +81,23 @@ type BlobStore interface {
 }
 
 // Auth resolves the connecting principal at the WebSocket handshake from the
-// Alkemio token/cookie (Oathkeeper/Kratos). It is authentication only — the
-// per-document grant is AuthZ's job. The 'open' adapter authenticates everyone
-// as an anonymous identity for standalone use.
+// domain-typed credential set (model.HandshakeCredentials: gateway actor-id
+// header / BFF cookie session / Hydra bearer / guest name). It is authentication
+// only — the per-document grant is AuthZ's job. The selected adapter decides
+// which credentials it inspects and in what priority (the WS adapter only reads
+// them off the transport), keeping the port infra-free (§I). The 'open' adapter
+// authenticates everyone as an anonymous identity for standalone use.
 //
 // Maps to: contracts/ws-protocol.md ("AuthN at the handshake").
 type Auth interface {
-	// Authenticate resolves the identity carried by the handshake token. A
-	// non-nil error means the handshake MUST be rejected with 401; it MUST
-	// NOT be downgraded to anonymous.
-	Authenticate(ctx context.Context, token string) (model.Identity, error)
+	// Authenticate resolves the identity carried by the handshake credentials. A
+	// non-nil error means the handshake MUST be rejected with 401 — a credential
+	// was PRESENTED but is invalid (malformed/expired/signature-rejected/
+	// tombstoned), or a required dependency was unreachable; it MUST NOT be
+	// downgraded to anonymous (constitution §V: missing ≠ failed). A MISSING
+	// credential is not a failure: the oidc adapter resolves it to the anonymous
+	// sentinel and lets AuthZ decide.
+	Authenticate(ctx context.Context, creds model.HandshakeCredentials) (model.Identity, error)
 }
 
 // AuthZ evaluates per-document authorization for an authenticated identity via

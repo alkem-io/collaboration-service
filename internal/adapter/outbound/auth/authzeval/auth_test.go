@@ -190,23 +190,9 @@ func TestEvaluateOpenBreakerFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAuthenticateResolvesIdentity(t *testing.T) {
-	adapter := New(Config{ServiceURL: "http://unused"}, staticPolicies{})
-	id, err := adapter.Authenticate(context.Background(), "actor-token-xyz")
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
-	}
-	if id.ActorID != "actor-token-xyz" {
-		t.Errorf("ActorID = %q, want the token-resolved actor", id.ActorID)
-	}
-}
-
-func TestAuthenticateRejectsEmptyToken(t *testing.T) {
-	adapter := New(Config{ServiceURL: "http://unused"}, staticPolicies{})
-	if _, err := adapter.Authenticate(context.Background(), ""); err == nil {
-		t.Error("expected an empty token to be rejected (401, never anonymous downgrade)")
-	}
-}
+// Handshake AuthN moved out of authzeval into the `header` adapter (Wave 5,
+// T018.2); its resolve/reject behaviour is proven in
+// internal/adapter/outbound/auth/header/auth_test.go.
 
 func TestEvaluateServiceDegraded503FailsClosed(t *testing.T) {
 	// A 503 with a structured error body (auth service degraded) must be an
