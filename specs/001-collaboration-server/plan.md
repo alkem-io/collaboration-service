@@ -170,29 +170,31 @@ header (`AUTH_TOKEN_HEADER`) and passes it as the `Auth.Authenticate` `token`. W
 5 generalizes the inbound read so the `oidc` adapter can inspect the **full
 credential set** (mirroring `forward-auth.controller.ts`'s priority): the `Cookie`
 header (`alkemio_session[_<env>]`), the `Authorization` header, and the
-`?guestName=`/optional `?access_token=` query params. Two design options for the
-seam (T018 picks one, kept hexagonal):
-1. **Pass `*http.Request` (read-only) to a richer `Auth.Authenticate`** — most
-   faithful to forward-auth, but widens the port with an HTTP type. *Mitigation:*
-   keep a small domain `model.HandshakeCredentials` value object the WS adapter
-   populates, so the port stays infra-free.
-2. **Keep the port string-based; the WS adapter extracts a single canonical
-   credential** per mode (cookie sid OR bearer) and the `oidc` adapter validates
-   it. Simpler port; the WS adapter owns the priority logic.
-   **→ Default: option (1) via `model.HandshakeCredentials`** (cookie sid, bearer,
-   guestName) so priority/validation live in the adapter, not the transport, and
-   the port stays domain-typed. *T018 confirms.*
+`?guestName=` query param. The bearer is read **only** from `Authorization:` — the
+`?access_token=` query-param token fallback is **DROPPED** (OPEN-7 DECIDED): the
+browser cookie already rides the same-site WS upgrade (YAGNI) and a URL token is a
+log-leak surface.
+
+**Seam — DECIDED:** the WS adapter populates a small domain
+`model.HandshakeCredentials` value object (`{CookieSID, BearerToken, GuestName}`)
+and passes it to `Auth.Authenticate`, so credential **priority and validation live
+in the adapter**, not the transport, and the `Auth` port stays infra-free
+(domain-typed, no `*http.Request` — §I). The `header`/`open` adapters read only the
+field they need.
 
 **Dependencies (oidc mode only, behind the `Auth` port):**
 - **Redis session-store reader** — `GET alkemio:sid:<sid>`, decode
   `AlkemioSessionPayload`, enforce tombstone (`terminated_at`) + TTL
-  (`expires_at`/`absolute_expires_at`). May reuse the fan-out `REDIS_URL` client or
-  a separate `SESSION_REDIS_URL` (OPEN-7). `go-redis` (already a Wave-2 dep).
+  (`expires_at`/`absolute_expires_at`). Uses a separate **`SESSION_REDIS_URL`** that
+  **defaults to the fan-out `REDIS_URL`** when unset (OPEN-7 DECIDED) — single-Redis
+  deployments need no extra config; isolated session stores point it elsewhere.
+  `go-redis` (already a Wave-2 dep).
 - **Hydra JWKS validator** — fetch+cache the JWKS, RS256 verify with issuer +
-  audience allow-list + `alkemio_actor_id` claim + clock tolerance. A Go JWT/JOSE
-  lib (`github.com/lestrrat-go/jwx/v2` or `github.com/golang-jwt/jwt/v5` + a JWKS
-  cache) — **version-checked online at add time** (§XIV). Mirrors the server's
-  `jose jwtVerify` parameters.
+  audience allow-list + `alkemio_actor_id` claim + clock tolerance. The JWKS URL /
+  issuer / audience / cookie-name env var names **mirror the server's** OIDC config
+  (OPEN-7 DECIDED). A Go JWT/JOSE lib (`github.com/lestrrat-go/jwx/v2` or
+  `github.com/golang-jwt/jwt/v5` + a JWKS cache) — **version-checked online at add
+  time** (§XIV). Mirrors the server's `jose jwtVerify` parameters.
 - Either path is **inert** when its config is absent (no JWKS URL → bearer off; no
   session Redis → cookie off), so `oidc` degrades to bearer-only or cookie-only.
 
