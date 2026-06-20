@@ -59,7 +59,12 @@ func startAuthEvalStub(t *testing.T, decide func(evalRequest) bool) string {
 // row the PolicyResolver can load).
 func authzevalConfig(authURL string) *config.Config {
 	cfg := standaloneConfig()
-	cfg.AuthMode = config.AuthModeAuthZEval
+	// header AuthN (the gateway-stamped actor id arrives in the Authorization
+	// handshake header here) + authzeval AuthZ — the Wave-5 split of the former
+	// single AUTH_MODE=authzeval. The `header` adapter reads cfg.Auth.TokenHeader,
+	// which standaloneConfig leaves empty ⇒ the Authorization default.
+	cfg.AuthMode = config.AuthModeHeader
+	cfg.AuthZMode = config.AuthZModeEval
 	cfg.AuthZEval = config.AuthZEvalConfig{
 		ServiceURL:              authURL,
 		BreakerFailureThreshold: 3,

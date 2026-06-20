@@ -16,12 +16,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	httpAdapter "github.com/alkem-io/collaboration-service/internal/adapter/inbound/http"
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/lifecycle"
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/ws"
 	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/authzeval"
+	authheader "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/header"
+	authoidc "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/oidc"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	blobfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/fileservice"
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
@@ -123,7 +126,12 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		return service.Deps{}, nil, err
 	}
 
-	auth, authz := buildAuth(cfg, metadata)
+	auth, err := buildAuthN(cfg, &closers)
+	if err != nil {
+		cleanup()
+		return service.Deps{}, nil, err
+	}
+	authz := buildAuthZ(cfg, metadata)
 
 	return service.Deps{
 		Broadcaster: broadcaster,
@@ -244,18 +252,70 @@ func buildBlob(cfg *config.Config) (port.BlobStore, error) {
 	}
 }
 
-func buildAuth(cfg *config.Config, metadata port.MetadataStore) (port.Auth, port.AuthZ) {
-	if cfg.AuthMode != config.AuthModeAuthZEval {
-		open := authopen.New()
-		return open, open
+// buildAuthN selects the handshake-AuthN adapter from cfg.AuthMode, independently
+// of AuthZ (Wave 5, T018.7). The oidc adapter constructs its credential-path
+// dependencies (a session-Redis client + a JWKS cache), registering the Redis
+// client's closer; each path is left inert when its config is absent.
+func buildAuthN(cfg *config.Config, closers *[]func()) (port.Auth, error) {
+	switch cfg.AuthMode {
+	case config.AuthModeHeader:
+		return authheader.New(), nil
+	case config.AuthModeOIDC:
+		return buildOIDCAuth(cfg, closers)
+	default: // config.AuthModeOpen
+		return authopen.New(), nil
 	}
-	adapter := authzeval.New(authzeval.Config{
+}
+
+// buildOIDCAuth constructs the direct-validation oidc adapter: the BFF
+// cookie-session path (a Redis client over SESSION_REDIS_URL) and the Hydra
+// RS256 bearer path (a background-refreshed JWKS cache over HYDRA_JWKS_URL). Each
+// path is left nil — and therefore inert — when its config is absent (config.Load
+// has already guaranteed at least one is set).
+func buildOIDCAuth(cfg *config.Config, closers *[]func()) (port.Auth, error) {
+	oc := authoidc.Config{}
+
+	if cfg.OIDC.SessionRedisURL != "" {
+		opts, err := goredis.ParseURL(cfg.OIDC.SessionRedisURL)
+		if err != nil {
+			return nil, fmt.Errorf("oidc session redis: parse SESSION_REDIS_URL: %w", err)
+		}
+		client := goredis.NewClient(opts)
+		*closers = append(*closers, func() { _ = client.Close() })
+		oc.Session = authoidc.NewSessionStore(client)
+	}
+
+	if cfg.OIDC.JWKSURL != "" {
+		// The cache refreshes the JWKS in the background for the process lifetime;
+		// a context.Background lifetime is correct (the cache is torn down with the
+		// process). Lookups still honour the per-request ctx in Authenticate.
+		validator, err := authoidc.NewBearerValidator(context.Background(), authoidc.BearerConfig{
+			JWKSURL:   cfg.OIDC.JWKSURL,
+			Issuer:    cfg.OIDC.IssuerURL,
+			Audiences: cfg.OIDC.BearerAudAllowList,
+			ClockSkew: time.Duration(cfg.OIDC.ClockSkewSeconds) * time.Second,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("oidc bearer validator: %w", err)
+		}
+		oc.Bearer = validator
+	}
+
+	return authoidc.New(oc), nil
+}
+
+// buildAuthZ selects the per-document-AuthZ adapter from cfg.AuthZMode,
+// independently of AuthN (Wave 5, T018.7).
+func buildAuthZ(cfg *config.Config, metadata port.MetadataStore) port.AuthZ {
+	if cfg.AuthZMode != config.AuthZModeEval {
+		return authopen.New()
+	}
+	return authzeval.New(authzeval.Config{
 		ServiceURL:              cfg.AuthZEval.ServiceURL,
 		BreakerFailureThreshold: cfg.AuthZEval.BreakerFailureThreshold,
 		BreakerTimeout:          time.Duration(cfg.AuthZEval.BreakerTimeoutSeconds) * time.Second,
 		BreakerHalfOpenMaxReqs:  cfg.AuthZEval.BreakerHalfOpenMaxReqs,
 	}, policyResolver{metadata})
-	return adapter, adapter
 }
 
 // policyResolver adapts a MetadataStore to authzeval.PolicyResolver: it resolves
@@ -311,11 +371,15 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		Auth:    deps.Auth,
 		Manager: manager,
 		Logger:  logger.Named("ws"),
-		// The handshake reads the identity token from this header. The Alkemio
-		// deployment terminates auth at the gateway and forwards the resolved actor
-		// id in a header (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id); standalone/open mode
-		// keeps the bearer-style Authorization default.
+		// The `header` AuthN adapter reads the gateway-stamped actor id from this
+		// header. The Alkemio deployment terminates auth at the gateway and forwards
+		// the resolved actor id (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id); standalone/
+		// open mode keeps the bearer-style Authorization default. The `oidc` adapter
+		// ignores it and reads the cookie/bearer/guest credentials instead.
 		TokenHeader: cfg.Auth.TokenHeader,
+		// The `oidc` adapter reads the bare BFF session id from this cookie
+		// (OIDC_SESSION_COOKIE_NAME, default alkemio_session); header/open ignore it.
+		CookieName: cfg.OIDC.SessionCookieName,
 	}
 
 	routerDeps := httpAdapter.Deps{
@@ -327,15 +391,16 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 	// bus (the lifecycle consumer), so these unauthenticated endpoints must NOT be
 	// exposed — leaving CollabAPI nil omits the REST surface entirely.
 	//
-	// When auth is authzeval, a create MUST carry an authorizationPolicyId — an
-	// empty one registers a document that fails every later authorization
-	// evaluation (the authzeval adapter fails closed on an empty policy). Require it
-	// at the handler so such a document is never persisted; in open mode authZ
-	// grants everything, so the policy id is optional.
+	// When AuthZ is authzeval (AUTHZ_MODE=authzeval, independent of the AuthN
+	// mode), a create MUST carry an authorizationPolicyId — an empty one registers
+	// a document that fails every later authorization evaluation (the authzeval
+	// adapter fails closed on an empty policy). Require it at the handler so such a
+	// document is never persisted; in open AuthZ everything is granted, so the
+	// policy id is optional.
 	if cfg.MetaStore != config.MetaStoreRabbitMQ {
 		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{
 			Lifecycle:                  manager,
-			RequireAuthorizationPolicy: cfg.AuthMode == config.AuthModeAuthZEval,
+			RequireAuthorizationPolicy: cfg.AuthZMode == config.AuthZModeEval,
 		}
 	}
 

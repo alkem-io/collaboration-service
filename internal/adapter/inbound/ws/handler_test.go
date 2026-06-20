@@ -42,42 +42,43 @@ func eventually(cond func() bool) bool {
 // rejectAuth is an Auth that always fails, to exercise the 401 handshake path.
 type rejectAuth struct{}
 
-func (rejectAuth) Authenticate(_ context.Context, _ string) (model.Identity, error) {
+func (rejectAuth) Authenticate(_ context.Context, _ model.HandshakeCredentials) (model.Identity, error) {
 	return model.Identity{}, errors.New("denied")
 }
 
-// captureAuth records the token string the handshake passes to Authenticate, so a
-// test can assert which request header the handler read it from. It always fails
-// (no upgrade) so ServeHTTP can be driven directly with a recorder.
-type captureAuth struct{ token string }
+// captureAuth records the credential set the handshake passes to Authenticate, so
+// a test can assert which request fields the handler read them from. It always
+// fails (no upgrade) so ServeHTTP can be driven directly with a recorder.
+type captureAuth struct{ creds model.HandshakeCredentials }
 
-func (c *captureAuth) Authenticate(_ context.Context, token string) (model.Identity, error) {
-	c.token = token
+func (c *captureAuth) Authenticate(_ context.Context, creds model.HandshakeCredentials) (model.Identity, error) {
+	c.creds = creds
 	return model.Identity{}, errors.New("denied")
 }
 
-// TestHandshakeReadsConfiguredTokenHeader asserts the handler reads the handshake
-// token from the header named by Handler.TokenHeader, defaulting to Authorization
-// when unset. This is the seam the Alkemio deployment uses to point the handshake
-// at the gateway's resolved actor-id header (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id)
-// while standalone/open mode keeps Authorization.
+// TestHandshakeReadsConfiguredTokenHeader asserts the handler reads the gateway
+// actor-id from the header named by Handler.TokenHeader, defaulting to
+// Authorization when unset. This is the seam the Alkemio deployment uses to point
+// the handshake at the gateway's resolved actor-id header
+// (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id) while standalone/open mode keeps
+// Authorization.
 func TestHandshakeReadsConfiguredTokenHeader(t *testing.T) {
 	cases := []struct {
 		name       string
 		header     string // Handler.TokenHeader; "" = default
 		setHeaders map[string]string
-		wantToken  string
+		wantActor  string
 	}{
 		{
 			name:       "default reads Authorization",
 			setHeaders: map[string]string{"Authorization": "auth-tok", "X-Alkemio-Actor-Id": "actor-tok"},
-			wantToken:  "auth-tok",
+			wantActor:  "auth-tok",
 		},
 		{
 			name:       "override reads the configured header",
 			header:     "X-Alkemio-Actor-Id",
 			setHeaders: map[string]string{"Authorization": "auth-tok", "X-Alkemio-Actor-Id": "actor-tok"},
-			wantToken:  "actor-tok",
+			wantActor:  "actor-tok",
 		},
 	}
 	for _, tc := range cases {
@@ -97,10 +98,65 @@ func TestHandshakeReadsConfiguredTokenHeader(t *testing.T) {
 
 			h.ServeHTTP(httptest.NewRecorder(), req)
 
-			if spy.token != tc.wantToken {
-				t.Fatalf("handshake token = %q, want %q (read from wrong header)", spy.token, tc.wantToken)
+			if spy.creds.ActorIDHeader != tc.wantActor {
+				t.Fatalf("handshake actor-id header = %q, want %q (read from wrong header)", spy.creds.ActorIDHeader, tc.wantActor)
 			}
 		})
+	}
+}
+
+// TestHandshakeReadsCredentialSet asserts the WS adapter populates the full
+// HandshakeCredentials value object (T018.3): the bearer from Authorization, the
+// bare session id from the BFF cookie, and the guest name from ?guestName= — so an
+// oidc adapter can inspect them in priority order. The bearer is read ONLY from
+// Authorization (no ?access_token= query fallback — DROPPED, OPEN-7).
+func TestHandshakeReadsCredentialSet(t *testing.T) {
+	spy := &captureAuth{}
+	//nolint:gosec // G101 false positive: "alkemio_session" is a cookie NAME, not a credential.
+	h := &Handler{Auth: spy, Logger: zap.NewNop(), TokenHeader: "X-Alkemio-Actor-Id", CookieName: "alkemio_session"}
+
+	req := httptest.NewRequest(http.MethodGet, "/collab/doc-creds?guestName=Ada&access_token=should-be-ignored", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("documentId", "doc-creds")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req.Header.Set("Authorization", "Bearer the-jwt")
+	req.Header.Set("X-Alkemio-Actor-Id", "actor-from-gw")
+	//nolint:gosec // G124: a test-request cookie carrying a bare sid; Secure/HttpOnly are set by the BFF in production, not here.
+	req.AddCookie(&http.Cookie{Name: "alkemio_session", Value: "sid-abc"})
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	got := spy.creds
+	if got.BearerToken != "Bearer the-jwt" {
+		t.Errorf("BearerToken = %q, want the Authorization header value", got.BearerToken)
+	}
+	if got.CookieSID != "sid-abc" {
+		t.Errorf("CookieSID = %q, want the bare session id from the cookie", got.CookieSID)
+	}
+	if got.GuestName != "Ada" {
+		t.Errorf("GuestName = %q, want Ada", got.GuestName)
+	}
+	if got.ActorIDHeader != "actor-from-gw" {
+		t.Errorf("ActorIDHeader = %q", got.ActorIDHeader)
+	}
+}
+
+// TestHandshakeNoAccessTokenQueryFallback asserts the ?access_token= query token
+// is NOT read into the bearer credential (DROPPED, OPEN-7) — only the
+// Authorization header populates BearerToken.
+func TestHandshakeNoAccessTokenQueryFallback(t *testing.T) {
+	spy := &captureAuth{}
+	h := &Handler{Auth: spy, Logger: zap.NewNop()}
+
+	req := httptest.NewRequest(http.MethodGet, "/collab/doc-q?access_token=query-jwt&token=other-jwt", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("documentId", "doc-q")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if spy.creds.BearerToken != "" {
+		t.Errorf("BearerToken = %q, want empty (no query-token fallback)", spy.creds.BearerToken)
 	}
 }
 
@@ -108,7 +164,7 @@ func TestHandshakeReadsConfiguredTokenHeader(t *testing.T) {
 // real room manager (in-memory/inline defaults), returning the server and its
 // ws:// base URL. Cross-origin is allowed so the test client can dial.
 func newTestServer(t *testing.T, auth interface {
-	Authenticate(context.Context, string) (model.Identity, error)
+	Authenticate(context.Context, model.HandshakeCredentials) (model.Identity, error)
 }) (*httptest.Server, string) {
 	t.Helper()
 	deps := service.Deps{

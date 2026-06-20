@@ -34,28 +34,67 @@ type Handler struct {
 	// InsecureSkipVerify to dial the httptest server cross-origin; production
 	// leaves origin checking on.
 	AcceptOptions *websocket.AcceptOptions
-	// TokenHeader is the request header the handshake reads the Alkemio
-	// token/identity surrogate from. Empty selects the default
+	// TokenHeader is the request header the `header` AuthN adapter reads the
+	// gateway-stamped actor id from. Empty selects the default
 	// (defaultTokenHeader). The Alkemio deployment terminates auth at the gateway
 	// and forwards the resolved actor id in a header (e.g. X-Alkemio-Actor-Id),
 	// while standalone/open mode keeps a bearer-style Authorization header; this
 	// field lets the deployment point the handshake at whichever header carries
-	// the identity (AUTH_TOKEN_HEADER).
+	// the identity (AUTH_TOKEN_HEADER). The `oidc` adapter ignores it (it reads
+	// the cookie/bearer/guest credentials instead).
 	TokenHeader string
+	// CookieName is the BFF session cookie the bare session id is read from for
+	// the `oidc` adapter (OIDC_SESSION_COOKIE_NAME, default alkemio_session). Empty
+	// selects the default. The `header`/`open` adapters ignore the cookie.
+	CookieName string
 }
 
-// defaultTokenHeader carries the Alkemio token/cookie surrogate when no header is
+// defaultTokenHeader carries the Alkemio actor-id surrogate when no header is
 // configured. The open adapter reads a bearer-style header so the Auth port is
 // exercised end to end; the Alkemio deployment overrides this (via the Handler's
 // TokenHeader) with the gateway's resolved actor-id header.
 const defaultTokenHeader = "Authorization"
 
-// tokenHeader returns the configured handshake header, or the default when unset.
+// defaultCookieName is the BFF session cookie the oidc adapter reads the bare
+// session id from when CookieName is unset (mirrors the server's oidc.cookie.name
+// default).
+const defaultCookieName = "alkemio_session"
+
+// tokenHeader returns the configured actor-id header, or the default when unset.
 func (h *Handler) tokenHeader() string {
 	if h.TokenHeader != "" {
 		return h.TokenHeader
 	}
 	return defaultTokenHeader
+}
+
+// cookieName returns the configured BFF session cookie name, or the default.
+func (h *Handler) cookieName() string {
+	if h.CookieName != "" {
+		return h.CookieName
+	}
+	return defaultCookieName
+}
+
+// credentials reads the full handshake credential set off the request and hands
+// it to the Auth port (T018.3). The WS adapter only TRANSPORTS the credentials —
+// the selected adapter decides which it inspects and in what priority, so the
+// Auth port stays infra-free (§I). The bearer is read ONLY from Authorization;
+// there is no ?access_token= query fallback (DROPPED, OPEN-7).
+func (h *Handler) credentials(r *http.Request) model.HandshakeCredentials {
+	creds := model.HandshakeCredentials{
+		ActorIDHeader: r.Header.Get(h.tokenHeader()),
+		BearerToken:   r.Header.Get("Authorization"),
+		GuestName:     r.URL.Query().Get("guestName"),
+	}
+	// The session cookie carries the bare sid (the server signs the cookie with
+	// express-session, but in the WS-handshake mirror the BFF presents the bare
+	// sid that matches the Redis key suffix). A missing cookie leaves CookieSID
+	// empty — the oidc adapter then skips the cookie path.
+	if c, err := r.Cookie(h.cookieName()); err == nil {
+		creds.CookieSID = c.Value
+	}
+	return creds
 }
 
 // ServeHTTP authenticates the handshake, upgrades to WebSocket, joins the room
@@ -68,9 +107,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	identity, err := h.Auth.Authenticate(r.Context(), r.Header.Get(h.tokenHeader()))
+	identity, err := h.Auth.Authenticate(r.Context(), h.credentials(r))
 	if err != nil {
-		// AuthN failure at the handshake → 401 (contracts/ws-protocol.md).
+		// AuthN failure at the handshake → 401: a credential was PRESENTED but is
+		// invalid, or a dependency was unreachable (contracts/ws-protocol.md, §V).
+		// A MISSING credential is not a failure — the oidc/open adapters resolve it
+		// to anonymous and never reach here.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

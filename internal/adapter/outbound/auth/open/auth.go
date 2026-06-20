@@ -19,8 +19,9 @@ type Auth struct{}
 // New constructs the open auth adapter.
 func New() *Auth { return &Auth{} }
 
-// Authenticate accepts any (including empty) token as an anonymous identity.
-func (a *Auth) Authenticate(_ context.Context, _ string) (model.Identity, error) {
+// Authenticate accepts any (including no) credential as an anonymous identity
+// with an empty ActorID — open mode bypasses AuthZ entirely.
+func (a *Auth) Authenticate(_ context.Context, _ model.HandshakeCredentials) (model.Identity, error) {
 	return model.Identity{}, nil
 }
 

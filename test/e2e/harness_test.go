@@ -76,6 +76,7 @@ func standaloneConfig() *config.Config {
 		MetaStore: config.MetaStoreInMemory,
 		BlobStore: config.BlobStoreInline,
 		AuthMode:  config.AuthModeOpen,
+		AuthZMode: config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
 			MaxDocBytes:                   32 << 20,
 			MaxConnsPerRoom:               50,
@@ -122,12 +123,21 @@ func dial(t *testing.T, base, documentID, contentType string) *wsClient {
 // actor id). An empty token sends no Authorization header.
 func dialWithToken(t *testing.T, base, documentID, contentType, token string) *wsClient {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	url := base + "/collab/" + documentID + "?type=" + contentType
 	var opts *websocket.DialOptions
 	if token != "" {
 		opts = &websocket.DialOptions{HTTPHeader: map[string][]string{"Authorization": {token}}}
 	}
+	return dialWithDialOptions(t, base, documentID, contentType, opts)
+}
+
+// dialWithDialOptions is the shared dial body: it connects a wsClient with the
+// given websocket.DialOptions (arbitrary handshake headers — Authorization /
+// Cookie), starts its read pump, and initiates SyncStep1. dialWithToken and the
+// oidc-mode header dials build on it.
+func dialWithDialOptions(t *testing.T, base, documentID, contentType string, opts *websocket.DialOptions) *wsClient {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	url := base + "/collab/" + documentID + "?type=" + contentType
 	conn, resp, err := websocket.Dial(ctx, url, opts)
 	if err != nil {
 		cancel()

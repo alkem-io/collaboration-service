@@ -1,17 +1,16 @@
-// Package authzeval is the Alkemio Auth + AuthZ adapter (port.Auth, port.AuthZ):
+// Package authzeval is the Alkemio per-document AuthZ adapter (port.AuthZ):
 //
-//   - AuthN — resolves the connecting actor from the WebSocket handshake token at
-//     the boundary. In the Alkemio deployment the gateway (Oathkeeper/Kratos via
-//     Traefik forwardAuth) authenticates the request and stamps the actor id,
-//     which arrives as the handshake token; this adapter validates its presence
-//     and yields model.Identity{ActorID}. A failed handshake is rejected (401),
-//     never downgraded to anonymous (constitution §V).
 //   - AuthZ — delegates per-document read/update-content decisions to the
 //     authorization-evaluation-service over h2c HTTP/2
 //     (POST /internal/auth/evaluate), guarded by a sony/gobreaker circuit breaker
 //     and FAILING CLOSED (anti-pattern 13). It resolves the document's
 //     authorizationPolicyId via the MetadataStore (OPEN-1) and evaluates
 //     evaluate(actorId, "read" | "update-content", policyId).
+//
+// AuthN is NOT this package's concern (Wave 5, T018.2): the header-trusting
+// handshake AuthN it carried in Wave 2 was lifted into the sibling `header`
+// adapter, so handshake AuthN is selected independently of AuthZ (AUTH_MODE vs
+// AUTHZ_MODE). This adapter is selected by AUTHZ_MODE=authzeval.
 //
 // The h2c + gobreaker client below reuses the file-service/wopi pattern verbatim
 // (research.md OPEN-1); the only collab-specific addition is the
@@ -127,16 +126,6 @@ func New(cfg Config, policies PolicyResolver) *Adapter {
 	}
 }
 
-// Authenticate resolves the connecting actor from the handshake token. An empty
-// token is rejected (401); a non-empty token is the upstream-authenticated actor
-// id (Oathkeeper/Kratos via the gateway).
-func (a *Adapter) Authenticate(_ context.Context, token string) (model.Identity, error) {
-	if token == "" {
-		return model.Identity{}, fmt.Errorf("missing handshake credential")
-	}
-	return model.Identity{ActorID: token}, nil
-}
-
 // Evaluate decides whether identity holds privilege on the document. It resolves
 // the document's authorizationPolicyId (OPEN-1) and asks the
 // authorization-evaluation-service, guarded by the breaker. Any error (resolve
@@ -220,8 +209,6 @@ func newH2CClient() *http.Client {
 	}
 }
 
-// compile-time assertions that Adapter satisfies both auth ports.
-var (
-	_ port.Auth  = (*Adapter)(nil)
-	_ port.AuthZ = (*Adapter)(nil)
-)
+// compile-time assertion that Adapter satisfies the per-document AuthZ port.
+// (Handshake AuthN now lives in the sibling `header`/`oidc`/`open` adapters.)
+var _ port.AuthZ = (*Adapter)(nil)

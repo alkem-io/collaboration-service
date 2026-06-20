@@ -27,6 +27,7 @@ func standaloneConfig() *config.Config {
 		MetaStore: config.MetaStoreInMemory,
 		BlobStore: config.BlobStoreInline,
 		AuthMode:  config.AuthModeOpen,
+		AuthZMode: config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -247,13 +248,13 @@ func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
 	}
 }
 
-// spyAuth records the token string the handshake reads, so a test can assert
+// spyAuth records the credentials the handshake reads, so a test can assert
 // buildRouter threads the configured header through to the ws handler. It rejects
 // (no upgrade) so the request resolves to a plain 401 over httptest.
-type spyAuth struct{ token string }
+type spyAuth struct{ creds model.HandshakeCredentials }
 
-func (s *spyAuth) Authenticate(_ context.Context, token string) (model.Identity, error) {
-	s.token = token
+func (s *spyAuth) Authenticate(_ context.Context, creds model.HandshakeCredentials) (model.Identity, error) {
+	s.creds = creds
 	return model.Identity{}, errors.New("denied")
 }
 
@@ -284,17 +285,18 @@ func TestBuildRouterThreadsAuthTokenHeader(t *testing.T) {
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
 
-	if spy.token != "actor-tok" {
-		t.Fatalf("handshake read token %q, want %q (TokenHeader not threaded through buildRouter)", spy.token, "actor-tok")
+	if spy.creds.ActorIDHeader != "actor-tok" {
+		t.Fatalf("handshake read actor-id header %q, want %q (TokenHeader not threaded through buildRouter)", spy.creds.ActorIDHeader, "actor-tok")
 	}
 }
 
-// TestNewAuthZEvalModeWires asserts AUTH_MODE=authzeval selects the authzeval
-// adapter pair (buildAuth's non-open branch) and New still assembles — the breaker
-// is lazy, so no live auth-evaluation service is needed to wire it.
+// TestNewAuthZEvalModeWires asserts header AuthN + authzeval AuthZ selects the
+// authzeval AuthZ adapter (buildAuthZ's non-open branch) and New still assembles —
+// the breaker is lazy, so no live auth-evaluation service is needed to wire it.
 func TestNewAuthZEvalModeWires(t *testing.T) {
 	cfg := standaloneConfig()
-	cfg.AuthMode = config.AuthModeAuthZEval
+	cfg.AuthMode = config.AuthModeHeader
+	cfg.AuthZMode = config.AuthZModeEval
 	cfg.AuthZEval = config.AuthZEvalConfig{
 		ServiceURL:              "http://localhost:1/eval",
 		BreakerFailureThreshold: 5,
@@ -308,5 +310,73 @@ func TestNewAuthZEvalModeWires(t *testing.T) {
 	t.Cleanup(application.Close)
 	if application.Manager == nil {
 		t.Fatal("authzeval-mode app has no manager")
+	}
+}
+
+// oidcConfig returns a standalone config switched to oidc AuthN with the given
+// session-Redis and JWKS URLs (open AuthZ), for buildAuthN wiring tests.
+func oidcConfig(sessionRedisURL, jwksURL string) *config.Config {
+	cfg := standaloneConfig()
+	cfg.AuthMode = config.AuthModeOIDC
+	cfg.AuthZMode = config.AuthZModeOpen
+	cfg.OIDC = config.OIDCConfig{
+		SessionRedisURL:   sessionRedisURL,
+		SessionCookieName: "alkemio_session",
+		JWKSURL:           jwksURL,
+		IssuerURL:         "https://hydra/",
+		ClockSkewSeconds:  30,
+	}
+	return cfg
+}
+
+// TestBuildAuthNOIDCCookieOnlyWires asserts buildAuthN constructs the oidc adapter
+// in cookie-only mode (session Redis set, no JWKS) and registers the Redis closer.
+func TestBuildAuthNOIDCCookieOnlyWires(t *testing.T) {
+	var closers []func()
+	auth, err := buildAuthN(oidcConfig("redis://localhost:6379", ""), &closers)
+	if err != nil {
+		t.Fatalf("buildAuthN (oidc cookie-only): %v", err)
+	}
+	if auth == nil {
+		t.Fatal("nil oidc auth adapter")
+	}
+	if len(closers) != 1 {
+		t.Fatalf("expected the session-Redis closer to be registered, got %d closers", len(closers))
+	}
+	for _, c := range closers {
+		c()
+	}
+}
+
+// TestBuildAuthNOIDCBadSessionRedisURL asserts a malformed SESSION_REDIS_URL fails
+// the wiring (buildOIDCAuth parse-error branch).
+func TestBuildAuthNOIDCBadSessionRedisURL(t *testing.T) {
+	var closers []func()
+	if _, err := buildAuthN(oidcConfig("://bad redis url", ""), &closers); err == nil {
+		t.Fatal("buildAuthN with a malformed SESSION_REDIS_URL: expected error, got nil")
+	}
+}
+
+// TestBuildAuthNOIDCBadJWKSURL asserts a malformed HYDRA_JWKS_URL fails the wiring
+// (buildOIDCAuth bearer-validator error branch).
+func TestBuildAuthNOIDCBadJWKSURL(t *testing.T) {
+	var closers []func()
+	if _, err := buildAuthN(oidcConfig("", "://bad jwks url"), &closers); err == nil {
+		t.Fatal("buildAuthN with a malformed HYDRA_JWKS_URL: expected error, got nil")
+	}
+}
+
+// TestBuildAuthNHeaderWires asserts buildAuthN selects the header adapter for
+// header mode (no dependencies).
+func TestBuildAuthNHeaderWires(t *testing.T) {
+	cfg := standaloneConfig()
+	cfg.AuthMode = config.AuthModeHeader
+	var closers []func()
+	auth, err := buildAuthN(cfg, &closers)
+	if err != nil || auth == nil {
+		t.Fatalf("buildAuthN (header): auth=%v err=%v", auth, err)
+	}
+	if len(closers) != 0 {
+		t.Fatalf("header mode should register no closers, got %d", len(closers))
 	}
 }

@@ -172,7 +172,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 
 ### T018 — `header`/`oidc`/`open` AuthN split + direct-OIDC adapter (FR-021/FR-022/FR-023) — `internal/adapter/outbound/auth/`, `internal/config/`, `internal/adapter/inbound/ws/`
 
-- [ ] **T018.1** [W5] Config split + backward-compat (`internal/config/config.go`):
+- [X] **T018.1** [W5] Config split + backward-compat (`internal/config/config.go`):
   split `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) from a new `AUTHZ_MODE`
   (`authzeval`|`open`); derive `AUTHZ_MODE` from `AUTH_MODE` when unset
   (`open`→`open`; `header`/`oidc`→`authzeval`); accept the retired
@@ -180,14 +180,14 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   validate each enum and the `oidc`/`authzeval` required settings (OPEN-5). Tests:
   `config_test.go` cases for the new enums, the alias, the derivation, and
   fail-fast on bad/missing required config. **Tests first.**
-- [ ] **T018.2** [W5] Extract the `header` AuthN adapter
+- [X] **T018.2** [W5] Extract the `header` AuthN adapter
   (`internal/adapter/outbound/auth/header/auth.go`) from the Wave-2
   `authzeval.Authenticate` (`model.Identity{ActorID: <gateway header value>}`,
   401/error on empty); leave `authzeval` as the AuthZ-only adapter. **No behaviour
   change to the gateway-terminated path** (SC-014). Tests: `header/auth_test.go`
   (non-empty header → actor id; empty → error), and the existing authzeval AuthZ
   tests stay green. **Tests first.**
-- [ ] **T018.3** [W5] Generalize the WS-handshake credential read
+- [X] **T018.3** [W5] Generalize the WS-handshake credential read
   (`internal/adapter/inbound/ws/handler.go` + a domain `model.HandshakeCredentials`
   value object): the WS adapter populates `{CookieSID, BearerToken, GuestName}` from
   the `Cookie`/`Authorization` headers + `?guestName=` and passes it to
@@ -196,7 +196,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   the `?access_token=` query-param token fallback is **NOT implemented** (DROPPED,
   OPEN-7 DECIDED). Tests: `handler_test.go`/model tests asserting the credential
   extraction + that `header`/`open` modes are unaffected. **Tests first.**
-- [ ] **T018.4** [W5] `oidc` adapter — **BFF cookie session path**
+- [X] **T018.4** [W5] `oidc` adapter — **BFF cookie session path**
   (`internal/adapter/outbound/auth/oidc/{auth.go,session_redis.go}`): bare sid →
   `GET alkemio:sid:<sid>` (via **`SESSION_REDIS_URL`**, defaulting to `REDIS_URL`
   when unset — OPEN-7 DECIDED) → decode `AlkemioSessionPayload` → `alkemio_actor_id`;
@@ -206,7 +206,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   `session-store.redis.ts`. Tests: `oidc/session_redis_test.go` against a faithful
   Redis stub / miniredis (valid → actor id; tombstoned → 401; expired → 401;
   store error → reject). **Tests first.**
-- [ ] **T018.5** [W5] `oidc` adapter — **Hydra RS256 bearer path**
+- [X] **T018.5** [W5] `oidc` adapter — **Hydra RS256 bearer path**
   (`internal/adapter/outbound/auth/oidc/hydra_jwks.go`): JWKS fetch+cache, RS256
   verify (issuer + audience allow-list + `alkemio_actor_id` claim + clock
   tolerance), extract `alkemio_actor_id`; presented-but-invalid (bad sig / expired
@@ -215,7 +215,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   Mirrors server `hydra-bearer.validator.ts`. JWKS/JWT lib version-checked online at
   add time (§XIV). Tests: `oidc/hydra_jwks_test.go` with a stub JWKS +
   signed/forged/expired tokens. **Tests first.**
-- [ ] **T018.6** [W5] `oidc` adapter — **priority + anonymous fall-through**
+- [X] **T018.6** [W5] `oidc` adapter — **priority + anonymous fall-through**
   (`oidc/auth.go`): try cookie → bearer → guest (named-anonymous, OPEN-6) →
   **anonymous sentinel** `ANONYMOUS_ACTOR_ID` (nil UUID, `model` constant mirroring
   server `constants.ts`); missing credential → sentinel (not 401), presented-invalid
@@ -223,14 +223,14 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   cookie-only degrade). Tests: `oidc/auth_test.go` (priority order; missing →
   sentinel; guest → named-anonymous; both-disabled config rejected at load). **Tests
   first.**
-- [ ] **T018.7** [W5] Wiring (`internal/app` composition root + `cmd/server`):
+- [X] **T018.7** [W5] Wiring (`internal/app` composition root + `cmd/server`):
   select the AuthN adapter on `AUTH_MODE` (`header`/`oidc`/`open`) and the AuthZ
   adapter on `AUTHZ_MODE` (`authzeval`/`open`) independently; construct the `oidc`
   adapter with its session-Redis + JWKS clients from config; `.env.example`
   documents `AUTH_MODE`/`AUTHZ_MODE` + the `oidc` settings. The zero-dep `open`
   default still boots. Tests: an `internal/app` wiring test that `oidc` mode
   constructs and `open` needs nothing.
-- [ ] **T018.8** [W5] e2e (`test/e2e/oidc_test.go`, build tag `e2e`): boot with
+- [X] **T018.8** [W5] e2e (`test/e2e/oidc_test.go`, build tag `e2e`): boot with
   `AUTH_MODE=oidc` against an in-process stub BFF-Redis + stub JWKS; a valid cookie
   and a valid bearer each authenticate end-to-end over the WS handshake, a
   tombstoned/expired session and a forged bearer are 401'd, and a no-credential
@@ -265,5 +265,5 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 | 2 (durable adapters) | **DONE** | 3 (T004–T006) | 14 (T004.1–4, T005.1–6, T006.1–4) |
 | 3 (presence/limits/lifecycle/API) | **DONE** | 4 (T013–T016) | 11 (T013.1–4, T014.1–3, T015.1–2, T016.1–2) |
 | 4 (e2e + gate) | **DONE** | 1 (T017) | 5 (T017.1–5) |
-| 5 (dual-adapter OIDC AuthN) | **FORWARD (spec/design only)** | 1 (T018) | 8 (T018.1–8) — all `[ ]` |
-| **Total** | **17 done + 1 forward** | 18 | **35 done + 8 forward** |
+| 5 (dual-adapter OIDC AuthN) | **DONE** | 1 (T018) | 8 (T018.1–8) — all `[X]` |
+| **Total** | **18 done** | 18 | **43 done** |

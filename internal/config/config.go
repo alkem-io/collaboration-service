@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // FanoutMode selects the ClusterBroadcaster adapter.
@@ -55,16 +56,41 @@ const (
 	BlobStoreLocal BlobStoreMode = "local"
 )
 
-// AuthMode selects the Auth + AuthZ adapter pair.
+// AuthMode selects the handshake-AuthN adapter (Wave 5: AuthN is named
+// independently of AuthZ — see AuthZMode).
 type AuthMode string
 
 const (
-	// AuthModeAuthZEval authenticates via the Alkemio token and authorizes via
-	// the authorization-evaluation-service (Alkemio deployment).
-	AuthModeAuthZEval AuthMode = "authzeval"
-	// AuthModeOpen authenticates everyone anonymously and grants everything —
-	// the zero-dependency standalone default.
+	// AuthModeHeader trusts the actor id stamped in the gateway header
+	// (option (a), gateway-terminated; the Alkemio prod default). This is the
+	// renamed pre-Wave-5 gateway-terminated path — no behavioural change.
+	AuthModeHeader AuthMode = "header"
+	// AuthModeOIDC validates the handshake credential itself (option (b),
+	// direct OIDC validation: BFF cookie session via Redis + Hydra RS256 bearer
+	// via JWKS), mirroring the server's forward-auth controller.
+	AuthModeOIDC AuthMode = "oidc"
+	// AuthModeOpen authenticates everyone anonymously — the zero-dependency
+	// standalone default.
 	AuthModeOpen AuthMode = "open"
+
+	// authModeLegacyAuthZEval is the RETIRED AUTH_MODE value, accepted as a
+	// backward-compat alias for header AuthN + authzeval AuthZ (OPEN-5) so
+	// existing deployments are unchanged. It is not a distinct mode — Load maps
+	// it to AuthModeHeader + AuthZModeEval.
+	authModeLegacyAuthZEval AuthMode = "authzeval"
+)
+
+// AuthZMode selects the per-document-AuthZ adapter, independently of AuthN
+// (Wave 5). When unset it is derived from AuthMode.
+type AuthZMode string
+
+const (
+	// AuthZModeEval delegates per-document read/update-content decisions to the
+	// authorization-evaluation-service (h2c + gobreaker, fail-closed).
+	AuthZModeEval AuthZMode = "authzeval"
+	// AuthZModeOpen grants every privilege — the zero-dependency standalone
+	// default (AuthZ bypassed).
+	AuthZModeOpen AuthZMode = "open"
 )
 
 // Config is the complete runtime configuration of the service, assembled from
@@ -78,8 +104,11 @@ type Config struct {
 	MetaStore MetaStoreMode
 	// BlobStore selects the snapshot blob adapter (inline default).
 	BlobStore BlobStoreMode
-	// AuthMode selects the auth adapter pair (open default for standalone).
+	// AuthMode selects the handshake-AuthN adapter (open default for standalone).
 	AuthMode AuthMode
+	// AuthZMode selects the per-document-AuthZ adapter, independently of AuthMode
+	// (Wave 5). Derived from AuthMode when AUTHZ_MODE is unset.
+	AuthZMode AuthZMode
 	// Auth holds the handshake auth settings shared by every auth mode (the
 	// request header the WS handshake reads the identity token from).
 	Auth AuthConfig
@@ -96,8 +125,11 @@ type Config struct {
 	S3 S3Config
 	// LocalBlobRoot is the local blob root directory (BLOB_STORE=local).
 	LocalBlobRoot string
-	// AuthZEval holds the authzeval settings (AUTH_MODE=authzeval).
+	// AuthZEval holds the authzeval settings (AUTHZ_MODE=authzeval).
 	AuthZEval AuthZEvalConfig
+	// OIDC holds the direct-validation settings (AUTH_MODE=oidc): the BFF
+	// cookie-session Redis store and the Hydra JWKS bearer validator.
+	OIDC OIDCConfig
 	// Limits holds the configurable enforcement bounds + presence cadences
 	// (FR-014/FR-024, epic R9 defaults, OPEN-4).
 	Limits LimitsConfig
@@ -210,6 +242,41 @@ type AuthZEvalConfig struct {
 	BreakerHalfOpenMaxReqs  int
 }
 
+// OIDCConfig configures the direct-validation handshake-AuthN adapter
+// (AUTH_MODE=oidc). The env var names mirror the server's OIDC config (OPEN-7):
+// HYDRA_JWKS_URL / HYDRA_ISSUER_URL / BEARER_AUD_ALLOW_LIST / OIDC_SESSION_COOKIE_NAME.
+// Each path is INERT when its config is absent: no JWKS URL ⇒ bearer path off;
+// no session-Redis URL ⇒ cookie path off. At least one path MUST be enabled.
+type OIDCConfig struct {
+	// SessionRedisURL is the redis:// store the BFF cookie session is looked up in
+	// (SESSION_REDIS_URL, defaulting to REDIS_URL). Empty disables the cookie path.
+	SessionRedisURL string
+	// SessionCookieName is the BFF session cookie the bare sid is read from
+	// (OIDC_SESSION_COOKIE_NAME, default alkemio_session; env-suffixed per
+	// environment, e.g. alkemio_session_sandbox).
+	SessionCookieName string
+	// JWKSURL is the Hydra JWKS endpoint used for RS256 bearer signature
+	// validation (HYDRA_JWKS_URL). Empty disables the bearer path.
+	JWKSURL string
+	// IssuerURL is the expected Hydra token issuer (HYDRA_ISSUER_URL); enforced
+	// when set on the bearer path.
+	IssuerURL string
+	// BearerAudAllowList is the set of acceptable `aud` values on a bearer JWT
+	// (BEARER_AUD_ALLOW_LIST, comma-separated). Empty accepts any audience.
+	BearerAudAllowList []string
+	// ClockSkewSeconds is the JWT clock tolerance (OIDC_CLOCK_SKEW_SECONDS,
+	// default 30s, mirroring the server's jose clockTolerance).
+	ClockSkewSeconds int
+}
+
+// DefaultOIDCSessionCookieName is the BFF session cookie name when
+// OIDC_SESSION_COOKIE_NAME is unset — mirrors the server's oidc.cookie.name
+// default. Per-env overlays suffix it (alkemio_session_sandbox, …).
+const DefaultOIDCSessionCookieName = "alkemio_session"
+
+// defaultOIDCClockSkewSeconds mirrors the server's 30s jose clockTolerance.
+const defaultOIDCClockSkewSeconds = 30
+
 // Load assembles the Config from environment variables, applying the
 // standalone-friendly defaults (single-pod, inline blob, open auth) and
 // validating every enumerated selection. Returns an error naming the offending
@@ -236,7 +303,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	authMode, err := parseAuthMode(getenv("AUTH_MODE", string(AuthModeOpen)))
+	// AuthN mode (with the retired `authzeval` value handled as a backward-compat
+	// alias) and the independently-selected AuthZ mode (derived from AuthN when
+	// AUTHZ_MODE is unset). OPEN-5.
+	authMode, authZMode, err := parseAuthModes(
+		getenv("AUTH_MODE", string(AuthModeOpen)),
+		os.Getenv("AUTHZ_MODE"),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +320,7 @@ func Load() (*Config, error) {
 		MetaStore: metaStore,
 		BlobStore: blobStore,
 		AuthMode:  authMode,
+		AuthZMode: authZMode,
 		Auth: AuthConfig{
 			TokenHeader: getenv("AUTH_TOKEN_HEADER", DefaultAuthTokenHeader),
 		},
@@ -371,8 +445,14 @@ func loadBlobStoreConfig(cfg *Config) error {
 			AuthorizationID: os.Getenv("FILE_SERVICE_AUTHORIZATION_ID"),
 			MaxUploadSize:   getenvInt64("MAX_UPLOAD_SIZE", 0),
 		}
-		if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" || cfg.FileService.AuthorizationID == "" {
-			return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID, FILE_SERVICE_AUTHORIZATION_ID")
+		// AuthorizationID is OPTIONAL: snapshots are internal blobs whose access
+		// is governed by the bucket and the (unauthenticated) internal API, not a
+		// per-file authorization_policy row. When empty, the file-service create
+		// is sent without an authorizationId and the row's authz column is NULL.
+		// A fixed non-empty value MUST NOT be reused across snapshots — file's
+		// UNIQUE(authorizationId) would then admit only one row per bucket.
+		if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
+			return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
 		}
 	case BlobStoreS3:
 		cfg.S3 = S3Config{
@@ -396,8 +476,22 @@ func loadBlobStoreConfig(cfg *Config) error {
 	return nil
 }
 
+// loadAuthConfig fills + fail-fast-validates the AuthN (oidc) and AuthZ
+// (authzeval) backend settings for whichever modes were selected. The header /
+// open AuthN and open AuthZ paths need nothing.
 func loadAuthConfig(cfg *Config) error {
-	if cfg.AuthMode != AuthModeAuthZEval {
+	if err := loadAuthZEvalConfig(cfg); err != nil {
+		return err
+	}
+	return loadOIDCConfig(cfg)
+}
+
+// loadAuthZEvalConfig populates the authzeval settings when AuthZ delegates to
+// the authorization-evaluation-service (AUTHZ_MODE=authzeval, including via the
+// legacy AUTH_MODE=authzeval alias). Keyed off AuthZMode so AuthZ config is
+// independent of the AuthN mode (Wave 5).
+func loadAuthZEvalConfig(cfg *Config) error {
+	if cfg.AuthZMode != AuthZModeEval {
 		return nil
 	}
 	cfg.AuthZEval = AuthZEvalConfig{
@@ -407,9 +501,57 @@ func loadAuthConfig(cfg *Config) error {
 		BreakerHalfOpenMaxReqs:  getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2),
 	}
 	if cfg.AuthZEval.ServiceURL == "" {
-		return fmt.Errorf("AUTH_MODE=authzeval requires AUTH_SERVICE_URL")
+		return fmt.Errorf("AUTHZ_MODE=authzeval requires AUTH_SERVICE_URL")
 	}
 	return nil
+}
+
+// loadOIDCConfig populates the direct-validation settings when AUTH_MODE=oidc.
+// The session-Redis URL defaults to REDIS_URL (OPEN-7); the JWKS/issuer/audience/
+// cookie-name env names mirror the server's OIDC config. Each path is inert when
+// its config is absent, but at least one MUST be enabled — an oidc adapter that
+// can validate nothing is a misconfiguration (§XV).
+func loadOIDCConfig(cfg *Config) error {
+	if cfg.AuthMode != AuthModeOIDC {
+		return nil
+	}
+	cfg.OIDC = OIDCConfig{
+		// SESSION_REDIS_URL defaults to the fan-out REDIS_URL (single-Redis
+		// deployments need no extra config); an isolated session store points it
+		// elsewhere. Empty ⇒ cookie path disabled.
+		SessionRedisURL:    getenv("SESSION_REDIS_URL", os.Getenv("REDIS_URL")),
+		SessionCookieName:  getenv("OIDC_SESSION_COOKIE_NAME", DefaultOIDCSessionCookieName),
+		JWKSURL:            os.Getenv("HYDRA_JWKS_URL"),
+		IssuerURL:          os.Getenv("HYDRA_ISSUER_URL"),
+		BearerAudAllowList: splitAndTrim(os.Getenv("BEARER_AUD_ALLOW_LIST")),
+		ClockSkewSeconds:   getenvInt("OIDC_CLOCK_SKEW_SECONDS", defaultOIDCClockSkewSeconds),
+	}
+	if cfg.OIDC.JWKSURL == "" && cfg.OIDC.SessionRedisURL == "" {
+		return fmt.Errorf("AUTH_MODE=oidc requires at least one credential path: HYDRA_JWKS_URL (bearer) and/or SESSION_REDIS_URL|REDIS_URL (cookie session)")
+	}
+	if cfg.OIDC.ClockSkewSeconds < 0 {
+		return fmt.Errorf("OIDC_CLOCK_SKEW_SECONDS must be >= 0")
+	}
+	return nil
+}
+
+// splitAndTrim splits a comma-separated list, trims surrounding whitespace from
+// each item, and drops empties. Returns nil for an empty/blank input.
+func splitAndTrim(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // rabbitURL assembles the amqp:// URL from RABBITMQ_* (the legacy convention),
@@ -482,13 +624,54 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 	}
 }
 
-func parseAuthMode(v string) (AuthMode, error) {
-	switch AuthMode(v) {
-	case AuthModeAuthZEval, AuthModeOpen:
-		return AuthMode(v), nil
+// parseAuthModes resolves the AuthN mode (AUTH_MODE) and the AuthZ mode
+// (AUTHZ_MODE) together, applying the Wave-5 split rules (OPEN-5):
+//
+//   - The retired AUTH_MODE=authzeval value is a backward-compat ALIAS for
+//     header AuthN + authzeval AuthZ.
+//   - When AUTHZ_MODE is unset it is DERIVED from the AuthN mode: open→open,
+//     header/oidc→authzeval.
+//   - An explicit AUTHZ_MODE always wins (AuthN and AuthZ select independently).
+func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
+	var (
+		authN      AuthMode
+		aliasAuthZ AuthZMode // forced AuthZ from the legacy alias, if any
+	)
+	switch AuthMode(authRaw) {
+	case AuthModeHeader, AuthModeOIDC, AuthModeOpen:
+		authN = AuthMode(authRaw)
+	case authModeLegacyAuthZEval:
+		// Legacy alias: header AuthN + authzeval AuthZ. The alias forces authzeval
+		// AuthZ regardless of AUTHZ_MODE being unset (preserving the prior single
+		// AUTH_MODE=authzeval behaviour exactly).
+		authN = AuthModeHeader
+		aliasAuthZ = AuthZModeEval
 	default:
-		return "", fmt.Errorf("AUTH_MODE must be one of authzeval, open (got %q)", v)
+		return "", "", fmt.Errorf("AUTH_MODE must be one of header, oidc, open (got %q)", authRaw)
 	}
+
+	// Explicit AUTHZ_MODE wins over both the alias and the derivation.
+	if authZRaw != "" {
+		switch AuthZMode(authZRaw) {
+		case AuthZModeEval, AuthZModeOpen:
+			return authN, AuthZMode(authZRaw), nil
+		default:
+			return "", "", fmt.Errorf("AUTHZ_MODE must be one of authzeval, open (got %q)", authZRaw)
+		}
+	}
+	if aliasAuthZ != "" {
+		return authN, aliasAuthZ, nil
+	}
+	return authN, deriveAuthZMode(authN), nil
+}
+
+// deriveAuthZMode maps an AuthN mode to its default AuthZ mode when AUTHZ_MODE is
+// unset: open AuthN bypasses AuthZ (open); header/oidc delegate to authzeval.
+func deriveAuthZMode(authN AuthMode) AuthZMode {
+	if authN == AuthModeOpen {
+		return AuthZModeOpen
+	}
+	return AuthZModeEval
 }
 
 func getenv(key, fallback string) string {
