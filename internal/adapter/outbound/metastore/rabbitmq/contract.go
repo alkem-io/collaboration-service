@@ -66,8 +66,19 @@ type FetchReply struct {
 	// the server cannot resolve a bucket for; the BlobStore then falls back to
 	// its configured bucket.
 	StorageBucketID string `json:"storageBucketId,omitempty"`
-	OwnerRef        string `json:"ownerRef,omitempty"`
-	Error           string `json:"error,omitempty"`
+	// Content is the document's stored content for the FIRST-OPEN SEED (R4):
+	// when a freshly-created document has no collaboration snapshot yet (no
+	// ContentPointer), the server delivers its persisted content here so the room
+	// materializes from it on first open instead of opening empty (FR-003). It is
+	// a full Yjs-V2 state for both document types (memo: the rich-text snapshot;
+	// whiteboard: the scene snapshot the server produced from the initial scene
+	// via the binding) — the room applies it via ApplyUpdateV2. Go marshals
+	// []byte as base64, so the NestJS server sends/receives this field as a
+	// base64 string. Absent once the document has a live snapshot (the blob is
+	// then authoritative) and for empty-on-create documents.
+	Content  []byte `json:"content,omitempty"`
+	OwnerRef string `json:"ownerRef,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // DeleteData is the collaboration-delete request payload (the owner-delete

@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -132,6 +133,7 @@ func TestSaveTransportErrorSurfaces(t *testing.T) {
 }
 
 func TestLoadFetchesAndMaps(t *testing.T) {
+	seed := []byte{0x01, 0x02, 0x03}
 	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
 		Found:                 true,
 		ContentType:           "memo",
@@ -140,6 +142,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		BlobStore:             "s3",
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
+		Content:               seed,
 		OwnerRef:              "owner",
 	}}}
 	store := newWithRPC(f)
@@ -163,6 +166,43 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	// collaboration-fetch reply so the BlobStore can persist snapshots into it.
 	if meta.StorageBucketID != "bucket-1" {
 		t.Errorf("StorageBucketID = %q, want bucket-1", meta.StorageBucketID)
+	}
+	// The stored content for the first-open seed (R4) must be surfaced on the
+	// metadata so the room can materialize a never-yet-saved document from it.
+	if !bytes.Equal(meta.SeedContent, seed) {
+		t.Errorf("SeedContent = %v, want %v", meta.SeedContent, seed)
+	}
+}
+
+// TestFetchReplyContentBase64WireShape pins the cross-repo wire contract: the
+// first-open seed content rides collaboration-fetch as a base64 string (Go
+// marshals []byte that way), so the NestJS server sends/receives it as base64 and
+// it decodes back to the exact bytes. The field is omitted when empty so an
+// already-snapshotted document carries no redundant payload.
+func TestFetchReplyContentBase64WireShape(t *testing.T) {
+	raw, err := json.Marshal(FetchReply{Found: true, ContentType: "memo", Content: []byte{0xDE, 0xAD, 0xBE, 0xEF}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// base64(DE AD BE EF) == "3q2+7w==".
+	if !contains(string(raw), `"content":"3q2+7w=="`) {
+		t.Errorf("content not base64-encoded on the wire: %s", raw)
+	}
+
+	var back FetchReply
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !bytes.Equal(back.Content, []byte{0xDE, 0xAD, 0xBE, 0xEF}) {
+		t.Errorf("round-tripped content = %v, want DEADBEEF", back.Content)
+	}
+
+	// Empty content is omitted entirely (omitempty), keeping the fetch reply for a
+	// snapshotted document free of a redundant payload. (Match the "content" key
+	// specifically — "contentType"/"contentPointer" legitimately remain.)
+	rawEmpty, _ := json.Marshal(FetchReply{Found: true, ContentType: "memo"})
+	if contains(string(rawEmpty), `"content":`) {
+		t.Errorf("empty content must be omitted: %s", rawEmpty)
 	}
 }
 
