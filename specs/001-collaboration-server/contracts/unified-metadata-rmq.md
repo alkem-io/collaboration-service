@@ -65,7 +65,9 @@ Reply: `{ "success": true }` or `{ "success": false, "error": "<reason>" }`.
 ### `collaboration-fetch` — request/reply
 
 Return the index row for a document (the collab service materializes a room and
-needs to know where the blob is + the content type + the policy id).
+needs to know where the blob is + the content type + the policy id + the
+document's own storage bucket + — for a freshly-created document with no snapshot
+yet — its stored content for the first-open seed).
 
 Request `data`: `{ "id": "<documentId>" }`
 
@@ -79,6 +81,14 @@ Reply:
   "contentPointer": "<locator>",
   "blobStore": "inline" | "file-service" | "s3" | "local",
   "authorizationPolicyId": "<uuid>",
+  "storageBucketId": "<uuid>",        // the document's OWN storage bucket; snapshots persist into it (per-doc bucket)
+  "content": "<base64 Yjs-V2 state>", // FIRST-OPEN SEED (006-collab-content-unification): present ONLY when the
+                                      // document has no collaboration snapshot yet (no contentPointer). The collab
+                                      // service seeds the room from it (ApplyUpdateV2; memo = rich-text snapshot,
+                                      // whiteboard = scene snapshot the binding produced server-side) so a
+                                      // freshly-created document opens with its content instead of empty (FR-003),
+                                      // then promotes it to a real per-doc snapshot on first save. Omitted once a
+                                      // live snapshot exists (the blob is then authoritative).
   "ownerRef": "<parent entity id>"
 }
 ```

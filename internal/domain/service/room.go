@@ -133,9 +133,15 @@ type Room struct {
 
 	// dirty is set when the doc changed since the last persisted snapshot;
 	// it drives the debounce timer and the final save-on-release.
-	dirty   bool
-	version int
-	pointer string
+	dirty bool
+	// seededPending is true when the room materialized from the first-open seed
+	// (Metadata.SeedContent) and that seed has not yet been promoted to a real
+	// per-document snapshot. The run loop arms the save debounce once at start so
+	// the seed is persisted promptly (ContentPointer set) without waiting for an
+	// edit or the idle release (T004). Cleared by the first persist.
+	seededPending bool
+	version       int
+	pointer       string
 	// blobKind is the configured blob backend persisted in the metadata row so a
 	// document rehydrates from the right backend regardless of running config
 	// (data-model.md BlobStore; T005.6).
@@ -436,13 +442,19 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 
 // loadSnapshot lazily rehydrates the authoritative doc from the latest persisted
 // snapshot (US2/US5 no-regression): it reads the metadata index for the blob
-// pointer, fetches the v2-encoded bytes, and applies them. A missing document is
-// a fresh room (the metadata/blob rows are written on first save), not an error.
+// pointer, fetches the v2-encoded bytes, and applies them. When no live snapshot
+// exists yet — a freshly-created document whose content the server persisted but
+// has no collaboration snapshot (no ContentPointer / no blob) — it falls back to
+// the first-open SEED, materializing the doc from the content the server
+// delivered on collaboration-fetch (Metadata.SeedContent, R4/US1) so the first
+// opener sees the creation content rather than an empty editor (FR-003). A
+// document with neither a snapshot nor a seed is a fresh empty room (FR-010), not
+// an error.
 func (r *Room) loadSnapshot(ctx context.Context) error {
 	meta, err := r.deps.Metadata.Load(ctx, r.id)
 	if err != nil {
 		if isNotFound(err) {
-			return nil // fresh document — nothing to load.
+			return nil // no metadata row — fresh document, nothing to load or seed.
 		}
 		return err
 	}
@@ -467,7 +479,10 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	data, err := r.deps.Blob.Get(ctx, meta.ContentPointer)
 	if err != nil {
 		if isNotFound(err) {
-			return nil // index row without a blob yet — treat as empty.
+			// No live snapshot yet (index row without a blob): seed from the
+			// server-delivered content if any, otherwise stay empty.
+			r.seedFromContent(meta.SeedContent)
+			return nil
 		}
 		return err
 	}
@@ -475,9 +490,36 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	// The snapshot is a full v2 update; applying it with a non-connection,
 	// peer-flagged origin means the update observer fans it to all members
 	// (there are none yet at load time) without re-publishing it to the bus —
-	// rehydration is local state, not a new edit to broadcast.
+	// rehydration is local state, not a new edit to broadcast. A live snapshot
+	// is authoritative: any SeedContent on the row is a stale create-time bootstrap
+	// and is deliberately ignored (re-applying it would resurrect old content).
 	ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0, peer: true})
 	return nil
+}
+
+// seedFromContent materializes a never-yet-saved document's Y.Doc from the
+// content the server delivered on collaboration-fetch (Metadata.SeedContent, R4).
+// The bytes are a full Yjs-V2 state for both document types — memo (the rich-text
+// snapshot) and whiteboard (the scene snapshot the binding produced server-side)
+// — so both apply via ApplyUpdateV2. It runs during materialization, before the
+// update observer is wired (so it does not fan out or re-publish), and marks the
+// room dirty so the FIRST save promotes the seed into a real per-document snapshot
+// (ContentPointer set) — after which the blob is the source of truth and the seed
+// is never consulted again (T004). A nil/empty seed is a no-op: the room opens
+// empty and editable (FR-010).
+func (r *Room) seedFromContent(content []byte) {
+	if len(content) == 0 {
+		return
+	}
+	ycrdt.ApplyUpdateV2(r.doc, content, updateOrigin{src: 0, peer: true})
+	// Mark dirty so the seed is persisted as the document's first real snapshot.
+	// Unlike a loaded snapshot (which already has a ContentPointer and stays
+	// clean), the seed has no blob yet; promoting it on first save means
+	// subsequent opens load the blob instead of re-seeding. seededPending tells
+	// the run loop to arm the save debounce at start so the promotion happens
+	// promptly rather than only on the next edit or idle release.
+	r.dirty = true
+	r.seededPending = true
 }
 
 // run is the room's single goroutine. It owns the Y.Doc and the member registry,
@@ -514,6 +556,15 @@ func (r *Room) run() {
 			return
 		}
 		idleTimer.Reset(r.cfg.IdleTimeout)
+	}
+
+	// A room materialized from the first-open seed has unpersisted content but no
+	// edit to arm the debounce; promote the seed to a real snapshot on the normal
+	// cadence so it is durable promptly, without waiting for the first edit or the
+	// idle release (T004). With SaveDebounce disabled, the seed is persisted by the
+	// save-on-release path as before.
+	if r.seededPending {
+		armSave()
 	}
 
 	for {
@@ -1136,6 +1187,9 @@ func (r *Room) persist(ctx context.Context) {
 	r.pointer = pointer
 	r.version = newVersion
 	r.dirty = false
+	// The seed (if any) is now a real per-document snapshot located by
+	// ContentPointer; subsequent opens load the blob and never re-seed (T004).
+	r.seededPending = false
 	r.metrics.SnapshotSaved()
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})
 }
