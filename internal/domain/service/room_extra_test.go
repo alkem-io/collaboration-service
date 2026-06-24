@@ -61,7 +61,7 @@ func TestLateJoinerReceivesAwareness(t *testing.T) {
 	// A's awareness command and B's join command are serialized on the room's
 	// run loop in submission order, so by the time B joins the room has already
 	// recorded A's presence and includes it in B's join-time snapshot.
-	a.setAwareness(ycrdt.Object{"user": "early"})
+	a.setAwareness(ycrdt.MakeObject("user", "early"))
 
 	b := newFakeClient(t)
 	b.join(mgr, docID, model.ContentTypeMemo)

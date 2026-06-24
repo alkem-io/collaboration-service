@@ -21,7 +21,11 @@ func memoSeedV2(t *testing.T, text string) []byte {
 	t.Helper()
 	doc := newRoomDoc("seed")
 	insertText(doc, text)
-	return ycrdt.EncodeStateAsUpdateV2(doc, nil)
+	snap, err := ycrdt.EncodeStateAsUpdateV2(doc, nil)
+	if err != nil {
+		t.Fatalf("encode memo seed: %v", err)
+	}
+	return snap
 }
 
 // whiteboardSeedV2 builds the V2-encoded state of a whiteboard Y.Doc carrying one
@@ -31,7 +35,11 @@ func whiteboardSeedV2(t *testing.T, id string, props map[string]interface{}) []b
 	t.Helper()
 	doc := newRoomDoc("seed")
 	addElement(doc, id, props)
-	return ycrdt.EncodeStateAsUpdateV2(doc, nil)
+	snap, err := ycrdt.EncodeStateAsUpdateV2(doc, nil)
+	if err != nil {
+		t.Fatalf("encode whiteboard seed: %v", err)
+	}
+	return snap
 }
 
 // TestRoomSeedsFromStoredContentOnFirstOpen is the US1 regression: a freshly
@@ -174,7 +182,10 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 	// The live snapshot says "live content"; the (stale) seed says "stale seed".
 	liveDoc := newRoomDoc("live")
 	insertText(liveDoc, "live content ")
-	liveSnap := ycrdt.EncodeStateAsUpdateV2(liveDoc, nil)
+	liveSnap, err := ycrdt.EncodeStateAsUpdateV2(liveDoc, nil)
+	if err != nil {
+		t.Fatalf("encode live snapshot: %v", err)
+	}
 	pointer, err := blob.Put(context.Background(), docID, "", liveSnap)
 	if err != nil {
 		t.Fatalf("seed blob: %v", err)

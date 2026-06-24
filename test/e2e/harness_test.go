@@ -240,7 +240,7 @@ func (c *wsClient) insertMemo(s string) {
 	frag := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
-	xt.Insert(0, s, nil)
+	xt.Insert(0, s, ycrdt.Object{})
 }
 
 // memoText returns the memo's serialized text.

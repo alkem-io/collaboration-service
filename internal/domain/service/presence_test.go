@@ -23,7 +23,7 @@ func TestAwarenessEvictedOnDisconnect(t *testing.T) {
 	a.join(mgr, docID, model.ContentTypeMemo)
 	a.observeUpdates()
 	aClient := a.aware.ClientID
-	a.setAwareness(ycrdt.Object{"user": "alice"})
+	a.setAwareness(ycrdt.MakeObject("user", "alice"))
 
 	b := newFakeClient(t)
 	b.join(mgr, docID, model.ContentTypeMemo)

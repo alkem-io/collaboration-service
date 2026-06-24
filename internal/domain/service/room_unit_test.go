@@ -74,7 +74,7 @@ func TestApplyPeerEphemeralAwareness(t *testing.T) {
 
 	// Build a real awareness frame from a separate awareness instance.
 	other := ycrdt.NewAwareness(ycrdt.NewDoc("peer", true, ycrdt.DefaultGCFilter, nil, false))
-	other.SetLocalState(ycrdt.Object{"user": "remote"})
+	other.SetLocalState(ycrdt.MakeObject("user", "remote"))
 	update := ycrdt.EncodeAwarenessUpdate(other, []ycrdt.Number{other.ClientID}, nil)
 	frame := encodeAwarenessFrame(update)
 
@@ -155,12 +155,12 @@ func TestTrackAwarenessIDOnlyFirstFrame(t *testing.T) {
 	room.members[1] = roomMember{id: 1, conn: &captureConn{}}
 
 	first := ycrdt.NewAwareness(ycrdt.NewDoc("c1", true, ycrdt.DefaultGCFilter, nil, false))
-	first.SetLocalState(ycrdt.Object{"u": "1"})
+	first.SetLocalState(ycrdt.MakeObject("u", "1"))
 	room.trackAwarenessID(1, ycrdt.EncodeAwarenessUpdate(first, []ycrdt.Number{first.ClientID}, nil))
 	got := room.members[1].awarenessID
 
 	second := ycrdt.NewAwareness(ycrdt.NewDoc("c2", true, ycrdt.DefaultGCFilter, nil, false))
-	second.SetLocalState(ycrdt.Object{"u": "2"})
+	second.SetLocalState(ycrdt.MakeObject("u", "2"))
 	room.trackAwarenessID(1, ycrdt.EncodeAwarenessUpdate(second, []ycrdt.Number{second.ClientID}, nil))
 	if room.members[1].awarenessID != got {
 		t.Fatal("awareness id was overwritten by a later frame")

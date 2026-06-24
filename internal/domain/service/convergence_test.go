@@ -104,7 +104,7 @@ func TestAwarenessFanOutAndNotPersisted(t *testing.T) {
 
 	// A's awareness (cursor) update — should fan out to B but never persist.
 	awClientID := a.aware.ClientID
-	a.setAwareness(ycrdt.Object{"cursor": "10:4", "user": "alice"})
+	a.setAwareness(ycrdt.MakeObject("cursor", "10:4", "user", "alice"))
 
 	// An ephemeral cursor/emoji event — fanned out, never applied to the doc.
 	a.session.Forward(encodeEphemeral([]byte(`{"type":"EMOJI_REACTION","emoji":"party"}`)))

@@ -90,7 +90,11 @@ func (c *fakeClient) Send(frame []byte) error {
 		// before applyAwarenessUpdate (the fork's SyncHandler does not, so we do it
 		// here rather than via c.handler).
 		if body, ok := decodeAwarenessBody(payload); ok {
-			ycrdt.ApplyAwarenessUpdate(c.aware, body, c.handler)
+			// Best-effort, mirroring a real client's receive path: a malformed
+			// awareness body is dropped rather than crashing the fan-out goroutine
+			// (Send runs on the room's goroutine, not the test's, so it must not
+			// Fatal). decodeAwarenessBody already guarded the framing.
+			_ = ycrdt.ApplyAwarenessUpdate(c.aware, body, c.handler)
 		}
 	case model.WireEphemeral:
 		c.ephemeral = append(c.ephemeral, append([]byte(nil), payload...))

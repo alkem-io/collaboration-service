@@ -395,7 +395,10 @@ func TestHandleSyncDisconnectsOnMaxDocSize(t *testing.T) {
 	// Build a real sync Update payload from a peer doc and feed it as a collaborator.
 	peer := newRoomDoc("unit")
 	insertText(peer, "well-past-one-byte ")
-	update := ycrdt.EncodeStateAsUpdate(peer, nil)
+	update, err := ycrdt.EncodeStateAsUpdate(peer, nil)
+	if err != nil {
+		t.Fatalf("encode peer state: %v", err)
+	}
 	framed := protocol.EncodeUpdate(update)
 	// handleSync expects the inner sync payload (it re-frames as MessageSync).
 	in := bytes.NewBuffer(framed)
@@ -530,11 +533,11 @@ func TestAwarenessSnapshotEmptyReturnsNil(t *testing.T) {
 	// A fresh awareness carries the doc's own (empty) local-client state; clearing
 	// it drops the state count to zero — the no-presence case a brand-new room is
 	// in before any client announces a cursor.
-	aw.SetLocalState(nil)
+	aw.SetLocalState(ycrdt.Object{})
 	if awarenessSnapshot(aw) != nil {
 		t.Fatal("an empty awareness must snapshot to nil")
 	}
-	aw.SetLocalState(ycrdt.Object{"user": "x"})
+	aw.SetLocalState(ycrdt.MakeObject("user", "x"))
 	if awarenessSnapshot(aw) == nil {
 		t.Fatal("a populated awareness must snapshot to a non-nil frame")
 	}

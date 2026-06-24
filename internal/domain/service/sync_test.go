@@ -77,7 +77,10 @@ func TestDispatchSyncUpdateAppliesToServer(t *testing.T) {
 	// Build an update on a peer doc and frame it as a sync Update.
 	peer := ycrdt.NewDoc("unit", true, ycrdt.DefaultGCFilter, nil, false)
 	insertText(peer, "from-peer ")
-	update := ycrdt.EncodeStateAsUpdate(peer, nil)
+	update, err := ycrdt.EncodeStateAsUpdate(peer, nil)
+	if err != nil {
+		t.Fatalf("encode peer state: %v", err)
+	}
 	framed := protocol.EncodeUpdate(update)
 
 	var reply bytes.Buffer
@@ -105,7 +108,11 @@ func TestOnDocUpdateSkipsOriginator(t *testing.T) {
 	room.doc.On("update", ycrdt.NewObserverHandler(room.onDocUpdate))
 	peer := ycrdt.NewDoc("unit", true, ycrdt.DefaultGCFilter, nil, false)
 	insertText(peer, "x ")
-	ycrdt.ApplyUpdate(room.doc, ycrdt.EncodeStateAsUpdate(peer, nil), updateOrigin{src: 1})
+	peerUpdate, err := ycrdt.EncodeStateAsUpdate(peer, nil)
+	if err != nil {
+		t.Fatalf("encode peer state: %v", err)
+	}
+	ycrdt.ApplyUpdate(room.doc, peerUpdate, updateOrigin{src: 1})
 
 	if originator.count() != 0 {
 		t.Errorf("update echoed back to originator (%d frames)", originator.count())

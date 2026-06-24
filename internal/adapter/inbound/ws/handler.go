@@ -47,6 +47,14 @@ type Handler struct {
 	// the `oidc` adapter (OIDC_SESSION_COOKIE_NAME, default alkemio_session). Empty
 	// selects the default. The `header`/`open` adapters ignore the cookie.
 	CookieName string
+	// ReadLimitBytes caps a single inbound WebSocket message. It must exceed
+	// MaxDocBytes because a SyncStep2 carries the full v2 snapshot and a single
+	// update can add nearly that much (e.g. pasting an image); the 32 KiB
+	// coder/websocket default would close the socket with StatusMessageTooBig on
+	// any real document. Set via ReadLimitFor at construction; ≤ 0 keeps the
+	// coder/websocket default (only tests that exchange small fixtures leave it
+	// unset).
+	ReadLimitBytes int64
 }
 
 // defaultTokenHeader carries the Alkemio actor-id surrogate when no header is
@@ -59,6 +67,24 @@ const defaultTokenHeader = "Authorization"
 // session id from when CookieName is unset (mirrors the server's oidc.cookie.name
 // default).
 const defaultCookieName = "alkemio_session"
+
+// readHeadroomBytes is the slack added to MaxDocBytes when sizing the per-message
+// WebSocket read limit. A SyncStep2 carries the full v2 snapshot (≈MaxDocBytes)
+// plus a few bytes of y-protocols framing, and awareness/ephemeral frames share
+// the same socket; 4 MiB comfortably covers all of it.
+const readHeadroomBytes = 4 << 20
+
+// ReadLimitFor sizes the per-message WebSocket read limit from the document size
+// bound. A single inbound message — notably a full-doc SyncStep2, but also a
+// single update that pastes a large image — can be nearly as large as the encoded
+// snapshot, so the limit MUST exceed MaxDocBytes. coder/websocket defaults the
+// read limit to 32 KiB, which closes the socket with StatusMessageTooBig on any
+// non-trivial document and traps the client in a reconnect loop; this raises it
+// to MaxDocBytes + framing headroom. The room still enforces MaxDocBytes on apply,
+// so an oversized update is rejected at commit, not silently accepted.
+func ReadLimitFor(maxDocBytes int) int64 {
+	return int64(maxDocBytes) + readHeadroomBytes
+}
 
 // tokenHeader returns the configured actor-id header, or the default when unset.
 func (h *Handler) tokenHeader() string {
@@ -124,6 +150,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Accept already wrote the HTTP error response.
 		h.Logger.Warn("websocket upgrade failed", zap.Error(err))
 		return
+	}
+
+	// Raise the per-message read limit above the 32 KiB coder/websocket default so
+	// a full-doc SyncStep2 or a large update (e.g. an image paste) is not truncated
+	// into a connection-closing StatusMessageTooBig that traps the client in a
+	// reconnect loop (see ReadLimitFor). MaxDocBytes is still enforced on apply.
+	if h.ReadLimitBytes > 0 {
+		conn.SetReadLimit(h.ReadLimitBytes)
 	}
 
 	h.serve(r.Context(), conn, documentID, content, identity)
