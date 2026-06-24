@@ -355,7 +355,9 @@ func (c *wsTestClient) insert(s string) {
 	f := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
-	xt.Insert(0, s, nil)
+	// Insert with the nil Object (IsNil) — no explicit formatting attributes,
+	// matching the pre-struct-Object API where this argument was a bare nil.
+	xt.Insert(0, s, ycrdt.Object{})
 }
 
 func (c *wsTestClient) addElement(id string, x float64) {

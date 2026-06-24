@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	ycrdt "github.com/skyterra/y-crdt"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -143,7 +144,7 @@ func TestTwoPodAwarenessConverges(t *testing.T) {
 	clientB.observeUpdates()
 
 	// A sets a cursor (awareness); B must observe it via the awareness:{id} bus.
-	clientA.setAwareness(map[string]interface{}{"user": "alice"})
+	clientA.setAwareness(ycrdt.MakeObject("user", "alice"))
 
 	if !eventually(func() bool {
 		return clientB.awarenessUserOf(clientA.aware.ClientID) != nil

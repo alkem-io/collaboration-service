@@ -193,7 +193,7 @@ func (c *integClient) insert(s string) {
 	frag := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
-	xt.Insert(0, s, nil)
+	xt.Insert(0, s, ycrdt.Object{})
 }
 
 func (c *integClient) text() string {

@@ -796,16 +796,18 @@ func (r *Room) evictAwareness(m roomMember) {
 func (r *Room) forcedAwarenessRemoval(clientID ycrdt.Number) []byte {
 	meta := r.awareness.Meta[clientID]
 	clock := 0
-	if meta != nil {
-		if c, ok := meta["clock"].(ycrdt.Number); ok {
-			clock = c
+	if !meta.IsNil() {
+		if c, ok := meta.Get("clock"); ok {
+			if cn, ok := c.(ycrdt.Number); ok {
+				clock = cn
+			}
 		}
 	}
 	delete(r.awareness.States, clientID)
-	r.awareness.Meta[clientID] = ycrdt.Object{
-		"clock":       clock + 1,
-		"lastUpdated": ycrdt.GetUnixTime(),
-	}
+	newMeta := ycrdt.NewObject()
+	newMeta.Set("clock", clock+1)
+	newMeta.Set("lastUpdated", ycrdt.GetUnixTime())
+	r.awareness.Meta[clientID] = newMeta
 	update := ycrdt.EncodeAwarenessUpdate(r.awareness, []ycrdt.Number{clientID}, nil)
 	return encodeAwarenessFrame(update)
 }
@@ -818,9 +820,19 @@ func (r *Room) dropMember(id connID) bool {
 	if !ok {
 		return false
 	}
-	r.evictAwareness(m)
+	// Deregister BEFORE evicting awareness. evictAwareness broadcasts, and a
+	// broadcast send can fail for another member (a full send buffer — likely when
+	// a large frame is in flight) and re-enter dropMember for it. If this member
+	// were still registered during that nested broadcast it would be re-dropped in
+	// turn, and two cross-failing members would recurse into each other without
+	// bound (sendMember→broadcast→evictAwareness→dropMember→…) until the goroutine
+	// stack overflows and the process crashes. Removing it first makes the
+	// re-entrant dropMember a no-op (already gone) and bounds the cascade to one
+	// drop per member. Safe on the single-writer run loop (no concurrent r.members
+	// access); evictAwareness only needs the already-captured member value.
 	delete(r.members, id)
 	r.metrics.ConnClosed()
+	r.evictAwareness(m)
 	return true
 }
 
@@ -872,7 +884,11 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 			return false
 		}
 		r.trackAwarenessID(src, body)
-		ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: src})
+		if err := ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: src}); err != nil {
+			// Best-effort: a malformed awareness update can't update the room's snapshot,
+			// but the raw frame is still fanned out so peers apply it against their own state.
+			r.logger.Warn("applying awareness update failed", zap.Error(err))
+		}
 		r.broadcast(frame, src)
 		r.publishToPeers(frame, true)
 		return false
@@ -964,7 +980,9 @@ func (r *Room) applyPeerEphemeral(frame []byte) {
 			r.logger.Warn("dropping malformed peer awareness frame")
 			return
 		}
-		ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: 0, peer: true})
+		if err := ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: 0, peer: true}); err != nil {
+			r.logger.Warn("applying peer awareness update failed", zap.Error(err))
+		}
 		r.broadcast(frame, 0)
 	case model.WireEphemeral:
 		r.broadcast(frame, 0)
@@ -1057,9 +1075,19 @@ func (r *Room) applyWouldExceedMaxDocBytes(update []byte) bool {
 	// non-empty mutating write can only keep it there or grow it. (We still scratch-
 	// apply below for the exact answer in the common in-bounds case.)
 	scratch := newRoomDoc(string(r.id))
-	ycrdt.ApplyUpdateV2(scratch, ycrdt.EncodeStateAsUpdateV2(r.doc, nil), nil)
+	curr, err := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
+	if err != nil {
+		r.logger.Error("budget check: encoding live doc failed", zap.String("doc", string(r.id)), zap.Error(err))
+		return false
+	}
+	ycrdt.ApplyUpdateV2(scratch, curr, nil)
 	ycrdt.ApplyUpdate(scratch, update, nil)
-	return len(ycrdt.EncodeStateAsUpdateV2(scratch, nil)) > limit
+	encoded, err := ycrdt.EncodeStateAsUpdateV2(scratch, nil)
+	if err != nil {
+		r.logger.Error("budget check: encoding scratch doc failed", zap.String("doc", string(r.id)), zap.Error(err))
+		return false
+	}
+	return len(encoded) > limit
 }
 
 // onDocUpdate is the doc "update" observer: it frames the v1 update and fans it
@@ -1153,7 +1181,13 @@ func (r *Room) persist(ctx context.Context) {
 		return
 	}
 
-	snapshot := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
+	snapshot, err := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
+	if err != nil {
+		r.logger.Error("snapshot encode failed", zap.String("doc", string(r.id)), zap.Error(err))
+		r.metrics.SnapshotFailed()
+		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "snapshot encode failed"})
+		return
+	}
 	hint := r.pointer
 	if hint == "" {
 		hint = string(r.id) // first save: hint the document id (inline pointer == id).

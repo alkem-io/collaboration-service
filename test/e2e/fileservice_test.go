@@ -77,7 +77,10 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 			fields[name] = string(b)
 		}
 	}
-	if fields["storageBucketId"] == "" || fields["authorizationId"] == "" {
+	// authorizationId is OPTIONAL (mirrors the real file-service): collaboration
+	// snapshots are uploaded with NO authorizationId so file-service writes a NULL
+	// authz column (UNIQUE permits many NULLs). Only storageBucketId is required.
+	if fields["storageBucketId"] == "" {
 		http.Error(w, "missing required field", http.StatusBadRequest)
 		return
 	}
@@ -152,7 +155,6 @@ func fileServiceConfig(baseURL string) *config.Config {
 	cfg.FileService = config.FileServiceConfig{
 		BaseURL:         baseURL,
 		StorageBucketID: "11111111-1111-1111-1111-111111111111",
-		AuthorizationID: "22222222-2222-2222-2222-222222222222",
 		MaxUploadSize:   32 << 20,
 	}
 	return cfg

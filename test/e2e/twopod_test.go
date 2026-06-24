@@ -93,7 +93,7 @@ func TestTwoPodAwarenessCrossInstance(t *testing.T) {
 	b := dial(t, baseB, docID, "whiteboard")
 	time.Sleep(150 * time.Millisecond)
 
-	a.setAwareness(ycrdt.Object{"user": "alice-on-A"})
+	a.setAwareness(ycrdt.MakeObject("user", "alice-on-A"))
 	if !eventually(func() bool { return b.awarenessClientCount() >= 2 }) {
 		t.Fatalf("pod-B client never saw pod-A's awareness; holds %d states", b.awarenessClientCount())
 	}

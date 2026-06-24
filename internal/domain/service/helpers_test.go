@@ -20,7 +20,7 @@ func insertText(doc *ycrdt.Doc, s string) {
 	f := doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
-	xt.Insert(0, s, nil)
+	xt.Insert(0, s, ycrdt.Object{})
 }
 
 // xmlText renders the memo's "default" fragment to a plain string.
@@ -131,8 +131,8 @@ func (c *fakeClient) setAwareness(state ycrdt.Object) {
 func (c *fakeClient) awarenessUserOf(clientID ycrdt.Number) interface{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if st := c.aware.GetStates()[clientID]; st != nil {
-		return st["user"]
+	if st := c.aware.GetStates()[clientID]; !st.IsNil() {
+		return st.GetOr("user")
 	}
 	return nil
 }
@@ -164,7 +164,10 @@ func (c *fakeClient) unpartition() {
 func (c *fakeClient) pushBufferedAndResync() {
 	c.withDoc(func(doc *ycrdt.Doc) {
 		// Send everything the client has; the server applies what it is missing.
-		full := ycrdt.EncodeStateAsUpdate(doc, nil)
+		full, err := ycrdt.EncodeStateAsUpdate(doc, nil)
+		if err != nil {
+			c.t.Fatalf("encode client state: %v", err)
+		}
 		c.session.Forward(protocol.EncodeUpdate(full))
 		// Ask the server for anything the client is missing.
 		c.session.Forward(protocol.EncodeSyncStep1(doc))

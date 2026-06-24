@@ -91,7 +91,7 @@ func TestSinglePodPresenceAndAwarenessEviction(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// A announces presence; B must observe a second awareness client state.
-	a.setAwareness(ycrdt.Object{"user": "alice", "cursor": "10:4"})
+	a.setAwareness(ycrdt.MakeObject("user", "alice", "cursor", "10:4"))
 	if !eventually(func() bool { return b.awarenessClientCount() >= 2 }) {
 		t.Fatalf("B never received A's awareness; B holds %d states", b.awarenessClientCount())
 	}

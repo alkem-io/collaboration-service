@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ycrdt "github.com/skyterra/y-crdt"
 )
 
 // jsResult is the JSON the harness emits on its `RESULT <json>` line.
@@ -159,7 +161,7 @@ func TestJSInteropJSEditorGoObserver(t *testing.T) {
 
 	// Go observer connects first and stays connected.
 	goObs := dial(t, base, docID, "memo")
-	goObs.setAwareness(map[string]any{"user": "go-observer"}) // so the JS editor sees a peer
+	goObs.setAwareness(ycrdt.MakeObject("user", "go-observer")) // so the JS editor sees a peer
 	time.Sleep(200 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

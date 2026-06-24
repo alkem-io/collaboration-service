@@ -64,7 +64,9 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 			return syncOutcome{}, decErr
 		}
 		enc := ycrdt.NewUpdateEncoderV1()
-		ycrdt.WriteSyncStep2(enc, r.doc, sv.([]byte))
+		if err := ycrdt.WriteSyncStep2(enc, r.doc, sv.([]byte)); err != nil {
+			return syncOutcome{}, err
+		}
 		protocol.WriteMessage(reply, protocol.MessageSync, enc.ToUint8Array())
 		return syncOutcome{}, nil
 

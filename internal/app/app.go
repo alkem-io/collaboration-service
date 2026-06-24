@@ -379,6 +379,10 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		// The `oidc` adapter reads the bare BFF session id from this cookie
 		// (OIDC_SESSION_COOKIE_NAME, default alkemio_session); header/open ignore it.
 		CookieName: cfg.OIDC.SessionCookieName,
+		// A single inbound WS message must accommodate a full-doc SyncStep2 (the v2
+		// snapshot, up to MaxDocBytes) plus framing; the 32 KiB coder/websocket
+		// default would close the socket on any real document and loop the client.
+		ReadLimitBytes: ws.ReadLimitFor(cfg.Limits.MaxDocBytes),
 	}
 
 	routerDeps := httpAdapter.Deps{
