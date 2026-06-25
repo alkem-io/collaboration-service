@@ -121,7 +121,9 @@ func Connect(cfg Config) (*Client, *Store, error) {
 }
 
 // consumeReplies dispatches each reply to the goroutine waiting on its
-// correlation id.
+// correlation id. When deliveries closes — a broker/channel drop — it fails every
+// outstanding request so in-flight Calls unblock immediately with an error rather
+// than each waiting out its full timeout while pending stays occupied.
 func (c *Client) consumeReplies(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
 		var reply nestReply
@@ -133,6 +135,25 @@ func (c *Client) consumeReplies(deliveries <-chan amqp.Delivery) {
 			reply = nestReply{Err: json.RawMessage(`"malformed reply envelope"`)}
 		}
 		c.deliver(d.CorrelationId, reply)
+	}
+	c.failAllPending()
+}
+
+// failAllPending drains every outstanding waiter with an error reply, used when
+// the reply consumer exits (channel/connection drop) so no Call is left hanging
+// until its timeout. Each waiter channel is buffered (cap 1) and removed from
+// pending under the lock, so the send never blocks and a late reply cannot
+// double-deliver.
+func (c *Client) failAllPending() {
+	c.mu.Lock()
+	waiters := make([]chan nestReply, 0, len(c.pending))
+	for corrID, waiter := range c.pending {
+		waiters = append(waiters, waiter)
+		delete(c.pending, corrID)
+	}
+	c.mu.Unlock()
+	for _, waiter := range waiters {
+		waiter <- nestReply{Err: json.RawMessage(`"rabbitmq reply channel closed"`)}
 	}
 }
 
@@ -158,7 +179,10 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 	defer cancel()
 
 	if err := c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
-		ContentType:   "application/json",
+		ContentType: "application/json",
+		// Persistent: the server queue is durable, so the metadata RPC must survive a
+		// broker restart rather than being dropped as a transient message.
+		DeliveryMode:  amqp.Persistent,
 		CorrelationId: corrID,
 		ReplyTo:       c.replyQ,
 		Body:          body,
@@ -190,7 +214,10 @@ func (c *Client) Emit(ctx context.Context, pattern string, data any) error {
 	}
 	return c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
 		ContentType: "application/json",
-		Body:        body,
+		// Persistent: lifecycle/contribution events ride a durable queue and must not
+		// be lost on a broker restart.
+		DeliveryMode: amqp.Persistent,
+		Body:         body,
 	})
 }
 

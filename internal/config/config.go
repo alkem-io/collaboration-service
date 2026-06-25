@@ -359,15 +359,26 @@ const (
 // epic R9 defaults and failing fast on a negative value (a negative limit is a
 // configuration error, not a disable — use 0 to disable).
 func loadLimitsConfig() (LimitsConfig, error) {
-	lc := LimitsConfig{
-		MaxDocBytes:                   getenvInt("MAX_DOC_BYTES", defaultMaxDocBytes),
-		MaxConnsPerRoom:               getenvInt("MAX_CONNS_PER_ROOM", defaultMaxConnsPerRoom),
-		UpdateRatePerSec:              getenvInt("UPDATE_RATE_PER_SEC", defaultUpdateRatePerSec),
-		UpdateBurst:                   getenvInt("UPDATE_BURST", 0),
-		CollaboratorInactivitySeconds: getenvInt("COLLABORATOR_INACTIVITY_SECONDS", defaultCollaboratorInactivitySec),
-		ContributionWindowSeconds:     getenvInt("CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec),
-		IdleReleaseSeconds:            getenvInt("IDLE_RELEASE_SECONDS", defaultIdleReleaseSec),
-		SaveDebounceMillis:            getenvInt("SAVE_DEBOUNCE_MILLIS", defaultSaveDebounceMillis),
+	var lc LimitsConfig
+	for _, f := range []struct {
+		key string
+		def int
+		dst *int
+	}{
+		{"MAX_DOC_BYTES", defaultMaxDocBytes, &lc.MaxDocBytes},
+		{"MAX_CONNS_PER_ROOM", defaultMaxConnsPerRoom, &lc.MaxConnsPerRoom},
+		{"UPDATE_RATE_PER_SEC", defaultUpdateRatePerSec, &lc.UpdateRatePerSec},
+		{"UPDATE_BURST", 0, &lc.UpdateBurst},
+		{"COLLABORATOR_INACTIVITY_SECONDS", defaultCollaboratorInactivitySec, &lc.CollaboratorInactivitySeconds},
+		{"CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec, &lc.ContributionWindowSeconds},
+		{"IDLE_RELEASE_SECONDS", defaultIdleReleaseSec, &lc.IdleReleaseSeconds},
+		{"SAVE_DEBOUNCE_MILLIS", defaultSaveDebounceMillis, &lc.SaveDebounceMillis},
+	} {
+		v, err := getenvInt(f.key, f.def)
+		if err != nil {
+			return LimitsConfig{}, err
+		}
+		*f.dst = v
 	}
 	for name, v := range map[string]int{
 		"MAX_DOC_BYTES":                   lc.MaxDocBytes,
@@ -441,10 +452,14 @@ func loadMetaStoreConfig(cfg *Config) error {
 func loadBlobStoreConfig(cfg *Config) error {
 	switch cfg.BlobStore {
 	case BlobStoreFileService:
+		maxUpload, err := getenvInt64("MAX_UPLOAD_SIZE", 0)
+		if err != nil {
+			return err
+		}
 		cfg.FileService = FileServiceConfig{
 			BaseURL:         os.Getenv("FILE_SERVICE_URL"),
 			StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
-			MaxUploadSize:   getenvInt64("MAX_UPLOAD_SIZE", 0),
+			MaxUploadSize:   maxUpload,
 		}
 		// No authorizationId is configured: snapshots are internal blobs whose
 		// access is governed by the document's own authz and the (unauthenticated)
@@ -481,13 +496,39 @@ func loadBlobStoreConfig(cfg *Config) error {
 }
 
 // loadAuthConfig fills + fail-fast-validates the AuthN (oidc) and AuthZ
-// (authzeval) backend settings for whichever modes were selected. The header /
-// open AuthN and open AuthZ paths need nothing.
+// (authzeval) backend settings for whichever modes were selected. The open
+// AuthN and open AuthZ paths need nothing; the header path validates the
+// actor-id header is gateway-owned (loadHeaderAuthConfig).
 func loadAuthConfig(cfg *Config) error {
+	if err := loadHeaderAuthConfig(cfg); err != nil {
+		return err
+	}
 	if err := loadAuthZEvalConfig(cfg); err != nil {
 		return err
 	}
 	return loadOIDCConfig(cfg)
+}
+
+// loadHeaderAuthConfig fail-fast-validates the gateway-terminated `header` AuthN
+// mode (AUTH_MODE=header, and the legacy AUTH_MODE=authzeval alias). The header
+// adapter TRUSTS AUTH_TOKEN_HEADER verbatim as the actor id, so that header MUST
+// be a dedicated gateway-owned header the client cannot set. The bearer-style
+// default ("Authorization") is client-controllable — accepting it would let any
+// client stamp its own actor id and impersonate anyone — so header mode requires
+// AUTH_TOKEN_HEADER to be set to something other than "Authorization" (e.g.
+// X-Alkemio-Actor-Id, the gateway-resolved header). Open mode is unaffected (the
+// open adapter ignores the header); oidc mode reads cookie/bearer, not this header.
+func loadHeaderAuthConfig(cfg *Config) error {
+	if cfg.AuthMode != AuthModeHeader {
+		return nil
+	}
+	if strings.EqualFold(cfg.Auth.TokenHeader, DefaultAuthTokenHeader) {
+		return fmt.Errorf(
+			"AUTH_MODE=header requires AUTH_TOKEN_HEADER to be a dedicated gateway-owned header (e.g. X-Alkemio-Actor-Id), not the client-controllable %q: the header adapter trusts it as the actor id",
+			DefaultAuthTokenHeader,
+		)
+	}
+	return nil
 }
 
 // loadAuthZEvalConfig populates the authzeval settings when AuthZ delegates to
@@ -498,11 +539,23 @@ func loadAuthZEvalConfig(cfg *Config) error {
 	if cfg.AuthZMode != AuthZModeEval {
 		return nil
 	}
+	failureThreshold, err := getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3)
+	if err != nil {
+		return err
+	}
+	breakerTimeout, err := getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15)
+	if err != nil {
+		return err
+	}
+	halfOpenMax, err := getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2)
+	if err != nil {
+		return err
+	}
 	cfg.AuthZEval = AuthZEvalConfig{
 		ServiceURL:              os.Getenv("AUTH_SERVICE_URL"),
-		BreakerFailureThreshold: getenvInt("AUTH_BREAKER_FAILURE_THRESHOLD", 3),
-		BreakerTimeoutSeconds:   getenvInt("AUTH_BREAKER_TIMEOUT_SECONDS", 15),
-		BreakerHalfOpenMaxReqs:  getenvInt("AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS", 2),
+		BreakerFailureThreshold: failureThreshold,
+		BreakerTimeoutSeconds:   breakerTimeout,
+		BreakerHalfOpenMaxReqs:  halfOpenMax,
 	}
 	if cfg.AuthZEval.ServiceURL == "" {
 		return fmt.Errorf("AUTHZ_MODE=authzeval requires AUTH_SERVICE_URL")
@@ -519,6 +572,10 @@ func loadOIDCConfig(cfg *Config) error {
 	if cfg.AuthMode != AuthModeOIDC {
 		return nil
 	}
+	clockSkew, err := getenvInt("OIDC_CLOCK_SKEW_SECONDS", defaultOIDCClockSkewSeconds)
+	if err != nil {
+		return err
+	}
 	cfg.OIDC = OIDCConfig{
 		// SESSION_REDIS_URL defaults to the fan-out REDIS_URL (single-Redis
 		// deployments need no extra config); an isolated session store points it
@@ -528,7 +585,7 @@ func loadOIDCConfig(cfg *Config) error {
 		JWKSURL:            os.Getenv("HYDRA_JWKS_URL"),
 		IssuerURL:          os.Getenv("HYDRA_ISSUER_URL"),
 		BearerAudAllowList: splitAndTrim(os.Getenv("BEARER_AUD_ALLOW_LIST")),
-		ClockSkewSeconds:   getenvInt("OIDC_CLOCK_SKEW_SECONDS", defaultOIDCClockSkewSeconds),
+		ClockSkewSeconds:   clockSkew,
 	}
 	if cfg.OIDC.JWKSURL == "" && cfg.OIDC.SessionRedisURL == "" {
 		return fmt.Errorf("AUTH_MODE=oidc requires at least one credential path: HYDRA_JWKS_URL (bearer) and/or SESSION_REDIS_URL|REDIS_URL (cookie session)")
@@ -685,26 +742,36 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// getenvInt reads an integer env var, falling back to a default when unset or
-// unparseable (the breaker tunables are best-effort, not fail-fast).
-func getenvInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+// getenvInt reads an integer env var, falling back to a default when unset. A
+// SET-but-malformed value is a configuration error (fail-fast, §XV): these
+// helpers back hard limits and safety-sensitive adapter settings (MAX_DOC_BYTES,
+// SAVE_DEBOUNCE_MILLIS, OIDC_CLOCK_SKEW_SECONDS, the breaker tunables), so a typo
+// must not silently fall back to a default and quietly change runtime behavior.
+func getenvInt(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
 	}
-	return fallback
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid integer %q", key, v)
+	}
+	return n, nil
 }
 
-// getenvInt64 reads an int64 env var, falling back to a default when unset or
-// unparseable.
-func getenvInt64(key string, fallback int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
+// getenvInt64 reads an int64 env var, falling back to a default when unset. As
+// with getenvInt, a SET-but-malformed value fails fast rather than silently
+// using the default.
+func getenvInt64(key string, fallback int64) (int64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
 	}
-	return fallback
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid integer %q", key, v)
+	}
+	return n, nil
 }
 
 func getenvPort(key string, fallback int) (int, error) {

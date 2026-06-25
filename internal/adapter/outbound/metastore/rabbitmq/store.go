@@ -43,12 +43,32 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	if !reply.Found {
 		return model.Metadata{}, model.ErrNotFound
 	}
+
+	// Validate the wire enums at the adapter boundary: reply.ContentType and
+	// reply.BlobStore are raw RPC strings, so reject an unsupported value here with
+	// a clear diagnostic rather than casting it blindly and letting it fail later
+	// (much weaker error) deep in the room. Empty is allowed — an unset BlobStore
+	// means "inline/default" and an unset ContentType is resolved from the ?type=
+	// handshake — only a SET-but-unknown value is a corrupt server reply.
+	contentType := model.ContentType(reply.ContentType)
+	switch contentType {
+	case "", model.ContentTypeMemo, model.ContentTypeWhiteboard:
+	default:
+		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown contentType %q", reply.ContentType)
+	}
+	blobStore := model.BlobStoreKind(reply.BlobStore)
+	switch blobStore {
+	case "", model.BlobStoreInline, model.BlobStoreFileService, model.BlobStoreS3, model.BlobStoreLocal:
+	default:
+		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown blobStore %q", reply.BlobStore)
+	}
+
 	return model.Metadata{
 		ID:                    id,
-		ContentType:           model.ContentType(reply.ContentType),
+		ContentType:           contentType,
 		Version:               reply.Version,
 		ContentPointer:        reply.ContentPointer,
-		BlobStore:             model.BlobStoreKind(reply.BlobStore),
+		BlobStore:             blobStore,
 		AuthorizationPolicyID: reply.AuthorizationPolicyID,
 		StorageBucketID:       reply.StorageBucketID,
 		// Surface the server-delivered content for the first-open seed (R4): the

@@ -270,6 +270,7 @@ func TestLocalRequiresRoot(t *testing.T) {
 
 func TestAuthZEvalRequiresServiceURL(t *testing.T) {
 	t.Setenv("AUTH_MODE", "authzeval")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	if _, err := Load(); err == nil {
 		t.Fatal("AUTH_MODE=authzeval without AUTH_SERVICE_URL: expected error")
 	}
@@ -277,6 +278,7 @@ func TestAuthZEvalRequiresServiceURL(t *testing.T) {
 
 func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
 	t.Setenv("AUTH_MODE", "authzeval")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
 	cfg, err := Load()
 	if err != nil {
@@ -342,6 +344,46 @@ func TestLimitsRejectNegative(t *testing.T) {
 	}
 }
 
+// TestNumericEnvRejectsMalformed asserts a SET-but-unparseable numeric env var
+// fails fast rather than silently falling back to its default — a typo in a hard
+// limit or safety-sensitive setting must not quietly change runtime behavior.
+func TestNumericEnvRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		key, val string
+		// extra env required for the loader that reads the key to run at all.
+		extra map[string]string
+	}{
+		{key: "MAX_DOC_BYTES", val: "not-a-number"},
+		{key: "SAVE_DEBOUNCE_MILLIS", val: "12.5"},
+		{key: "OIDC_CLOCK_SKEW_SECONDS", val: "abc", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
+			"AUTH_MODE": "oidc", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
+			"AUTH_SERVICE_URL": "http://auth:6060",
+			"HYDRA_JWKS_URL":   "http://hydra/.well-known/jwks.json",
+		}},
+		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
+			"BLOB_STORE":                     "file-service",
+			"FILE_SERVICE_URL":               "http://files:4000",
+			"FILE_SERVICE_STORAGE_BUCKET_ID": "bucket-1",
+		}},
+		{key: "AUTH_BREAKER_TIMEOUT_SECONDS", val: "soon", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
+			"AUTH_MODE": "header", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
+			"AUTHZ_MODE": "authzeval", "AUTH_SERVICE_URL": "http://auth:6060",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			pinKnownGood(t)
+			for k, v := range tc.extra {
+				t.Setenv(k, v)
+			}
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q: expected a fail-fast parse error, got nil", tc.key, tc.val)
+			}
+		})
+	}
+}
+
 // --- Wave 5 (T018.1): AuthN/AuthZ mode split + backward-compat alias ---
 
 // pinKnownGood pins every non-auth selector to a known-good value so an
@@ -376,6 +418,7 @@ func TestDefaultAuthZModeDerivesFromOpen(t *testing.T) {
 func TestHeaderModeDerivesAuthZEval(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTHZ_MODE", "")
 	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
 	cfg, err := Load()
@@ -434,6 +477,7 @@ func TestAuthZModeOverrideIndependentOfAuthN(t *testing.T) {
 func TestLegacyAuthZEvalAliasMapsToHeaderPlusEval(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "authzeval")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTHZ_MODE", "")
 	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
 	cfg, err := Load()
@@ -473,10 +517,35 @@ func TestAuthZModeRejectsUnknown(t *testing.T) {
 func TestAuthZEvalRequiresServiceURLViaAuthZMode(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTHZ_MODE", "authzeval")
 	t.Setenv("AUTH_SERVICE_URL", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("AUTHZ_MODE=authzeval without AUTH_SERVICE_URL: expected error")
+	}
+}
+
+// TestHeaderModeRejectsBearerHeader asserts AUTH_MODE=header fails fast unless a
+// dedicated gateway-owned actor-id header is configured: leaving AUTH_TOKEN_HEADER
+// at the client-controllable default ("Authorization") would let any client stamp
+// its own actor id, so it is rejected (the header adapter trusts the value).
+func TestHeaderModeRejectsBearerHeader(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+	// AUTH_TOKEN_HEADER unset → defaults to Authorization → must be rejected.
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=header with default Authorization token header: expected error")
+	}
+	// Explicitly setting it to Authorization (any case) is likewise rejected.
+	t.Setenv("AUTH_TOKEN_HEADER", "authorization")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=header with AUTH_TOKEN_HEADER=authorization: expected error")
+	}
+	// A dedicated gateway header is accepted.
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	if _, err := Load(); err != nil {
+		t.Fatalf("AUTH_MODE=header with a gateway header: unexpected error %v", err)
 	}
 }
 

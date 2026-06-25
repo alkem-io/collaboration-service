@@ -80,6 +80,12 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(region),
 	}
+	// Static credentials must be supplied as a pair. A half-set pair is a broken
+	// config — silently falling back to the ambient credential chain could point
+	// the service at the wrong S3 principal/account, so fail fast instead.
+	if (cfg.AccessKeyID == "") != (cfg.SecretAccessKey == "") {
+		return nil, fmt.Errorf("s3 blob store: S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together")
+	}
 	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
 		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),

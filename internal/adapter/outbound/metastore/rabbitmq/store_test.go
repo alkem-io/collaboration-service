@@ -174,6 +174,31 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnknownContentType asserts a corrupt server reply carrying an
+// unsupported contentType is rejected at the adapter boundary, not cast blindly
+// into the domain to fail later with a weaker diagnostic.
+func TestLoadRejectsUnknownContentType(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
+		Found: true, ContentType: "spreadsheet", BlobStore: "inline",
+	}}}
+	store := newWithRPC(f)
+	if _, err := store.Load(context.Background(), "doc-x"); err == nil {
+		t.Fatal("Load with unknown contentType: expected error, got nil")
+	}
+}
+
+// TestLoadRejectsUnknownBlobStore asserts a corrupt server reply carrying an
+// unsupported blobStore is rejected at the adapter boundary.
+func TestLoadRejectsUnknownBlobStore(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
+		Found: true, ContentType: "memo", BlobStore: "gdrive",
+	}}}
+	store := newWithRPC(f)
+	if _, err := store.Load(context.Background(), "doc-x"); err == nil {
+		t.Fatal("Load with unknown blobStore: expected error, got nil")
+	}
+}
+
 // TestFetchReplyContentBase64WireShape pins the cross-repo wire contract: the
 // first-open seed content rides collaboration-fetch as a base64 string (Go
 // marshals []byte that way), so the NestJS server sends/receives it as base64 and

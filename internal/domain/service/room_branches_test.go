@@ -633,14 +633,20 @@ func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
 
 // --- room.go: loadSnapshot blob-not-found (index row without a blob yet) ---
 
-// TestLoadSnapshotTreatsMissingBlobAsEmpty asserts a metadata row pointing at a
-// blob that is not (yet) present is treated as an empty document rather than an
-// error — the narrow window between an index upsert and the blob write.
-func TestLoadSnapshotTreatsMissingBlobAsEmpty(t *testing.T) {
+// TestLoadSnapshotMissingBlobBehindPointerFailsMaterialization asserts that a
+// metadata row with a NON-EMPTY ContentPointer whose blob is absent fails
+// materialization rather than silently seeding an empty room. persist() always
+// writes the blob BEFORE upserting the pointer, so a populated pointer must have
+// a blob — a missing one is corruption, and seeding/blanking it would materialize
+// stale/empty content and let the next save overwrite the last good snapshot.
+// (The legitimate "no snapshot yet" case is an EMPTY ContentPointer, covered by
+// the seed tests.)
+func TestLoadSnapshotMissingBlobBehindPointerFailsMaterialization(t *testing.T) {
 	meta := metainmem.New()
 	open := authopen.New()
 	ctx := context.Background()
-	// Index row whose ContentPointer references a blob the (empty) store lacks.
+	// Index row whose (non-empty) ContentPointer references a blob the empty store
+	// lacks — corruption, not the index-upsert/blob-write window.
 	if err := meta.Save(ctx, model.Metadata{
 		ID: "no-blob", ContentType: model.ContentTypeMemo,
 		ContentPointer: "no-blob", BlobStore: model.BlobStoreInline,
@@ -649,11 +655,10 @@ func TestLoadSnapshotTreatsMissingBlobAsEmpty(t *testing.T) {
 	}
 
 	mgr := NewManager(Deps{Metadata: meta, Blob: blobinline.New(), Auth: open, AuthZ: open}, fastConfig(), nil, nil)
-	session, _, err := mgr.Join(ctx, JoinRequest{ID: "no-blob", Content: model.ContentTypeMemo, Conn: &captureConn{}})
-	if err != nil {
-		t.Fatalf("Join with a missing blob must materialize an empty room, got: %v", err)
+	_, _, err := mgr.Join(ctx, JoinRequest{ID: "no-blob", Content: model.ContentTypeMemo, Conn: &captureConn{}})
+	if err == nil {
+		t.Fatal("Join with a populated pointer but missing blob must fail materialization, got nil error")
 	}
-	session.Leave()
 }
 
 // --- room.go: handleLeave / dropMember absent member ---

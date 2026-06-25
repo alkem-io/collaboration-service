@@ -383,6 +383,15 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		cfg.BackendTimeout = defaultBackendTimeout
 	}
 	doc := newRoomDoc(string(id))
+	// ycrdt.NewAwareness seeds the doc-local empty client state for the server's own
+	// client id; left in place, awarenessSnapshot would emit a synthetic presence
+	// entry for the server on the first join. The server holds no presence, so clear
+	// the local state immediately — the zero Object is the cleared/null state
+	// (Object is a struct, so SetLocalState(ycrdt.Object{}) removes the entry, not a
+	// nil) — and a fresh room then reports zero awareness states until a real client
+	// announces one.
+	awareness := ycrdt.NewAwareness(doc)
+	awareness.SetLocalState(ycrdt.Object{})
 	// The room-lifetime context: every backend call on the run loop derives from
 	// it, and it is cancelled on release (finish) so a hung call unblocks at
 	// teardown. It is decoupled from any request lifetime (the caller already
@@ -392,7 +401,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		id:           id,
 		content:      content,
 		doc:          doc,
-		awareness:    ycrdt.NewAwareness(doc),
+		awareness:    awareness,
 		deps:         deps,
 		cfg:          cfg,
 		metrics:      metrics,
@@ -476,13 +485,22 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 		r.blobKind = meta.BlobStore
 	}
 
+	// An empty ContentPointer means there is no live snapshot yet (an index row
+	// without a blob): seed from the server-delivered content if any, otherwise stay
+	// empty. persist() always writes the blob BEFORE upserting the pointer, so a row
+	// with a NON-EMPTY pointer must have a blob — a missing blob behind a populated
+	// pointer is corruption, NOT a "no snapshot yet" case. Seeding/blanking it would
+	// materialize stale or empty content and the next save would overwrite the last
+	// good snapshot, so fail materialization instead.
+	if meta.ContentPointer == "" {
+		r.seedFromContent(meta.SeedContent)
+		return nil
+	}
+
 	data, err := r.deps.Blob.Get(ctx, meta.ContentPointer)
 	if err != nil {
 		if isNotFound(err) {
-			// No live snapshot yet (index row without a blob): seed from the
-			// server-delivered content if any, otherwise stay empty.
-			r.seedFromContent(meta.SeedContent)
-			return nil
+			return fmt.Errorf("snapshot blob missing for %s (pointer %q): %w", r.id, meta.ContentPointer, err)
 		}
 		return err
 	}

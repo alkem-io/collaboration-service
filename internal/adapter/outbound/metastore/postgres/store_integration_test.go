@@ -72,6 +72,31 @@ func TestPostgresRoundTrip(t *testing.T) {
 		t.Fatalf("v2 row = %+v", got)
 	}
 
+	// Snapshot-style save (Room.persist rebuilds Metadata from room state and
+	// carries no OwnerRef): a blank owner_ref/authorization_policy_id must be
+	// treated as "unchanged" and PRESERVE the pre-registered lifecycle metadata,
+	// not wipe it — otherwise the delete cascade loses its owner_ref key (FR-023).
+	snapshotSave := model.Metadata{
+		ID:             id,
+		ContentType:    model.ContentTypeWhiteboard,
+		ContentPointer: "ptr-3",
+		BlobStore:      model.BlobStoreFileService,
+		// OwnerRef + AuthorizationPolicyID intentionally empty (snapshot path).
+	}
+	if err := store.Save(ctx, snapshotSave); err != nil {
+		t.Fatalf("Save snapshot: %v", err)
+	}
+	got, _ = store.Load(ctx, id)
+	if got.Version != 3 || got.ContentPointer != "ptr-3" {
+		t.Fatalf("snapshot row = %+v", got)
+	}
+	if got.OwnerRef != "owner-1" {
+		t.Fatalf("snapshot save wiped owner_ref: got %q, want preserved %q", got.OwnerRef, "owner-1")
+	}
+	if got.AuthorizationPolicyID != "pol-1" {
+		t.Fatalf("snapshot save wiped authorization_policy_id: got %q, want preserved %q", got.AuthorizationPolicyID, "pol-1")
+	}
+
 	// Delete → idempotent.
 	if err := store.Delete(ctx, id); err != nil {
 		t.Fatalf("Delete: %v", err)

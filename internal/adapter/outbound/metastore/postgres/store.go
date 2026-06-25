@@ -103,6 +103,14 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 // upsertSQL inserts a new row (version 1) or, on conflict, bumps the existing
 // version and refreshes the mutable columns — mirroring the in-memory store's
 // version-bump-on-save semantics (one canonical save behavior across backends).
+//
+// owner_ref and authorization_policy_id are LIFECYCLE metadata set at
+// pre-register (the create/PreRegister path), not by the per-snapshot persist
+// (Room.persist rebuilds Metadata from room state and carries no OwnerRef). A
+// blank value on a snapshot upsert therefore means "unchanged", so preserve the
+// existing row value rather than clobbering it to the empty string — otherwise
+// the first snapshot save would wipe the owner_ref the delete cascade keys off
+// (FR-023). A non-blank value still wins (a genuine update).
 const upsertSQL = `
 INSERT INTO collaboration_metadata
     (id, content_type, version, content_pointer, blob_store,
@@ -113,8 +121,8 @@ ON CONFLICT (id) DO UPDATE SET
     version                 = collaboration_metadata.version + 1,
     content_pointer         = EXCLUDED.content_pointer,
     blob_store              = EXCLUDED.blob_store,
-    authorization_policy_id = EXCLUDED.authorization_policy_id,
-    owner_ref               = EXCLUDED.owner_ref,
+    authorization_policy_id = COALESCE(NULLIF(EXCLUDED.authorization_policy_id, ''), collaboration_metadata.authorization_policy_id),
+    owner_ref               = COALESCE(NULLIF(EXCLUDED.owner_ref, ''), collaboration_metadata.owner_ref),
     updated_at              = now()`
 
 // Save upserts the index row, bumping its version (data-model.md). Called on

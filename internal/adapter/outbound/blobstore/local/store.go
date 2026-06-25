@@ -86,6 +86,18 @@ func (s *Store) Put(_ context.Context, pointer, _ string, data []byte) (string, 
 	if err := os.Rename(tmpName, full); err != nil {
 		return "", fmt.Errorf("rename temp: %w", err)
 	}
+	// tmp.Sync above only makes the file CONTENTS durable; after the rename the new
+	// directory entry can still be lost on a crash/power-loss until the containing
+	// directory is itself fsync'd. Sync it so a returned pointer always names a
+	// snapshot that survives a restart (no acknowledged-then-vanished writes).
+	dirHandle, err := os.Open(dir) //nolint:gosec // dir is derived from resolve()-constrained full.
+	if err != nil {
+		return "", fmt.Errorf("open dir for sync: %w", err)
+	}
+	defer func() { _ = dirHandle.Close() }()
+	if err := dirHandle.Sync(); err != nil {
+		return "", fmt.Errorf("sync dir: %w", err)
+	}
 	return pointer, nil
 }
 

@@ -285,18 +285,23 @@ func buildOIDCAuth(cfg *config.Config, closers *[]func()) (port.Auth, error) {
 	}
 
 	if cfg.OIDC.JWKSURL != "" {
-		// The cache refreshes the JWKS in the background for the process lifetime;
-		// a context.Background lifetime is correct (the cache is torn down with the
-		// process). Lookups still honour the per-request ctx in Authenticate.
-		validator, err := authoidc.NewBearerValidator(context.Background(), authoidc.BearerConfig{
+		// The cache refreshes the JWKS in the background; bind that goroutine to a
+		// cancelable context owned by App so Close tears it down (this composition
+		// root is reused by tests and any in-process boot/shutdown, so an
+		// uncancelled context.Background would leak a refresher per New). Lookups
+		// still honour the per-request ctx in Authenticate.
+		jwksCtx, cancel := context.WithCancel(context.Background())
+		validator, err := authoidc.NewBearerValidator(jwksCtx, authoidc.BearerConfig{
 			JWKSURL:   cfg.OIDC.JWKSURL,
 			Issuer:    cfg.OIDC.IssuerURL,
 			Audiences: cfg.OIDC.BearerAudAllowList,
 			ClockSkew: time.Duration(cfg.OIDC.ClockSkewSeconds) * time.Second,
 		})
 		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("oidc bearer validator: %w", err)
 		}
+		*closers = append(*closers, cancel)
 		oc.Bearer = validator
 	}
 
