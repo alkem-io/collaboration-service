@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,27 @@ func newFakeClient(reply any) (*Client, *fakeChannel) {
 	ch := &fakeChannel{client: c, reply: nestReply{Response: raw, IsDisposed: true}}
 	c.ch = ch
 	return c, ch
+}
+
+// TestCallFailsFastAfterReplyConsumerClosed asserts that once the reply consumer
+// has exited (failAllPending marks the client closed), a new Call returns
+// immediately with an error instead of publishing and then waiting out its full
+// timeout for a reply that can never arrive.
+func TestCallFailsFastAfterReplyConsumerClosed(t *testing.T) {
+	c, ch := newFakeClient(FetchReply{Found: true})
+	c.failAllPending() // simulate the reply consumer exiting (broker/channel drop)
+
+	err := c.Call(context.Background(), PatternFetch, FetchData{ID: "doc-1"}, nil)
+	if err == nil {
+		t.Fatal("Call after reply consumer closed: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Call error = %v, want a reply-consumer-closed error", err)
+	}
+	// Failing fast must not put a request on the wire.
+	if len(ch.publishes) != 0 {
+		t.Fatalf("publishes = %d, want 0 (fail fast must not publish)", len(ch.publishes))
+	}
 }
 
 func TestClientCallRoundTrip(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -658,6 +659,9 @@ func TestLoadSnapshotMissingBlobBehindPointerFailsMaterialization(t *testing.T) 
 	_, _, err := mgr.Join(ctx, JoinRequest{ID: "no-blob", Content: model.ContentTypeMemo, Conn: &captureConn{}})
 	if err == nil {
 		t.Fatal("Join with a populated pointer but missing blob must fail materialization, got nil error")
+	}
+	if !strings.Contains(err.Error(), "snapshot blob missing") {
+		t.Fatalf("Join error = %v, want a snapshot-blob-missing materialization failure", err)
 	}
 }
 

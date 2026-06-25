@@ -44,6 +44,10 @@ type Client struct {
 
 	mu      sync.Mutex
 	pending map[string]chan nestReply
+	// closed is set once the reply consumer exits (failAllPending): the reply
+	// queue is gone, so a later Call would publish but never receive its reply.
+	// Check it at waiter registration so such a Call fails fast, not on timeout.
+	closed bool
 }
 
 // deliver routes a reply to the goroutine waiting on its correlation id (the
@@ -139,13 +143,15 @@ func (c *Client) consumeReplies(deliveries <-chan amqp.Delivery) {
 	c.failAllPending()
 }
 
-// failAllPending drains every outstanding waiter with an error reply, used when
-// the reply consumer exits (channel/connection drop) so no Call is left hanging
-// until its timeout. Each waiter channel is buffered (cap 1) and removed from
-// pending under the lock, so the send never blocks and a late reply cannot
-// double-deliver.
+// failAllPending drains every outstanding waiter with an error reply and marks
+// the client closed, used when the reply consumer exits (channel/connection drop)
+// so no Call is left hanging until its timeout. Each waiter channel is buffered
+// (cap 1) and removed from pending under the lock, so the send never blocks and a
+// late reply cannot double-deliver. Setting closed under the same lock fails any
+// subsequent Call fast — its reply could never arrive.
 func (c *Client) failAllPending() {
 	c.mu.Lock()
+	c.closed = true
 	waiters := make([]chan nestReply, 0, len(c.pending))
 	for corrID, waiter := range c.pending {
 		waiters = append(waiters, waiter)
@@ -167,6 +173,12 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 
 	waiter := make(chan nestReply, 1)
 	c.mu.Lock()
+	if c.closed {
+		// Reply consumer has exited (broker/channel drop): a publish now would never
+		// get its reply and would only block until the timeout — fail fast instead.
+		c.mu.Unlock()
+		return fmt.Errorf("rabbitmq reply consumer closed")
+	}
 	c.pending[corrID] = waiter
 	c.mu.Unlock()
 	defer func() {
@@ -180,8 +192,11 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 
 	if err := c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
 		ContentType: "application/json",
-		// Persistent: the server queue is durable, so the metadata RPC must survive a
-		// broker restart rather than being dropped as a transient message.
+		// Persistent marks the request durable so an ACCEPTED message survives a
+		// broker restart (the server queue is durable). Broker ACCEPTANCE itself is
+		// confirmed end-to-end by the correlated reply below: a request the broker
+		// never queued yields no reply and surfaces as an rpc timeout error, so a
+		// lost request is never a silent success — no publisher confirms needed.
 		DeliveryMode:  amqp.Persistent,
 		CorrelationId: corrID,
 		ReplyTo:       c.replyQ,
@@ -214,8 +229,11 @@ func (c *Client) Emit(ctx context.Context, pattern string, data any) error {
 	}
 	return c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
 		ContentType: "application/json",
-		// Persistent: lifecycle/contribution events ride a durable queue and must not
-		// be lost on a broker restart.
+		// Persistent marks the event durable so an ACCEPTED message survives a broker
+		// restart. Emit is fire-and-forget (no reply, no publisher confirm), so broker
+		// acceptance is NOT separately confirmed — delivery of the contribution event
+		// is best-effort. Guaranteed delivery would need publisher confirms, a
+		// deliberate change not implied by Persistent.
 		DeliveryMode: amqp.Persistent,
 		Body:         body,
 	})
