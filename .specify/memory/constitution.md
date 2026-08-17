@@ -1,5 +1,116 @@
 <!--
 Sync Impact Report
+- Version change: 2.0.0 → 3.0.0 (MAJOR — §III redefined; a supported product
+  configuration is withdrawn)
+- 3.0.0 (2026-08-18): Withdraw the zero-dependency standalone product promise.
+  - MODIFIED §III "Standalone-First, Alkemio-Integrated" → "Alkemio-Integrated,
+    In-Process Testable". The service targets Alkemio; the standalone deployment
+    is no longer a supported configuration. Rationale: the promise was never
+    satisfiable — the document index is owned by the Alkemio `server` and reached
+    by RPC over RabbitMQ, so every real configuration depends on that external
+    service, and no environment runs `server` without file-service — so it cost
+    real complexity for a deployment nobody runs (§XI).
+  - RETAINED as a distinct, narrower guarantee: the service MUST remain runnable
+    entirely in-process for tests, using in-process fixtures and the core's
+    shipped single-process defaults. Explicitly a test capability with no
+    durability guarantee, not a deployment mode.
+  - ADDED to §III: adapters existing SOLELY to serve the withdrawn promise are
+    legacy under §X and MUST be removed; adapters that also serve the in-process
+    test path are retained on that basis. Removal is tracked separately from the
+    go-yjs core port so a foundational change does not also carry a multi-adapter
+    deletion.
+  - MODIFIED Technology Stack Constraints — metadata-store row now names the
+    `MetadataStore` port and the RabbitMQ→server path as the system of record
+    (the Postgres variant existed for standalone only); authorization row now
+    scopes `open` to in-process tests. §V wording likewise rescoped.
+  - Consequential: `001` FR-017 (standalone create/delete HTTP API) and FR-020
+    (standalone as first-class) are superseded; the `postgres` metadata store and
+    the `local`/`s3` blob adapters lose their only consumer.
+  - MIGRATION PLAN (affected code):
+    * NO DATA MIGRATION. Nothing is deployed and no production data exists, so
+      this is deletion only — there is no stored state to convert or preserve.
+    * ORDERING. This amendment MUST be committed before any of the removals
+      below. Until it is in force, §III still mandates standalone and the same
+      adapters are REQUIRED code, so deleting them would violate the constitution
+      in effect at that moment. The removals are also deliberately NOT bundled
+      into the go-yjs core port (`003`): a reviewer who disagrees with withdrawing
+      standalone must be able to say so without rejecting a large deletion.
+    * REMOVE — `internal/adapter/outbound/metastore/postgres/` with its
+      migrations, pool, and sqlc output; drop `pgx`, `sqlc`, and `golang-migrate`
+      from the build; drop the CI Postgres service. This is the service's ONLY
+      database code, so afterwards it opens no database connection at all.
+    * REMOVE — `internal/adapter/outbound/blobstore/local/` and `.../s3/`, with
+      their config validation and env documentation.
+    * REMOVE — the standalone create/delete REST API (`001` FR-017). It is the
+      no-bus lifecycle equivalent and is already conditionally mounted; it shares
+      the Manager path with the RabbitMQ lifecycle consumer, so only the HTTP
+      surface goes and the lifecycle logic is untouched.
+    * RETAIN — `inline` blob, `inmemory` metadata, `open` auth/authz, and
+      `inmemory` fan-out. These serve the in-process test path that §III still
+      requires, and are kept on that basis rather than as standalone remnants.
+    * UPDATE — the `METADATA_STORE` / `BLOB_STORE` config enums and their
+      validation, `.env.example`, `README.md`, and `CLAUDE.md`.
+    * SUPERSEDE — mark `001` FR-017 and FR-020 superseded by this amendment in
+      the `001` spec, so the earlier spec does not silently contradict it.
+    * VERIFY — full gates green with no external services (`go build`, `go vet`,
+      `go vet -tags integration`, `golangci-lint` at zero, `go test -race ./...`),
+      and the `002` invariant suite still green and non-vacuous.
+- Version change: 1.0.1 → 2.0.0 (MAJOR — §II and §IV redefined; code compliant
+  with 1.0.1 violates 2.0.0)
+- 2.0.0 (2026-08-18): Adopt `github.com/antst/go-yjs` as the CRDT core and its
+  backend contracts. Driven by specs/003-go-yjs-core-port/ (FR-023), which is
+  unimplementable under 1.0.1 because §IV mandated `y-crdt` by name.
+  - MODIFIED §II Pluggable Ports — where the core defines a backend contract for
+    a concern, that contract IS the port: `persistence.Store` (durable content,
+    superseding the bespoke `BlobStore`), `hub.Hub` (fan-out, superseding
+    `ClusterBroadcaster`), `memory.Registry` (document identity/lifetime).
+    `MetadataStore` is retained and explicitly NOT superseded — the Alkemio index
+    carries content type, authz policy, owner and bucket, which a byte-and-revision
+    store does not model. Added two rules: implementations MUST be native (no
+    translation shims; superseded ports removed, not wrapped) and MUST pass the
+    core's conformance suites.
+  - MODIFIED §IV CRDT Correctness — core re-pointed from the `y-crdt` fork to the
+    first-party `go-yjs`. Substance preserved: one core, no reimplementation,
+    differential fuzz gate against real Yjs, v1 live / v2 durable, ≤1s convergence.
+    Clarified that the gate is the core's responsibility and is not re-verified
+    here, and that a badly-fitting contract SHOULD be fixed upstream rather than
+    worked around locally — but never diverged from silently.
+  - MODIFIED §XIV Latest Dependencies — replaced the `y-crdt` module-`replace`
+    clause. For the first-party pre-1.0 core the "latest stable" rule yields to an
+    explicit version pin, so adopting an upstream change is always deliberate.
+  - MODIFIED Technology Stack Constraints — CRDT core, fan-out, and durable-content
+    rows re-stated against the new contracts; added a document-registry row.
+  - Rationale: `y-crdt` proved inadequate and was rewritten into `go-yjs`, which
+    ships backend contracts for concerns this service had hand-built. §II and §IV
+    named the superseded core and ports directly, so they blocked the port.
+  - MIGRATION PLAN (affected code):
+    * NO DATA MIGRATION. The service has never been deployed and holds no
+      production data, so no stored state must survive and no format continuity
+      is owed. The work is a rebuild, not a conversion.
+    * ORDERING. This amendment MUST be in force before implementation begins;
+      under 1.0.1, §IV mandated `y-crdt` by name, so the port was unimplementable.
+    * REPLACE — the core dependency and the module `replace` directive that
+      redirected `skyterra/y-crdt` to the fork; `go-yjs` is a distinct module
+      path, pinned to an explicit version (§XIV).
+    * IMPLEMENT NATIVELY — `persistence.Store` over file-service, and `hub.Hub`
+      over Redis. Both MUST reach their infrastructure directly. Implementing
+      either by delegating to the port it supersedes is prohibited by §II.
+    * REMOVE, NOT WRAP — the `BlobStore` and `ClusterBroadcaster` ports and every
+      adapter behind them, once their replacements exist. No translation shim,
+      compatibility layer, or adapter-over-adapter may survive.
+    * ADOPT — `memory.Registry` for in-process document identity, acquisition,
+      eviction, and invalidation; the collaboration session is rebuilt around its
+      handle. Shutdown drain ordering, flush policy, presence, limits, authz, and
+      lifecycle-event handling remain this service's own.
+    * RETAIN — `MetadataStore`. It is NOT superseded: it carries the Alkemio
+      document index, a different concern from a byte-and-revision store. It MUST
+      NOT be repurposed as a persistence bridge.
+    * WIRE — the core's conformance suites into CI for every implementation the
+      service provides.
+    * GATE — the `002` lifecycle properties MUST still hold. Tests reaching into
+      rebuilt structures MAY be restructured but MUST NOT be weakened, and each
+      MUST be re-proven non-vacuous with the proof recorded.
+    * TRACKED BY — `specs/003-go-yjs-core-port/`.
 - Version change: 1.0.0 → 1.0.1 (PATCH — §V clarification, no principle change)
 - 1.0.1 (2026-06-20): §V Security by Design — clarify the handshake-AuthN
   rule that *missing ≠ failed*. A credential that was **presented but is
@@ -51,29 +162,73 @@ The service MUST keep horizontal scaling, persistence, and
 authorization behind clean port interfaces so each is swappable by
 configuration without touching business logic (FR-019/020/021/022).
 
-- Cross-pod fan-out MUST go through a `ClusterBroadcaster` port
-  (default `inmemory` single-pod; `redis` for multi-pod, R4).
-- The document index MUST go through a `MetadataStore` port
-  (default the Alkemio server RabbitMQ save/fetch bus; `postgres`
-  for standalone).
-- The encoded Y.Doc snapshot MUST go through a `BlobStore` port
-  (default `inline`; `file-service` / `s3` / `local` optional).
+Where the CRDT core (§IV) defines a backend contract for one of these
+concerns, **that contract IS the port**. The service MUST NOT define a
+parallel bespoke port for the same concern.
+
+- Durable document content MUST go through the core's
+  `persistence.Store` contract (backed by `file-service` / `s3` /
+  `local` / `inline`).
+- Cross-pod fan-out MUST go through the core's `hub.Hub` contract
+  (shipped in-process default single-pod; `redis` for multi-pod, R4).
+- In-process document identity, acquisition, eviction, and
+  invalidation MUST go through the core's `memory.Registry` contract.
+- The Alkemio document index MUST go through the `MetadataStore` port
+  (default the Alkemio server RabbitMQ save/fetch bus; `postgres` for
+  standalone). This is **not** superseded by `persistence.Store`: the
+  index carries content type, authorization policy, owner, and bucket,
+  which a byte-and-revision store neither models nor should.
 - Authentication and authorization MUST go through `Auth` (handshake)
   and `AuthZ` (per-document) ports.
 - Backend selection MUST be configuration-driven and the service MUST
   NOT leak backend details through its wire protocol or API.
 
-### III. Standalone-First, Alkemio-Integrated
+**Implementations MUST be native.** A contract MUST be implemented
+directly against its infrastructure. Implementing one by delegating to
+a superseded port — a `Store` that calls an older snapshot/pointer
+port, a `Hub` that wraps an older broadcaster — is prohibited.
+Superseded ports MUST be removed, not wrapped; no translation shim,
+compatibility layer, or adapter-over-adapter may survive a migration
+(§VIII, §X).
 
-The service MUST run as a single binary with zero external
-dependencies by default, AND integrate cleanly into the Alkemio
-platform when configured. Both modes are first-class.
+**Custom implementations MUST be contract-validated.** Where the core
+ships conformance suites for a contract, every implementation the
+service provides MUST pass them in CI. Choosing a shape the contract
+permits is conformant; misreporting a guarantee is not — an append
+that reports success before its bytes are durable, a load that presents
+a partial history as complete, or a fan-out that assumes ordering or
+single delivery the contract does not promise, are all violations
+regardless of whether the build and local tests pass.
 
-- The default configuration (`open` auth, `inmemory` fan-out,
-  `inline` blob) MUST boot with no database, bus, or auth service.
+### III. Alkemio-Integrated, In-Process Testable
+
+The service targets the Alkemio platform. It MUST integrate cleanly
+into it, and MUST remain runnable entirely in-process for tests.
+
+**The zero-dependency standalone deployment is NOT a supported product
+configuration.** That promise is withdrawn: it was never satisfiable,
+because the document index is owned by the Alkemio `server` and reached
+by RPC over RabbitMQ, so a real configuration always depends on that
+external service. No environment runs `server` without file-service
+either. Retaining the promise cost real complexity for a deployment
+nobody runs (§XI — No Busywork).
+
+This service holds **no database of its own and opens no database
+connection**: `server` owns the durable rows, blobs live in
+file-service, and every durable interaction is a service call.
+
+- The service MUST run entirely **in-process for tests**, with no
+  database, bus, blob store, or auth service, using in-process fixtures
+  and the core's shipped single-process defaults. This is a **test
+  capability, not a deployment mode**: it carries no durability
+  guarantee and MUST NOT be represented as a supported way to run the
+  service.
 - The Alkemio configuration MUST authenticate at the handshake from
   the Alkemio token/cookie (Oathkeeper/Kratos) and authorize per
   document via the authorization-evaluation-service.
+- Adapters that exist **solely** to serve the withdrawn standalone
+  promise are legacy under §X and MUST be removed. Adapters that also
+  serve the in-process test path are retained on that basis.
 - The service replaces `collaborative-document-service` and
   `whiteboard-collaboration-service`; it MUST serve both document
   conventions (memo `Y.XmlFragment`, whiteboard id-keyed `Y.Map`)
@@ -82,17 +237,31 @@ platform when configured. Both modes are first-class.
 
 ### IV. CRDT Correctness — One Core, Fuzz-Gated
 
-The service MUST build on the single forked Go Yjs core
-(`y-crdt`); it MUST NOT reimplement CRDT logic or carry a second
-CRDT implementation.
+The service MUST build on the single Go Yjs core
+`github.com/antst/go-yjs`; it MUST NOT reimplement CRDT logic or carry
+a second CRDT implementation.
 
+- The core is **first-party**: it is this team's own product, created by
+  rewriting the earlier `skyterra/y-crdt` fork after that fork proved
+  inadequate for this service. It supplies both the CRDT and the backend
+  contracts of §II.
 - The core is trusted in production only after its cross-implementation
-  fuzz gate against JS Yjs is green (WS-A, FR-011/SC-006).
+  differential fuzz gate against real JS Yjs is green (FR-011/SC-006).
+  That gate is the core's own responsibility and is **not re-verified
+  in this service**; encoding and merge semantics are out of scope here.
+- Yjs wire compatibility is a design guarantee of the core. What this
+  service MUST guarantee is that its own transport framing, sync
+  handshake sequencing, and awareness handling do not break it.
 - The live wire encoding is y-protocols v1; the durable snapshot
   encoding is v2 (v1 remains readable).
 - Convergence MUST hold: all connected clients reach identical document
   state ≤1s after edits settle (SC-002). Malformed/hostile updates MUST
   be rejected without divergence.
+- **Because the core is first-party, a contract that does not fit this
+  service's genuine needs SHOULD be changed in the core** rather than
+  worked around here; a poor fit is evidence about the contract, and the
+  two are designed together. Diverging *silently* — working around a
+  contract locally while leaving it unchanged upstream — is prohibited.
 
 ### V. Security by Design
 
@@ -111,7 +280,7 @@ state, making security a non-negotiable concern at every layer.
   reachable, a protected one is refused by authorization). The principle
   is *missing ≠ failed*: never treat a credential that failed validation
   as anonymous, but absence of a credential is a legitimate anonymous
-  identity, not a failure. (In `open` standalone mode everyone is
+  identity, not a failure. (In `open` test mode everyone is
   anonymous by design; in `oidc` mode a presented-but-invalid credential
   is the 401 case while absence resolves to the sentinel; in `header`
   mode a missing/empty header means the gateway did not run and is
@@ -239,9 +408,14 @@ be verified online (pkg.go.dev, GitHub releases, etc.).
   outdated.
 - Dependencies MUST be pinned to specific versions, but those versions
   MUST be current at time of addition.
-- The forked `y-crdt` core is pinned by module `replace` to a specific
-  fork commit whose fuzz gate is green; bumping it MUST re-verify the
-  gate.
+- The `go-yjs` core is **first-party and pre-1.0**, so its shape may
+  change. It MUST be pinned to a specific version, and bumping it MUST
+  re-verify the differential fuzz gate (§IV).
+- For that core only, the "latest stable" rule yields to the explicit
+  pin: upstream changes there are coordinated design decisions made by
+  this team, not external releases to track. The pin exists so that
+  adopting such a change is always a deliberate act here, never an
+  implicit one.
 
 ### XV. No Assumptions
 
@@ -274,8 +448,11 @@ VII–XV):
 11. Do not use `map[string]any` for HTTP response bodies — use named
     structs with JSON tags and a `Render(w http.ResponseWriter)` method.
     This enables OpenAPI spec generation and compile-time type safety.
-12. Do not reimplement CRDT logic — the forked `y-crdt` core is the
-    single source of CRDT behavior.
+12. Do not reimplement CRDT logic — the `go-yjs` core is the single
+    source of CRDT behavior.
+12a. Do not implement a core contract by delegating to a superseded
+    port, and do not keep a superseded port alive behind a shim —
+    implement natively and delete what it replaces (§II).
 13. Do not fail open on an authorization error — fail closed.
 
 ## Technology Stack Constraints
@@ -287,19 +464,20 @@ without a constitution amendment:
 |-------------------|-----------------------------------------------------|
 | Language          | Go 1.26                                             |
 | Architecture      | Hexagonal (ports/adapters)                          |
-| CRDT core         | Forked `skyterra/y-crdt` (pure Go Yjs + v2 codec)   |
+| CRDT core         | `github.com/antst/go-yjs` (first-party Go Yjs, v1+v2 codecs) |
 | WebSocket         | `coder/websocket`                                   |
 | HTTP router       | chi v5                                              |
 | Logging           | Zap (structured JSON)                               |
 | Metrics           | Prometheus (`/metrics`)                             |
-| Fan-out           | in-memory (default), Redis (multi-pod)              |
-| Metadata store    | RabbitMQ→server (default), Postgres (standalone)    |
-| Blob store        | inline (default), file-service / S3 / local         |
+| Fan-out           | `hub.Hub`: shipped in-process (default), Redis (multi-pod) |
+| Metadata store    | `MetadataStore`: RabbitMQ→server (the Alkemio system of record) |
+| Document registry | `memory.Registry` (shipped in-process implementation) |
+| Durable content   | `persistence.Store`: inline (default), file-service / S3 / local |
 | DB driver (PG)    | pgx v5                                              |
 | Query generation  | sqlc                                                |
 | Migrations        | golang-migrate                                      |
 | Messaging         | amqp091 (RabbitMQ), NATS (auth fallback)            |
-| Authorization     | authorization-evaluation-service (h2c HTTP/2 preferred, or NATS); `open` for standalone |
+| Authorization     | authorization-evaluation-service (h2c HTTP/2 preferred, or NATS); `open` for in-process tests |
 | Circuit breaker   | sony/gobreaker v2                                   |
 
 Additional dependencies SHOULD be minimized. The Go standard library
@@ -333,9 +511,13 @@ The collaboration service integrates with the following systems:
   closed.
 
 **file-service** (Go, existing — no code change):
-- Optional `BlobStore` backend via its existing PUT/GET API; expanding
-  it is pre-authorized if the blob store needs a capability it does not
-  yet expose.
+- Optional durable-content backend for `persistence.Store` via its
+  existing PUT/GET API; expanding it is pre-authorized if the store
+  needs a capability it does not yet expose.
+- Its contract with this service is **store blob, read blob**. Blob
+  retention, expiry, and reclamation of superseded blobs are the
+  file-service's own concern; this service MUST NOT model or manage
+  them, and exposes no document-history or restore surface.
 
 ## Governance
 
@@ -354,4 +536,4 @@ informal conventions and ad-hoc decisions.
 - **Review cadence**: The constitution SHOULD be reviewed quarterly or
   when significant architectural decisions arise.
 
-**Version**: 1.0.1 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-20
+**Version**: 3.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-08-18
