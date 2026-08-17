@@ -14,6 +14,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
@@ -65,6 +66,11 @@ type Consumer struct {
 
 	conn *amqp.Connection
 	ch   *amqp.Channel
+
+	// handlerTimeout bounds the processing context of a single delivery (resolved
+	// from Config.HandlerTimeout, defaulting to DefaultHandlerTimeout) so one stuck
+	// event cannot head-of-line-block the single-threaded consume loop.
+	handlerTimeout time.Duration
 }
 
 // ackAction tells consume how to acknowledge a delivery after handle processed it.
@@ -97,7 +103,7 @@ func (c *Consumer) handle(ctx context.Context, body []byte) ackAction {
 	case PatternDocumentCreated:
 		return c.handleCreated(ctx, env.Data)
 	case PatternDocumentAccessChanged:
-		c.handleAccessChanged(env.Data)
+		c.handleAccessChanged(ctx, env.Data)
 		return ackSuccess
 	default:
 		// Not a lifecycle event — ack (nothing to retry).
@@ -154,10 +160,10 @@ func normalizeContentType(raw string, logger *zap.Logger, docID string) model.Co
 	}
 }
 
-func (c *Consumer) handleAccessChanged(data json.RawMessage) {
+func (c *Consumer) handleAccessChanged(ctx context.Context, data json.RawMessage) {
 	var ev AccessChangedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
 		return
 	}
-	c.mgr.ReEvaluate(model.DocumentID(ev.ID))
+	c.mgr.ReEvaluate(ctx, model.DocumentID(ev.ID))
 }

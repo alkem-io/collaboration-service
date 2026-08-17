@@ -98,6 +98,30 @@ func TestPointerTraversalRejected(t *testing.T) {
 	}
 }
 
+// TestEmptyOrRootPointerRejected defends resolve's empty/root guard: an empty (or
+// "."/"/"-only) pointer cleans to the root directory itself, so without the guard
+// Put/Get/Delete would target the blob ROOT (a directory) instead of a snapshot
+// file. resolve must reject it up front.
+//
+// Non-vacuity: remove the `clean == "." || clean == os.PathSeparator` guard in
+// resolve and the empty-pointer cases below stop erroring — resolve returns the
+// root path, so the operations target the directory and these assertions fail.
+func TestEmptyOrRootPointerRejected(t *testing.T) {
+	store, _ := New(t.TempDir())
+	ctx := context.Background()
+	for _, p := range []string{"", ".", "/", "//"} {
+		if _, err := store.Put(ctx, p, "", []byte("x")); err == nil {
+			t.Errorf("Put(%q): expected an empty/root pointer rejection", p)
+		}
+		if _, err := store.Get(ctx, p); err == nil {
+			t.Errorf("Get(%q): expected an empty/root pointer rejection", p)
+		}
+		if err := store.Delete(ctx, p); err == nil {
+			t.Errorf("Delete(%q): expected an empty/root pointer rejection", p)
+		}
+	}
+}
+
 func TestNestedPointer(t *testing.T) {
 	store, _ := New(t.TempDir())
 	ctx := context.Background()

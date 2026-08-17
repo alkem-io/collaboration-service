@@ -57,7 +57,7 @@ func (r *Room) sweepInactive() {
 func (r *Room) sendModeDowngrade(m roomMember, reason model.CollaboratorModeReason) {
 	if frame := encodeControl(model.ControlMessage{
 		Kind:     model.ControlReadOnlyState,
-		ReadOnly: true,
+		ReadOnly: model.ReadOnlyState(true),
 		Reason:   reason,
 	}); frame != nil {
 		r.sendMember(m, frame)
@@ -173,7 +173,7 @@ func (r *Room) purge(ctx context.Context) error {
 func mustReadOnlyControl(readOnly bool, reason model.ReadOnlyReason) []byte {
 	return encodeControl(model.ControlMessage{
 		Kind:     model.ControlReadOnlyState,
-		ReadOnly: readOnly,
+		ReadOnly: model.ReadOnlyState(readOnly),
 		Reason:   reason,
 	})
 }

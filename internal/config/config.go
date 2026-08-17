@@ -456,6 +456,15 @@ func loadBlobStoreConfig(cfg *Config) error {
 		if err != nil {
 			return err
 		}
+		// A negative cap is a configuration error, not a disable: the fileservice
+		// Put guard is `limit > 0`, so a negative MAX_UPLOAD_SIZE silently turns the
+		// upload cap OFF (uploads of any size pass) rather than rejecting oversize
+		// snapshots. Use 0 to mean "fall back to file-service's own ceiling" — reject
+		// anything below it, consistently with loadLimitsConfig (§XV: no silent
+		// safety-limit corruption).
+		if maxUpload < 0 {
+			return fmt.Errorf("MAX_UPLOAD_SIZE must be >= 0 (0 uses file-service's default ceiling)")
+		}
 		cfg.FileService = FileServiceConfig{
 			BaseURL:         os.Getenv("FILE_SERVICE_URL"),
 			StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),

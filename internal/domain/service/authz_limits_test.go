@@ -282,7 +282,7 @@ func TestReEvaluateDowngradesOnAccessChange(t *testing.T) {
 
 	// Revoke update-content, then trigger a re-evaluation.
 	authz.set(allow, deny)
-	mgr.ReEvaluate("access-change")
+	mgr.ReEvaluate(context.Background(), "access-change")
 
 	waitFor(t, "downgrade on access change", func() bool { return hasReadOnly(a, true) })
 }
@@ -306,7 +306,7 @@ func TestReEvaluateUpgradesOnAccessChange(t *testing.T) {
 
 	// Grant update-content, then re-evaluate → upgrade to collaborator.
 	authz.set(allow, allow)
-	mgr.ReEvaluate("upgrade")
+	mgr.ReEvaluate(context.Background(), "upgrade")
 
 	waitFor(t, "upgrade clears read-only", func() bool { return hasReadOnly(a, false) })
 }
@@ -324,7 +324,7 @@ func TestReEvaluateFailsClosed(t *testing.T) {
 	a.observeUpdates()
 
 	authz.setErr(errors.New("auth service degraded"))
-	mgr.ReEvaluate("authz-flaps")
+	mgr.ReEvaluate(context.Background(), "authz-flaps")
 
 	waitFor(t, "fail-closed downgrade", func() bool { return hasReadOnly(a, true) })
 }
@@ -346,7 +346,7 @@ func TestReEvaluateDisconnectsOnReadRevocation(t *testing.T) {
 
 	// Revoke READ (and update-content), then trigger a re-evaluation.
 	authz.set(deny, deny)
-	mgr.ReEvaluate("read-revoked")
+	mgr.ReEvaluate(context.Background(), "read-revoked")
 
 	// The member is ejected with a room-closed control carrying the revoke reason —
 	// NOT merely downgraded to a read-only viewer.
@@ -388,7 +388,7 @@ func TestReEvaluateDisconnectsAllReadRevokedMembers(t *testing.T) {
 	b.observeUpdates()
 
 	authz.set(deny, deny) // revoke read for everyone
-	mgr.ReEvaluate("multi-revoke")
+	mgr.ReEvaluate(context.Background(), "multi-revoke")
 
 	closed := func(c *fakeClient) bool {
 		for _, m := range controlMessages(c) {

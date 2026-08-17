@@ -162,6 +162,30 @@ func TestEvaluateUnknownDocumentFailsClosed(t *testing.T) {
 	}
 }
 
+// TestEvaluateNilResolverFailsClosed asserts a nil policy resolver makes Evaluate
+// fail CLOSED (return an error) rather than nil-panic in the auth path. A panic in
+// authorization is strictly worse than a deny.
+//
+// Non-vacuity: remove the `if a.policies == nil` guard in Evaluate and this test
+// panics instead of returning an error — the deferred recover then reports
+// "Evaluate nil-panicked instead of failing closed", failing the test.
+func TestEvaluateNilResolverFailsClosed(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Evaluate nil-panicked instead of failing closed: %v", r)
+		}
+	}()
+	// New stores the resolver verbatim, so a nil PolicyResolver ⇒ a.policies == nil.
+	adapter := New(Config{ServiceURL: "http://127.0.0.1:0"}, nil)
+	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	if err == nil {
+		t.Fatal("expected a fail-closed error with a nil policy resolver, got nil")
+	}
+	if dec.Allowed {
+		t.Fatal("a nil resolver must never yield an Allowed decision")
+	}
+}
+
 func TestEvaluateOpenBreakerFailsClosed(t *testing.T) {
 	// After enough consecutive failures the breaker opens and short-circuits;
 	// the adapter must keep returning errors (never a stale allow).

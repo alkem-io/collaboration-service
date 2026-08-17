@@ -6,6 +6,7 @@ import (
 	"time"
 
 	ycrdt "github.com/skyterra/y-crdt"
+	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
@@ -256,4 +257,66 @@ func TestRoomFreshWithoutSeedStaysEmpty(t *testing.T) {
 	if hasControlKind(c, model.ControlSaveError) {
 		t.Fatal("fresh empty document emitted a save-error")
 	}
+}
+
+// TestConventionUsesPersistedTypeOverStaleHandshake is the regression for the
+// stale-handshake convention bug: a WHITEBOARD pre-registered (document.created /
+// HTTP-create) with NO snapshot and NO seed, opened by a client that omits ?type=
+// (which the WS adapter defaults to MEMO), must still materialize the WHITEBOARD
+// convention roots — because loadSnapshot corrects r.content to the persisted
+// meta.ContentType (the persisted type wins per the documented contract) and
+// applyConvention now seeds off r.content, not the stale handshake parameter.
+//
+// Fail-before/pass-after: with the previous applyConvention(doc, content) the room
+// seeded the MEMO root (a spurious Y.XmlFragment "default") instead of the
+// whiteboard roots (elements/files/appState) — a durable wrong-type root that
+// defeats applyConvention's anti-race guarantee. We inspect doc.Share directly
+// (NOT GetMap/GetXmlFragment, which are get-or-create and would mask the bug) so
+// the assertion sees only the roots the convention actually materialized.
+func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
+	t.Parallel()
+	const docID = "wb-no-type"
+
+	deps := newTestDeps()
+	// Pre-register the document as a WHITEBOARD with no ContentPointer and no seed —
+	// the "created, never opened in a session" state.
+	if err := deps.meta.Save(context.Background(), model.Metadata{
+		ID:          docID,
+		ContentType: model.ContentTypeWhiteboard,
+		BlobStore:   model.BlobStoreInline,
+	}); err != nil {
+		t.Fatalf("pre-register whiteboard: %v", err)
+	}
+
+	// Build the room with the STALE handshake type the WS adapter yields for an
+	// omitted ?type= (memo). loadSnapshot must correct r.content to whiteboard, and
+	// applyConvention must seed the whiteboard roots off the corrected type.
+	room, err := newRoom(context.Background(), docID, model.ContentTypeMemo, deps.Deps, DefaultRoomConfig(), nil, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newRoom: %v", err)
+	}
+	t.Cleanup(room.finish)
+
+	if room.content != model.ContentTypeWhiteboard {
+		t.Fatalf("room.content = %q, want whiteboard (persisted type must win over the stale handshake)", room.content)
+	}
+	// The whiteboard convention roots exist; the memo "default" fragment does NOT.
+	for _, root := range []string{"elements", "files", "appState"} {
+		if _, ok := room.doc.Share[root]; !ok {
+			t.Fatalf("whiteboard root %q was not materialized; doc.Share has %v", root, shareKeys(room.doc))
+		}
+	}
+	if _, ok := room.doc.Share["default"]; ok {
+		t.Fatalf("the stale memo convention root \"default\" was materialized for a whiteboard doc; doc.Share has %v", shareKeys(room.doc))
+	}
+}
+
+// shareKeys lists the root share names materialized on a doc, for assertion
+// messages.
+func shareKeys(doc *ycrdt.Doc) []string {
+	keys := make([]string, 0, len(doc.Share))
+	for k := range doc.Share {
+		keys = append(keys, k)
+	}
+	return keys
 }

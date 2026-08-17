@@ -116,7 +116,7 @@ func TestPreRegisterWritesMetadata(t *testing.T) {
 // room does not panic or block (document.access_changed for an idle doc).
 func TestReEvaluateNoLiveRoomIsNoOp(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
-	mgr.ReEvaluate("not-live") // must not panic
+	mgr.ReEvaluate(context.Background(), "not-live") // must not panic
 }
 
 // TestPurgeLiveRoomSurfacesBlobError asserts a blob-delete failure during the

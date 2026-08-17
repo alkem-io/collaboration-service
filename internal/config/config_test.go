@@ -253,6 +253,42 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 	}
 }
 
+// TestMaxUploadSizeRejectsNegative asserts a negative MAX_UPLOAD_SIZE fails fast
+// rather than silently disabling the upload cap. The fileservice Put guard is
+// `limit > 0`, so a negative value would turn oversize rejection OFF (any-size
+// uploads pass) — a safety-limit corruption, not a disable (0 means "use
+// file-service's default ceiling").
+//
+// Non-vacuity: remove the `if maxUpload < 0` guard in loadBlobStoreConfig and this
+// test fails — Load returns nil for MAX_UPLOAD_SIZE=-1, admitting an uncapped store.
+func TestMaxUploadSizeRejectsNegative(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
+	t.Setenv("MAX_UPLOAD_SIZE", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("MAX_UPLOAD_SIZE=-1: expected a fail-fast error (negative disables the cap), got nil")
+	}
+}
+
+// TestMaxUploadSizeZeroIsAllowed asserts 0 is accepted: it is the documented
+// "fall back to file-service's own 32 MiB ceiling" sentinel, not an error.
+func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
+	t.Setenv("MAX_UPLOAD_SIZE", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("MAX_UPLOAD_SIZE=0 should be accepted (use file-service default): %v", err)
+	}
+	if cfg.FileService.MaxUploadSize != 0 {
+		t.Fatalf("MaxUploadSize = %d, want 0", cfg.FileService.MaxUploadSize)
+	}
+}
+
 func TestS3RequiresBucketAndRegion(t *testing.T) {
 	t.Setenv("BLOB_STORE", "s3")
 	t.Setenv("S3_BUCKET", "")

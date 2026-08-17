@@ -103,6 +103,71 @@ func TestClientCallRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCallFailsFastWhenReplyConsumerClosesMidFlight defends failAllPending's drain
+// of an IN-FLIGHT waiter (the case the sibling fast-fail test does NOT cover: that
+// one calls Call AFTER closed is already set). Here a Call is already blocked in
+// its select{ctx.Done(); waiter} — published, no reply yet — when the reply
+// consumer exits. failAllPending must push an error onto that registered waiter so
+// the Call returns immediately, rather than each in-flight Call waiting out its
+// full timeout while pending stays occupied.
+//
+// Non-vacuity: replace failAllPending's body with just `c.mu.Lock(); c.closed =
+// true; c.pending = map[string]chan nestReply{}; c.mu.Unlock()` (mark closed +
+// clear, WITHOUT sending on each waiter) and this test fails — the blocked Call
+// gets nothing on its waiter and runs to the 10s timeout, tripping the 2s
+// "did not fail fast" watchdog.
+func TestCallFailsFastWhenReplyConsumerClosesMidFlight(t *testing.T) {
+	// Long timeout: a correct fast-fail returns in well under it; a regression that
+	// fails to drain the in-flight waiter would block on it (caught by the watchdog).
+	c := &Client{
+		replyQ: "r", serverQueue: "s", timeout: 10 * time.Second,
+		pending: make(map[string]chan nestReply),
+	}
+	c.ch = &fakeChannel{} // no client wired → publish succeeds but never auto-replies.
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.Call(context.Background(), PatternFetch, FetchData{ID: "in-flight"}, &FetchReply{})
+	}()
+
+	// Wait until the Call has registered its waiter and is blocked in the select
+	// (published, awaiting a reply) — only then is the in-flight drain meaningful.
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.pending) == 1
+	})
+
+	// The reply consumer exits (broker/channel drop): every outstanding waiter must
+	// be failed, including this in-flight one.
+	c.failAllPending()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("in-flight Call returned nil after the reply consumer closed; want an error")
+		}
+		if !strings.Contains(err.Error(), "closed") {
+			t.Fatalf("in-flight Call error = %v, want a reply-channel-closed error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight Call did not fail fast after the reply consumer closed (waited out its timeout — failAllPending did not drain the registered waiter)")
+	}
+}
+
+// waitFor polls cond up to 2s, failing the test if it never holds.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition never became true within 2s")
+}
+
 func TestClientCallPublishError(t *testing.T) {
 	c, ch := newFakeClient(SaveReply{Success: true})
 	ch.pubErr = errors.New("channel closed")

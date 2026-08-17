@@ -30,7 +30,7 @@ func (f *fakeManager) Purge(_ context.Context, id model.DocumentID) error {
 	return f.purgeErr
 }
 
-func (f *fakeManager) ReEvaluate(id model.DocumentID) {
+func (f *fakeManager) ReEvaluate(_ context.Context, id model.DocumentID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reEvaluated = append(f.reEvaluated, id)

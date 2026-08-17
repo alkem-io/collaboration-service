@@ -9,6 +9,7 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -143,7 +144,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content := contentTypeFromRequest(r)
+	content, err := contentTypeFromRequest(r)
+	if err != nil {
+		// An EXPLICIT but invalid ?type= is rejected pre-upgrade with a 400, mirroring
+		// the REST create contract (resolveContentType → 400 on unknown). Silently
+		// defaulting an unknown type to memo would, for a brand-new (no-snapshot)
+		// document, seed the wrong convention root and diverge the two creation paths.
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	conn, err := websocket.Accept(w, r, h.AcceptOptions)
 	if err != nil {
@@ -244,16 +253,21 @@ func joinCloseStatus(err error) (websocket.StatusCode, string) {
 }
 
 // contentTypeFromRequest resolves the document content type from the optional
-// ?type= query param (memo|whiteboard), defaulting to memo. The persisted
-// metadata's content type wins once a document has been saved; this only seeds a
-// brand-new document's convention (T010). The authzeval adapter (T006) will
-// instead source it from the metadata index.
-func contentTypeFromRequest(r *http.Request) model.ContentType {
-	switch model.ContentType(r.URL.Query().Get("type")) {
+// ?type= query param (memo|whiteboard). An ABSENT/empty value defaults to memo;
+// an EXPLICIT but unknown value is an error (a 400 at the handshake), mirroring the
+// REST create contract (resolveContentType) so the two creation paths agree rather
+// than one silently seeding the wrong convention. The persisted metadata's content
+// type still wins once a document has been saved; this only seeds a brand-new
+// document's convention (T010). The authzeval adapter (T006) will instead source it
+// from the metadata index.
+func contentTypeFromRequest(r *http.Request) (model.ContentType, error) {
+	switch t := model.ContentType(r.URL.Query().Get("type")); t {
+	case "", model.ContentTypeMemo:
+		return model.ContentTypeMemo, nil
 	case model.ContentTypeWhiteboard:
-		return model.ContentTypeWhiteboard
+		return model.ContentTypeWhiteboard, nil
 	default:
-		return model.ContentTypeMemo
+		return "", fmt.Errorf("type must be one of memo, whiteboard")
 	}
 }
 

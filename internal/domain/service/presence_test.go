@@ -119,7 +119,11 @@ func hasReadOnly(c *fakeClient, readOnly bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, m := range c.control {
-		if m.Kind == model.ControlReadOnlyState && m.ReadOnly == readOnly {
+		// ReadOnly is a *bool on the wire: nil means the frame carries no read-only
+		// state (skip it), so match only frames whose explicit value equals the one
+		// asked for. This is what lets the test distinguish a regain (false) frame
+		// from a frame that never set readOnly at all.
+		if m.Kind == model.ControlReadOnlyState && m.ReadOnly != nil && *m.ReadOnly == readOnly {
 			return true
 		}
 	}

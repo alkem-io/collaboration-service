@@ -37,6 +37,21 @@ func (s *Store) Load(_ context.Context, id model.DocumentID) (model.Metadata, er
 }
 
 // Save upserts the index row, bumping its version and updated-at timestamp.
+//
+// On conflict it preserves the existing value of every column the incoming
+// Metadata leaves BLANK, mirroring the postgres adapter's
+// COALESCE(NULLIF(EXCLUDED.x,”), existing) upsert — one canonical save behavior
+// across backends. This matters because two callers Save partial rows:
+//   - a per-snapshot persist (Room.persist) carries content_pointer/blob_store but
+//     historically blank lifecycle fields; and
+//   - a (re)delivered document.created pre-register carries owner_ref/content_type
+//     but a blank content_pointer.
+//
+// Without "blank = unchanged", a wholesale row replace would let the first snapshot
+// save wipe the pre-registered owner_ref (the delete cascade key, FR-023), and a
+// REDELIVERED document.created wipe the live content_pointer back to "" (orphaning
+// the persisted blob and bumping the version). A non-blank value still wins (a
+// genuine update).
 func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -44,6 +59,7 @@ func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 	if existing, ok := s.rows[meta.ID]; ok {
 		meta.CreatedAt = existing.CreatedAt
 		meta.Version = existing.Version + 1
+		meta = coalesceBlank(meta, existing)
 	} else {
 		meta.CreatedAt = now
 		if meta.Version == 0 {
@@ -53,6 +69,36 @@ func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 	meta.UpdatedAt = now
 	s.rows[meta.ID] = meta
 	return nil
+}
+
+// coalesceBlank fills the blank fields of an incoming upsert from the existing
+// row, so a Save that carries only a subset of the columns does not clobber the
+// rest to their zero value. It mirrors the postgres upsert's
+// COALESCE(NULLIF(EXCLUDED.x,”), existing) per preserved column. Version,
+// CreatedAt, and UpdatedAt are managed by Save and intentionally excluded.
+func coalesceBlank(in, existing model.Metadata) model.Metadata {
+	if in.ContentType == "" {
+		in.ContentType = existing.ContentType
+	}
+	if in.ContentPointer == "" {
+		in.ContentPointer = existing.ContentPointer
+	}
+	if in.BlobStore == "" {
+		in.BlobStore = existing.BlobStore
+	}
+	if in.AuthorizationPolicyID == "" {
+		in.AuthorizationPolicyID = existing.AuthorizationPolicyID
+	}
+	if in.OwnerRef == "" {
+		in.OwnerRef = existing.OwnerRef
+	}
+	if in.StorageBucketID == "" {
+		in.StorageBucketID = existing.StorageBucketID
+	}
+	if len(in.SeedContent) == 0 {
+		in.SeedContent = existing.SeedContent
+	}
+	return in
 }
 
 // Delete removes the index row for id. Idempotent.

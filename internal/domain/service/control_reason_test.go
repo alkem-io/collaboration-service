@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func readOnlyReason(c *fakeClient) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, m := range c.control {
-		if m.Kind == model.ControlReadOnlyState && m.ReadOnly {
+		if m.Kind == model.ControlReadOnlyState && m.IsReadOnly() {
 			return m.Reason, true
 		}
 	}
@@ -123,7 +124,7 @@ func TestReEvaluateDowngradeReason(t *testing.T) {
 	a.observeUpdates()
 
 	authz.set(allow, deny)
-	mgr.ReEvaluate("reeval-reason")
+	mgr.ReEvaluate(context.Background(), "reeval-reason")
 
 	waitFor(t, "downgrade on access change", func() bool {
 		_, ok := readOnlyReason(a)
@@ -151,7 +152,7 @@ func TestReEvaluateUpgradeClearsReason(t *testing.T) {
 	waitFor(t, "viewer read-only on join", func() bool { return hasReadOnly(a, true) })
 
 	authz.set(allow, allow)
-	mgr.ReEvaluate("upgrade-reason")
+	mgr.ReEvaluate(context.Background(), "upgrade-reason")
 
 	waitFor(t, "upgrade clears read-only", func() bool { return hasReadOnly(a, false) })
 
@@ -159,7 +160,8 @@ func TestReEvaluateUpgradeClearsReason(t *testing.T) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, m := range a.control {
-		if m.Kind == model.ControlReadOnlyState && !m.ReadOnly && m.Reason != "" {
+		// An explicit-false (regain/clear) read-only-state frame must carry no reason.
+		if m.Kind == model.ControlReadOnlyState && m.ReadOnly != nil && !*m.ReadOnly && m.Reason != "" {
 			t.Fatalf("read-only clear frame carried a reason %q, want empty", m.Reason)
 		}
 	}
@@ -190,7 +192,7 @@ func TestReEvaluateFailClosedReason(t *testing.T) {
 	a.observeUpdates()
 
 	authz.setErr(errors.New("auth degraded"))
-	mgr.ReEvaluate("reeval-failclosed")
+	mgr.ReEvaluate(context.Background(), "reeval-failclosed")
 
 	waitFor(t, "fail-closed downgrade", func() bool {
 		_, ok := readOnlyReason(a)

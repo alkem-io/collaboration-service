@@ -88,10 +88,9 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 		// then get evicted "after the fact". Scratch-apply the update onto a clone
 		// of the current state and measure; reject without touching r.doc when the
 		// result would exceed the limit.
-		if r.applyWouldExceedMaxDocBytes(update) {
+		if !r.applyUpdate(update, updateOrigin{src: src}) {
 			return syncOutcome{mutating: true, applied: false, rejectedTooLarge: true}, nil
 		}
-		ycrdt.ApplyUpdate(r.doc, update, updateOrigin{src: src})
 		return syncOutcome{mutating: true, applied: true}, nil
 	}
 

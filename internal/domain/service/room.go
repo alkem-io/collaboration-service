@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	ycrdt "github.com/skyterra/y-crdt"
@@ -54,10 +53,7 @@ type command struct {
 	conn     Conn
 	identity model.Identity
 	data     []byte
-	// ephemeral distinguishes a peer-pod doc payload (false → doc:{id}) from a
-	// peer-pod awareness/ephemeral payload (true → awareness:{id}) for cmdPeer.
-	ephemeral bool
-	done      chan joinResult
+	done     chan joinResult
 	// done2 returns the result of a cmdPurge run on the room loop (T015).
 	done2 chan error
 }
@@ -68,7 +64,6 @@ const (
 	cmdJoin cmdKind = iota
 	cmdLeave
 	cmdMessage
-	cmdPeer
 	cmdPersist
 	cmdClose
 	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
@@ -78,6 +73,14 @@ const (
 	// loop (lifecycle document.access_changed, T014).
 	cmdReEvaluate
 )
+
+// peerUpdate is a fan-out payload received from another pod. It is delivered to the
+// run loop via the bounded peerUpdates queue (NOT enqueue), so the subscribe
+// goroutine never calls back into the loop (002 FR-009 — decoupled fan-out).
+type peerUpdate struct {
+	data      []byte
+	ephemeral bool
+}
 
 // joinResult is returned to a joining connection: its room-local id plus the
 // initial frames (SyncStep1 + the current awareness state) it must send to
@@ -125,6 +128,11 @@ type Room struct {
 	logger    *zap.Logger
 
 	commands chan command
+	// peerUpdates is the bounded queue of cross-pod fan-out payloads (002 FR-009):
+	// the subscribe goroutine writes here, the run loop drains it. DECOUPLED from
+	// commands/enqueue so the subscribe goroutine never calls back into the loop —
+	// making the run-loop↔subscribe↔teardown circular wait impossible.
+	peerUpdates chan peerUpdate
 	// done is closed by the run loop on teardown so producers (Forward/Leave)
 	// never block on commands after the room is gone.
 	done    chan struct{}
@@ -134,6 +142,14 @@ type Room struct {
 	// dirty is set when the doc changed since the last persisted snapshot;
 	// it drives the debounce timer and the final save-on-release.
 	dirty bool
+	// docBytes is the live doc's last known encoded-v2 size, used by
+	// applyWouldExceedMaxDocBytes as a cheap sound bound so the O(docsize) budget
+	// re-encode is skipped while the doc has headroom under MaxDocBytes. It is set
+	// from the authoritative encode whenever the exact budget check or a persist
+	// runs, and conservatively over-counted by len(update) on each accepted apply
+	// so it never under-estimates the true size between exact checks. Zero means
+	// "not yet established" — the cheap skip then defers to the exact check.
+	docBytes int
 	// seededPending is true when the room materialized from the first-open seed
 	// (Metadata.SeedContent) and that seed has not yet been promoted to a real
 	// per-document snapshot. The run loop arms the save debounce once at start so
@@ -150,6 +166,13 @@ type Room struct {
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
 	policyID string
+	// ownerRef is the parent Alkemio entity that owns the document's lifecycle
+	// (FR-023), loaded from metadata (set at pre-register) and re-persisted on every
+	// snapshot save so a per-snapshot persist carries it forward rather than dropping
+	// it. Without this round-trip the first snapshot save rebuilds Metadata with a
+	// blank OwnerRef, and a wholesale-replace metadata store (in-memory) wipes the
+	// pre-registered owner_ref the delete cascade keys off.
+	ownerRef string
 	// bucketID is the document's own storage bucket, loaded from metadata and
 	// passed to BlobStore.Put so each snapshot is persisted into the document's
 	// own bucket (not a single flat platform bucket). Empty in standalone /
@@ -183,8 +206,12 @@ type Room struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// released guards against double release notification.
-	released atomic.Bool
+	// lc is the explicit lifecycle state (002 redesign): Materializing during
+	// newRoom, Active while serving, Draining through teardown, Closed once released.
+	// It replaces the old `released` bool — beginTeardown is the idempotent teardown
+	// guard, and enqueue gates on Active so a tearing-down room refuses new work
+	// before done is even closed.
+	lc lifecycle
 }
 
 // opCtx returns a timeout-bounded context for a single backend call made on the
@@ -252,18 +279,47 @@ func (r *Room) purgeNow() error {
 	return r.purge(ctx)
 }
 
-// enqueue submits a command to the run loop, returning false if the room has
-// already torn down (so producers never block on a dead room's full channel).
+// enqueueDeadline backstops a producer blocked on a full command channel (002
+// FR-008): the loop stays drained because every handler is bounded, so this rarely
+// fires, but a producer must never wait forever on a wedged loop.
+const enqueueDeadline = 30 * time.Second
+
+// enqueue submits a command to the run loop, returning false if the room has torn
+// down or the deadline backstop elapses (so producers never block forever on a full
+// channel).
 func (r *Room) enqueue(cmd command) bool {
-	select {
-	case <-r.done:
+	return r.enqueueCtx(context.Background(), cmd)
+}
+
+// enqueueCtx submits a command to the run loop, returning false if the room has torn
+// down (state left Active) OR the producer's context/deadline elapses before a
+// buffer slot frees. The state check refuses new work BEFORE done is closed, so a
+// tearing-down room rejects producers early and Join/Purge retry into a fresh room.
+func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
+	if !r.lc.is(stateActive) {
 		return false
-	default:
 	}
+	// Fast path: an immediate send when the buffer has space — the common case, no timer.
 	select {
 	case r.commands <- cmd:
 		return true
 	case <-r.done:
+		return false
+	default:
+	}
+	// Slow path: the command buffer is full. Bounded-block so a producer (Forward /
+	// Leave / ReEvaluate) is never wedged behind a stuck loop — it gives up at the
+	// caller's ctx (e.g. the lifecycle handler timeout) or the deadline backstop.
+	t := time.NewTimer(enqueueDeadline)
+	defer t.Stop()
+	select {
+	case r.commands <- cmd:
+		return true
+	case <-r.done:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-t.C:
 		return false
 	}
 }
@@ -336,6 +392,13 @@ const (
 	// loop. Generous enough for a slow-but-alive backend; far below any human-
 	// noticeable room stall.
 	defaultBackendTimeout = 30 * time.Second
+	// budgetSkipSlack is the fixed headroom (on top of the 2x update-length margin)
+	// the cheap MaxDocBytes short-circuit requires before skipping the exact
+	// O(docsize) re-encode. It absorbs the small per-snapshot v2 framing/varint
+	// overhead so the skip stays sound even at tiny limits; it is negligible against
+	// the ~32 MiB production cap, so the skip still fires on essentially every edit
+	// until the doc nears half the cap.
+	budgetSkipSlack = 1024
 )
 
 // DefaultLimits are the epic R9 defaults (all config-tunable, OPEN-4).
@@ -407,6 +470,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		metrics:      metrics,
 		logger:       logger,
 		commands:     make(chan command, 256),
+		peerUpdates:  make(chan peerUpdate, 256),
 		done:         make(chan struct{}),
 		members:      make(map[connID]roomMember),
 		blobKind:     blobKind,
@@ -416,14 +480,29 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		cancel:       cancel,
 	}
 
-	if err := r.loadSnapshot(ctx); err != nil {
+	// Bound the materialization I/O (metadata load + blob fetch) so a hung backend
+	// cannot park the first-connect cohort indefinitely — the run loop's per-call
+	// opCtx bound is otherwise applied only after the room starts (002 FR-006/FR-010).
+	loadCtx, loadCancel := r.opCtx()
+	err := r.loadSnapshot(loadCtx)
+	loadCancel()
+	if err != nil {
 		cancel()
 		return nil, err
 	}
 
-	// Apply the document-type convention to a freshly created (empty) doc so
-	// the root shared type exists with the right shape (T010).
-	applyConvention(doc, content)
+	// Apply the document-type convention to a freshly created (empty) doc so the
+	// root shared type exists with the right shape (T010). Use r.content, NOT the
+	// `content` handshake parameter: loadSnapshot has already corrected r.content to
+	// the PERSISTED meta.ContentType (the persisted type wins per the documented
+	// contract), so seeding the convention off the stale handshake value would, for a
+	// document pre-registered as whiteboard but opened by a client that omits ?type=
+	// (which the WS adapter defaults to memo), materialize the MEMO root — a spurious
+	// Y.XmlFragment "default" instead of the whiteboard roots (elements/files/
+	// appState). That is a durable wrong-type root that defeats applyConvention's
+	// anti-race guarantee; persist() already keys off r.content, so only the
+	// convention was inconsistent.
+	applyConvention(doc, r.content)
 
 	// Observe applied updates and fan them out. The observer runs synchronously
 	// inside ApplyUpdate on the run-loop goroutine, so reading members here is
@@ -433,12 +512,22 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	}))
 
 	// Subscribe to peer-pod fan-out (R4) under the room-lifetime context so the
-	// subscription tracks the room (not the bootstrap request). The handler runs
-	// off the run loop, so it enqueues a cmdPeer onto the single-writer loop rather
-	// than touching the doc directly. The in-memory broadcaster's Subscribe is a
-	// no-op that never fires the handler, so single-pod deployments pay nothing.
+	// subscription tracks the room (not the bootstrap request). DECOUPLED fan-out
+	// (002 FR-009): the handler writes to the bounded peerUpdates queue the run loop
+	// drains — it NEVER calls enqueue, so the subscribe goroutine cannot park inside
+	// the run loop and deadlock teardown. The write is cancellable on roomCtx, which
+	// teardown cancels, so a parked write frees without waiting on the run loop. The
+	// in-memory broadcaster's Subscribe is a no-op that never fires the handler, so
+	// single-pod deployments pay nothing.
 	cancelSub, err := deps.Broadcaster.Subscribe(roomCtx, id, func(payload []byte, ephemeral bool) {
-		r.enqueue(command{kind: cmdPeer, data: payload, ephemeral: ephemeral})
+		select {
+		case r.peerUpdates <- peerUpdate{data: payload, ephemeral: ephemeral}:
+		case <-roomCtx.Done():
+			// Teardown cancelled roomCtx: drop this peer delta rather than block the
+			// subscribe goroutine. Acceptable — the ORIGINATING pod keeps its doc dirty
+			// and persists it, and the CRDT re-merges on next load (self-healing); a
+			// draining pod's final snapshot is not a relay guarantee (FR-015).
+		}
 	})
 	if err != nil {
 		cancel()
@@ -446,6 +535,8 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	}
 	r.cancelSub = cancelSub
 
+	// Materialized and wired — the room is now ready to serve.
+	r.lc.activate()
 	return r, nil
 }
 
@@ -471,6 +562,7 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	r.version = meta.Version
 	r.pointer = meta.ContentPointer
 	r.policyID = meta.AuthorizationPolicyID
+	r.ownerRef = meta.OwnerRef
 	r.bucketID = meta.StorageBucketID
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
@@ -546,6 +638,20 @@ func (r *Room) seedFromContent(content []byte) {
 // Y.Doc, awareness, and member mutation happens here, making the room the lone
 // writer.
 func (r *Room) run() {
+	// A panic on the single-writer loop must not wedge the room: without recovery the
+	// goroutine dies with the room still registered, r.done never closed, and
+	// Manager.Close blocking to its deadline — one panicking handler would take the
+	// whole pod's graceful shutdown down with it. Recover, log with the stack, and
+	// tear the room down WITHOUT a flush: a doc left mid-mutation by a panic must not
+	// be persisted over the last good snapshot.
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.logger.Error("room run loop panicked; tearing down without persist",
+				zap.Any("panic", rec), zap.Stack("stack"))
+			r.teardown(nil)
+		}
+	}()
+
 	saveTimer := time.NewTimer(time.Hour)
 	stopTimer(saveTimer)
 	idleTimer := time.NewTimer(time.Hour)
@@ -592,13 +698,19 @@ func (r *Room) run() {
 				return
 			}
 
+		case pu := <-r.peerUpdates:
+			// Cross-pod fan-out, applied on the single-writer loop (002 FR-009 —
+			// decoupled fan-out: the subscribe goroutine writes here, never enqueue).
+			if r.handlePeer(pu.data, pu.ephemeral) {
+				armSave()
+			}
+
 		case <-saveTimer.C:
 			r.persistNow()
 
 		case <-idleTimer.C:
 			if len(r.members) == 0 {
-				r.persistNow()
-				r.finish()
+				r.teardown(r.persistNow)
 				return
 			}
 
@@ -625,6 +737,20 @@ func newOptionalTicker(every time.Duration) (*time.Timer, time.Duration) {
 	return time.NewTimer(every), every
 }
 
+// handleMessageCmd applies an inbound client frame and re-arms the timers: the save
+// debounce if it mutated the doc, and the idle timer if a rate/size-limit self-
+// disconnect inside handleMessage dropped the last member (002 FR-011 — so an
+// emptied room is released, not leaked). Extracted from dispatch to keep its
+// branching low.
+func (r *Room) handleMessageCmd(cmd command, armSave, armIdle func()) {
+	if r.handleMessage(cmd.src, cmd.data) {
+		armSave()
+	}
+	if len(r.members) == 0 {
+		armIdle()
+	}
+}
+
 // dispatch handles one command on the run-loop goroutine, arming the save/idle
 // timers as needed. It returns false when the room must tear down (cmdClose), so
 // run can exit. Splitting this out of run keeps each function's branching low.
@@ -633,11 +759,18 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	case cmdJoin:
 		stopTimer(idleTimer)
 		res := r.handleJoin(cmd.conn, cmd.identity)
-		cmd.done <- res
-		// A refused join (room full / access denied / fail-closed) admits no
-		// member. If the room is still empty, re-arm the idle timer so a freshly
-		// materialized room does not leak its goroutine forever.
-		if res.err != nil && len(r.members) == 0 {
+		// Guard the result send like cmd.done2: the only cmdJoin producer always
+		// supplies a buffered done, but a nil channel here would panic the loop.
+		if cmd.done != nil {
+			cmd.done <- res
+		}
+		// Re-arm the idle timer whenever the room is empty after handling the join,
+		// so a freshly materialized room never leaks its goroutine. This covers a
+		// refused join (room full / access denied / fail-closed admits no member)
+		// AND a join that returned success but whose presence broadcast immediately
+		// dropped the just-added member (a Send failure re-enters dropMember, leaving
+		// the room empty with res.err == nil — the gap that the old res.err gate missed).
+		if len(r.members) == 0 {
 			armIdle()
 		}
 
@@ -648,14 +781,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		}
 
 	case cmdMessage:
-		if r.handleMessage(cmd.src, cmd.data) {
-			armSave()
-		}
-
-	case cmdPeer:
-		if r.handlePeer(cmd.data, cmd.ephemeral) {
-			armSave()
-		}
+		r.handleMessageCmd(cmd, armSave, armIdle)
 
 	case cmdPersist:
 		r.persistNow()
@@ -664,17 +790,19 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		r.handleReEvaluate(armIdle)
 
 	case cmdPurge:
-		err := r.purgeNow()
-		if cmd.done2 != nil {
-			cmd.done2 <- err
-		}
-		r.finish()
+		r.teardown(func() {
+			err := r.purgeNow()
+			if cmd.done2 != nil {
+				cmd.done2 <- err
+			}
+		})
 		return false
 
 	case cmdClose:
-		r.persistNow()
-		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
-		r.finish()
+		r.teardown(func() {
+			r.persistNow()
+			r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
+		})
 		return false
 	}
 	return true
@@ -721,7 +849,7 @@ func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
 	if mode == model.ModeViewer {
 		ctrl := encodeControl(model.ControlMessage{
 			Kind:     model.ControlReadOnlyState,
-			ReadOnly: true,
+			ReadOnly: model.ReadOnlyState(true),
 			Reason:   readOnlyReasonForIdentity(identity),
 		})
 		if ctrl != nil {
@@ -761,12 +889,16 @@ func (r *Room) resolveMode(ctx context.Context, identity model.Identity) (model.
 }
 
 // readOnlyReasonForIdentity maps a viewer's identity to its read-only reason
-// code (OPEN-1): an anonymous connection (empty ActorID) is read-only because it
-// is not-authenticated; an authenticated actor that was denied update-content is
+// code (OPEN-1): an anonymous connection is read-only because it is
+// not-authenticated; an authenticated actor that was denied update-content is
 // read-only because it has no-update-access. This preserves the granularity of
-// today's read-only UX (the memo-footer readOnlyCode).
+// today's read-only UX (the memo-footer readOnlyCode). An anonymous viewer
+// surfaces two ways — an empty ActorID (open mode, AuthZ bypassed) OR the nil-UUID
+// sentinel (oidc mode maps a missing credential to model.AnonymousIdentity(),
+// whose ActorID is ANONYMOUS_ACTOR_ID, which is NON-empty) — so both must map to
+// not-authenticated, else an anonymous oidc viewer wrongly reports no-update-access.
 func readOnlyReasonForIdentity(identity model.Identity) model.ReadOnlyReason {
-	if identity.ActorID == "" {
+	if identity.ActorID == "" || identity.ActorID == model.ANONYMOUS_ACTOR_ID {
 		return model.ReasonNotAuthenticated
 	}
 	return model.ReasonNoUpdateAccess
@@ -811,6 +943,17 @@ func (r *Room) evictAwareness(m roomMember) {
 // offline: it deletes the client's state from the room awareness and bumps its
 // clock, then encodes a null-state update the y-protocols clients apply as a
 // removal. Returns nil when the client is unknown to the room awareness.
+//
+// The client's States entry is deleted but its Meta entry (the monotonic clock) is
+// deliberately RETAINED with a bumped clock — that is the y-protocols tombstone
+// that makes a late or re-ordered state update for the same client id be rejected
+// rather than resurrect it. Meta therefore grows by one small entry per DISTINCT
+// y-awareness client id seen over a room's lifetime, bounded by that cardinality
+// within a single room session and fully reclaimed when the room is released and
+// GC'd. A periodic Meta sweep for clients absent beyond a TTL is the y-protocols
+// "outdated timeout" mechanism (commented out in the vendored y-crdt awareness.go)
+// and belongs there, not as a room-level reimplementation — tracked as a y-crdt
+// follow-up, not a defect of this layer.
 func (r *Room) forcedAwarenessRemoval(clientID ycrdt.Number) []byte {
 	meta := r.awareness.Meta[clientID]
 	clock := 0
@@ -873,15 +1016,20 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		return false
 	}
 
+	// Enforce the per-connection update rate BEFORE parsing (the doc above promises
+	// this): a flood of malformed frames must be charged a token — and ultimately
+	// disconnected — exactly like valid ones. Parsing first would let a client spam
+	// unparseable frames (each costing a parse attempt and a WARN log) without ever
+	// tripping the limit (FR-024).
+	if !r.allowRate(src) {
+		r.disconnect(src, "update rate exceeded")
+		return false
+	}
+
 	in := bytes.NewBuffer(frame)
 	msgType, payload, err := protocol.ReadMessage(in)
 	if err != nil {
 		r.logger.Warn("dropping malformed frame", zap.Error(err))
-		return false
-	}
-
-	if !r.allowRate(src) {
-		r.disconnect(src, "update rate exceeded")
 		return false
 	}
 
@@ -976,8 +1124,28 @@ func (r *Room) handlePeer(payload []byte, ephemeral bool) (mutated bool) {
 	}
 
 	wasDirty := r.dirty
-	ycrdt.ApplyUpdate(r.doc, payload, updateOrigin{src: 0, peer: true})
+	r.applyUpdate(payload, updateOrigin{src: 0, peer: true})
 	return r.dirty && !wasDirty
+}
+
+// applyUpdate is the SINGLE guarded chokepoint every doc-mutating update routes
+// through (002 FR-005), so the MaxDocBytes budget covers EVERY entry point — local
+// client writes AND cross-pod peer updates — not just one. It returns false WITHOUT
+// applying iff a LOCAL write would exceed the cap (the caller then rejects the
+// offender pre-commit, FR-024). A PEER write cannot be rejected without diverging
+// from the pod that already accepted it, so an over-budget peer update is logged but
+// applied; correctness then relies on a uniform MaxDocBytes across pods (a documented
+// operational constraint).
+func (r *Room) applyUpdate(update []byte, origin updateOrigin) bool {
+	if r.applyWouldExceedMaxDocBytes(update) {
+		if !origin.peer {
+			return false
+		}
+		r.logger.Warn("peer update would exceed MaxDocBytes; applied to avoid cross-pod divergence (check for MaxDocBytes config skew)",
+			zap.String("doc", string(r.id)))
+	}
+	ycrdt.ApplyUpdate(r.doc, update, origin)
+	return true
 }
 
 // applyPeerEphemeral applies a peer-pod awareness/ephemeral frame: an awareness
@@ -1078,26 +1246,47 @@ func (r *Room) recordActivity(src connID) {
 
 // applyWouldExceedMaxDocBytes reports whether applying update to the authoritative
 // doc would grow its encoded v2 snapshot past MaxDocBytes — WITHOUT mutating the
-// live doc. It scratch-applies the update onto a throwaway clone built from the
-// current v2 snapshot and measures the clone, so an oversized write is rejected
-// pre-commit (no mutation, no broadcast of the live doc) rather than evicted after
-// the fact (FR-024 offender-only impact). Returns false when the limit is disabled
-// (MaxDocBytes <= 0). Runs on the single-writer run loop, so reading r.doc is
-// race-free.
+// live doc, so an oversized write is rejected pre-commit (no mutation, no
+// broadcast of the live doc) rather than evicted after the fact (FR-024
+// offender-only impact). Returns false when the limit is disabled (MaxDocBytes <=
+// 0). Runs on the single-writer run loop, so reading r.doc is race-free.
+//
+// The exact answer requires re-encoding the whole doc (EncodeStateAsUpdateV2) and
+// a full scratch rebuild — O(docsize) work. Doing that on EVERY mutating update
+// lets one client editing a doc near the cap monopolize the single-writer loop
+// (every other member's joins/messages/disconnects queue behind the re-encode).
+// So we gate it behind a cheap, SOUND short-circuit: r.docBytes tracks the live
+// doc's last encoded v2 size (refreshed here whenever the exact path runs, and
+// over-counted by len(update) on each accepted apply in onDocUpdate, so it never
+// under-estimates the true size between exact checks). A v1 update of length L
+// re-encodes to at most a small multiple of L of new v2 content; requiring a 2x
+// margin on top — docBytes + 2*L + slack <= limit — means the post-apply snapshot
+// cannot reach the cap, so the exact check is skipped. The skip only fires with
+// real headroom: a doc anywhere below ~half the cap pays O(L) per edit, and the
+// full check engages only as the doc approaches the limit (where exactness matters
+// and edits are rarer). docBytes==0 (not yet established) forces the exact path so
+// the bound is never trusted before it is known.
 func (r *Room) applyWouldExceedMaxDocBytes(update []byte) bool {
 	limit := r.cfg.Limits.MaxDocBytes
 	if limit <= 0 {
 		return false
 	}
-	// Cheap lower bound first: the current snapshot already over the limit means a
-	// non-empty mutating write can only keep it there or grow it. (We still scratch-
-	// apply below for the exact answer in the common in-bounds case.)
+	// Cheap sound skip: with a 2x margin on the update length over the last known
+	// encoded size, applying it cannot reach the cap, so skip the O(docsize) check.
+	// budgetSkipSlack absorbs v2 framing/varint overhead at very small limits, and
+	// docBytes==0 (not yet established) forces the exact path below.
+	if r.docBytes > 0 && r.docBytes+2*len(update)+budgetSkipSlack <= limit {
+		return false
+	}
 	scratch := newRoomDoc(string(r.id))
 	curr, err := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
 	if err != nil {
 		r.logger.Error("budget check: encoding live doc failed", zap.String("doc", string(r.id)), zap.Error(err))
 		return false
 	}
+	// Refresh the cached size from the authoritative encode we just paid for, so the
+	// next cheap skip is measured against the true current size, not a stale one.
+	r.docBytes = len(curr)
 	ycrdt.ApplyUpdateV2(scratch, curr, nil)
 	ycrdt.ApplyUpdate(scratch, update, nil)
 	encoded, err := ycrdt.EncodeStateAsUpdateV2(scratch, nil)
@@ -1127,6 +1316,14 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 		}
 	}
 	r.dirty = true
+	// Keep the cached encoded-size estimate sound between exact budget checks: every
+	// applied update (client edit, peer update, or snapshot load) only grows the
+	// doc, and a v1 update of length L adds at most ~L of re-encoded v2 content, so
+	// over-counting by len(update) guarantees docBytes never under-estimates the
+	// true encoded size — the conservative direction for the cheap skip in
+	// applyWouldExceedMaxDocBytes. The next exact check (or persist) re-syncs it to
+	// the authoritative size, bounding the drift.
+	r.docBytes += len(update)
 	r.broadcast(protocol.EncodeUpdate(update), origin.src)
 
 	// Publish locally-originated updates to peer pods (R4) as the RAW v1 update
@@ -1206,6 +1403,11 @@ func (r *Room) persist(ctx context.Context) {
 		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "snapshot encode failed"})
 		return
 	}
+	// Re-sync the cached encoded size from this authoritative snapshot so the cheap
+	// MaxDocBytes skip is measured against the true size (it would otherwise drift
+	// upward from the conservative per-update over-counting in onDocUpdate).
+	r.docBytes = len(snapshot)
+	oldPointer := r.pointer // the snapshot this save supersedes (empty on first save)
 	hint := r.pointer
 	if hint == "" {
 		hint = string(r.id) // first save: hint the document id (inline pointer == id).
@@ -1227,6 +1429,7 @@ func (r *Room) persist(ctx context.Context) {
 		ContentPointer:        pointer,
 		BlobStore:             r.blobKind,
 		AuthorizationPolicyID: r.policyID,
+		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
@@ -1236,8 +1439,22 @@ func (r *Room) persist(ctx context.Context) {
 		return
 	}
 
+	// Delete-after-commit (002 FR-002): only now that the new pointer is durably
+	// recorded do we drop the superseded blob. Had Save failed above, the old blob is
+	// untouched and the row still points at it — never a stranded pointer. Best-effort:
+	// a failed cleanup just leaves a reclaimable orphan.
+	if oldPointer != "" && oldPointer != pointer {
+		if err := r.deps.Blob.Delete(ctx, oldPointer); err != nil && !isNotFound(err) {
+			r.logger.Warn("superseded snapshot cleanup failed (orphaned blob)",
+				zap.String("doc", string(r.id)), zap.String("pointer", oldPointer), zap.Error(err))
+		}
+	}
+
 	r.pointer = pointer
 	r.version = newVersion
+	// r.version is the room's own save counter, not a read-back of the store's
+	// version — a redelivered no-op PreRegister can bump the persisted row ahead of
+	// it; harmless while Metadata.Version is reserved/unused (FR-025).
 	r.dirty = false
 	// The seed (if any) is now a real per-document snapshot located by
 	// ContentPointer; subsequent opens load the blob and never re-seed (T004).
@@ -1246,26 +1463,53 @@ func (r *Room) persist(ctx context.Context) {
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})
 }
 
-// finish releases the room: it notifies the Manager exactly once so the registry
-// drops it. The doc's observers are detached implicitly by dropping the room.
-func (r *Room) finish() {
-	if r.released.Swap(true) {
+// teardown runs the single, ordered room-release sequence (002 FR-013) — the ONE
+// place teardown ordering lives, so it cannot be mis-sequenced per call site: stop
+// accepting (beginTeardown) → flush (the caller's final persist/purge/broadcast, may
+// be nil) → cancel the room context (unblocking the decoupled fan-out) → tear down
+// the fan-out subscription → close(done) →
+// notify the Manager → mark Closed. beginTeardown is the idempotent guard: only the
+// first caller runs the sequence; the rest return immediately (no double close, no
+// re-notify). Runs on the run-loop goroutine.
+func (r *Room) teardown(flush func()) {
+	if !r.lc.beginTeardown() {
 		return
+	}
+	if flush != nil {
+		flush()
+	}
+	// Balance the connection gauge for members still attached at teardown.
+	// cmdClose/cmdPurge tear the room down without each client traversing the
+	// per-connection Leave path, so their ConnOpened would otherwise never be
+	// matched by a ConnClosed — leaking connections_active upward by the member
+	// count. dropMember (the only other ConnClosed caller) deletes from r.members
+	// before it counts, so any already-closed member is absent here: no double
+	// count. Runs on the run-loop goroutine (single-writer), so the walk is safe.
+	for id := range r.members {
+		delete(r.members, id)
+		r.metrics.ConnClosed()
+	}
+	// Cancel the room-lifetime context (roomCtx) BEFORE tearing down the subscription:
+	// it unblocks any decoupled peer-update write parked on roomCtx.Done(), so cancelSub
+	// — which may WAIT for the subscribe goroutine (e.g. redis pubsub.Close) — cannot
+	// deadlock against it (002 FR-009). The flush above already ran with the context
+	// live, so cancelling here never aborts in-progress save-on-release work.
+	if r.cancel != nil {
+		r.cancel()
 	}
 	if r.cancelSub != nil {
 		r.cancelSub()
-	}
-	// Cancel the room-lifetime context so any backend call still in flight on the
-	// run loop (or its subscription) unblocks. The final persist/purge already ran
-	// before finish, so this never aborts in-progress save-on-release work.
-	if r.cancel != nil {
-		r.cancel()
 	}
 	close(r.done)
 	if r.onReleased != nil {
 		r.onReleased()
 	}
+	r.lc.finishDraining()
 }
+
+// finish releases the room with no extra flush (the caller already persisted/purged).
+// teardown owns the ordering; this is the entry used by the idle path and tests.
+func (r *Room) finish() { r.teardown(nil) }
 
 // encodeControl marshals a control message into a framed type-3 wire message.
 func encodeControl(msg model.ControlMessage) []byte {

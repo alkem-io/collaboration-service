@@ -229,10 +229,12 @@ func TestPutUsesPerDocumentBucket(t *testing.T) {
 	}
 }
 
-func TestPutOverwriteDeletesPreviousSnapshot(t *testing.T) {
-	// On re-save, the adapter uploads a new object (new UUID) and deletes the
-	// previous one (latest-only, R7), so old snapshots do not accumulate. The
-	// caller passes the previous pointer as the hint.
+func TestPutDoesNotDeletePreviousSnapshot(t *testing.T) {
+	// 002 FR-002 (delete-after-commit): on re-save the adapter uploads a NEW object
+	// (new UUID) but must NOT delete the previous one — deleting before the caller
+	// commits the new pointer would strand the metadata row on a missing blob if that
+	// commit then failed. The caller (room.persist) deletes the superseded pointer
+	// only AFTER the metadata commit succeeds.
 	store, stub := newTestStore(t)
 	ctx := context.Background()
 
@@ -248,12 +250,16 @@ func TestPutOverwriteDeletesPreviousSnapshot(t *testing.T) {
 		t.Error("expected a new pointer for new content")
 	}
 
-	// The old object must be gone; the new one serves v2.
+	// The OLD object must STILL exist: a failed commit of p2 would then leave the row
+	// safely pointing at the still-present p1, never stranded.
 	stub.mu.Lock()
 	_, oldExists := stub.byID[p1]
 	stub.mu.Unlock()
-	if oldExists {
-		t.Error("previous snapshot not deleted on overwrite (orphan)")
+	if !oldExists {
+		t.Error("Put deleted the previous snapshot — delete-before-commit can strand the metadata row (002 FR-002)")
+	}
+	if got, err := store.Get(ctx, p1); err != nil || string(got) != "v1" {
+		t.Errorf("previous snapshot no longer retrievable: got %q err %v", got, err)
 	}
 	got, err := store.Get(ctx, p2)
 	if err != nil {
@@ -293,6 +299,45 @@ func TestDeleteIdempotent(t *testing.T) {
 	// Deleting a never-put pointer must be a no-op (idempotent cascade).
 	if err := store.Delete(ctx, "absent"); err != nil {
 		t.Errorf("Delete(absent) = %v, want nil", err)
+	}
+}
+
+// TestGetDeleteEscapePathSignificantPointer defends the url.PathEscape on the
+// pointer in Get/Delete. The stub routes GET/DELETE /internal/file/{id}/... via a
+// single-segment {id} wildcard (which URL-decodes the segment). A pointer
+// containing a '/' must be escaped to "%2F" so it stays ONE path segment and
+// reaches the intended object; unescaped it would split into an extra segment,
+// missing the route entirely (and could re-target a different resource).
+//
+// Non-vacuity: drop url.PathEscape in Get and Delete and these calls hit
+// /internal/file/has/slash/content — an unmatched route → 404 → ErrNotFound for
+// Get, and a non-2xx (404 here maps to a no-op) so the Delete then fails to remove
+// the object and the trailing Get still finds it, failing the assertions.
+func TestGetDeleteEscapePathSignificantPointer(t *testing.T) {
+	store, stub := newTestStore(t)
+	ctx := context.Background()
+	const weird = "has/slash"
+	want := []byte("escaped-bytes")
+	stub.mu.Lock()
+	stub.byID[weird] = want
+	stub.mu.Unlock()
+
+	got, err := store.Get(ctx, weird)
+	if err != nil {
+		t.Fatalf("Get(%q) = %v, want the seeded bytes (pointer must be PathEscaped)", weird, err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("Get(%q) = %q, want %q", weird, got, want)
+	}
+
+	if err := store.Delete(ctx, weird); err != nil {
+		t.Fatalf("Delete(%q) = %v, want nil", weird, err)
+	}
+	stub.mu.Lock()
+	_, stillThere := stub.byID[weird]
+	stub.mu.Unlock()
+	if stillThere {
+		t.Fatalf("Delete(%q) did not remove the object — the pointer was not PathEscaped to the right route", weird)
 	}
 }
 

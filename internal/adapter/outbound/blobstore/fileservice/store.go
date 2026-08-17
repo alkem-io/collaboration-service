@@ -30,6 +30,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -88,12 +89,12 @@ func New(cfg Config) (*Store, error) {
 	return &Store{cfg: cfg, client: client}, nil
 }
 
-// Put uploads the snapshot as a new file-service object and returns its UUID as
-// the content pointer. prevPointer is the document's previous pointer (a
-// file-service UUID for a re-save, or the document id on the first save): when it
-// is a real previous UUID, its file is deleted after a successful upload so old
-// snapshots do not accumulate (latest-only). The document id on first save does
-// not match any file-service object, so the delete is harmlessly skipped.
+// Put uploads the snapshot as a new file-service object and returns its UUID as the
+// content pointer. It does NOT delete the previous snapshot — the caller (room
+// persist) deletes the superseded pointer AFTER committing the new one to the
+// metadata index (delete-after-commit, 002 FR-002), so a failed commit can never
+// strand the row on a deleted blob. prevPointer is retained for the BlobStore
+// contract but is no longer used here.
 //
 // bucketID is the document's own storage bucket (from the metadata index); the
 // snapshot is uploaded into it so blobs co-locate with the document. An empty
@@ -113,12 +114,12 @@ func (s *Store) Put(ctx context.Context, prevPointer, bucketID string, data []by
 		return "", err
 	}
 
-	// Drop the superseded snapshot (best-effort: a failed cleanup must not fail
-	// the save — the new snapshot is already durable and recorded, and the orphan
-	// is reclaimable).
-	if prevPointer != "" && prevPointer != id {
-		_ = s.Delete(ctx, prevPointer)
-	}
+	// The superseded snapshot is intentionally NOT deleted here. Deleting it before
+	// the caller commits the new pointer would strand the metadata row on a missing
+	// blob if that commit then failed (002 FR-002, delete-after-commit). The caller
+	// (room.persist) deletes the old pointer AFTER the commit succeeds. prevPointer is
+	// unused now, kept for the BlobStore contract.
+	_ = prevPointer
 	return id, nil
 }
 
@@ -178,7 +179,10 @@ func (s *Store) upload(ctx context.Context, bucket string, data []byte) (string,
 // Get fetches the snapshot bytes for a file-service object id, mapping a 404 to
 // model.ErrNotFound.
 func (s *Store) Get(ctx context.Context, pointer string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BaseURL+"/internal/file/"+pointer+"/content", nil)
+	// PathEscape the pointer: it is normally a file-service UUID, but escaping it
+	// keeps a pointer that ever carried a path-significant byte (/ ? #) from
+	// re-targeting the request to a different resource (defense in depth).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer)+"/content", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -203,7 +207,9 @@ func (s *Store) Get(ctx context.Context, pointer string) ([]byte, error) {
 
 // Delete removes a file-service object. A 404 is a no-op (idempotent cascade).
 func (s *Store) Delete(ctx context.Context, pointer string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.cfg.BaseURL+"/internal/file/"+pointer, nil)
+	// PathEscape the pointer (see Get): keep a path-significant byte in the pointer
+	// from re-targeting the DELETE at an unintended file-service object.
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

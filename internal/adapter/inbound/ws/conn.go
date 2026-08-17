@@ -90,12 +90,30 @@ func (c *wsConn) startWriter() {
 	}()
 }
 
-// close tears the connection down once: it signals the writer to stop and closes
-// the socket. Idempotent.
+// close tears the connection down once. Idempotent.
+//
+// The signal half is synchronous and cheap: closing c.closed immediately makes
+// Send shed (return errConnClosed) and stops the writer goroutine. The socket
+// teardown is deliberately OFF this goroutine. close is called from the room's
+// single run loop (sendMember → Send → slow-consumer shed; disconnect; persist),
+// and coder/websocket's Conn.Close performs the close HANDSHAKE — it writes a
+// close frame with an internal 5s timeout and then waits up to 15s for the peer
+// and the connection goroutines. On a slow/stalled client whose TCP send buffer
+// is full, that write blocks until the 5s deadline fires (the deadline is
+// enforced by a context.AfterFunc that force-closes the socket). Running it
+// inline would freeze the run loop — which serializes joins/edits/awareness/
+// leaves/persist for EVERY member of the room — for up to ~5s per shed, so a
+// disconnect-storm of N slow clients would serialize into N×~5s of room-wide
+// stall. That is exactly the head-of-line blocking the buffered-channel + single
+// writer design exists to prevent, so the handshake must never run on the loop.
+//
+// CloseNow (no handshake — it just closes the underlying socket) is used instead
+// of Close so even the off-loop teardown cannot block on a stalled peer, and it
+// is dispatched on its own goroutine so close() returns to the run loop at once.
 func (c *wsConn) close() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		_ = c.conn.Close(websocket.StatusNormalClosure, "")
+		go func() { _ = c.conn.CloseNow() }()
 	})
 }
 

@@ -132,6 +132,14 @@ func New(cfg Config, policies PolicyResolver) *Adapter {
 // failure, transport failure, open breaker, degraded service) is returned as an
 // error so the caller fails closed — never a clean Allowed result.
 func (a *Adapter) Evaluate(ctx context.Context, identity model.Identity, id model.DocumentID, privilege model.Privilege) (model.AuthDecision, error) {
+	// Fail CLOSED on a missing resolver. The adapter cannot resolve a document's
+	// policy id without it, so calling through would nil-panic in the auth path
+	// (worse than a deny). Return an error instead so the caller denies access — an
+	// authzeval adapter with no policy resolver is a misconfiguration, never an
+	// allow.
+	if a.policies == nil {
+		return model.AuthDecision{}, fmt.Errorf("authzeval: no policy resolver configured")
+	}
 	policyID, err := a.policies.PolicyID(ctx, id)
 	if err != nil {
 		return model.AuthDecision{}, fmt.Errorf("resolve authorization policy for %s: %w", id, err)

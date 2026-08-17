@@ -40,7 +40,14 @@ func New(dir string) (*Store, error) {
 // resolve maps a content pointer to an absolute path under the root, rejecting
 // any pointer that would escape it (path traversal).
 func (s *Store) resolve(pointer string) (string, error) {
+	// Reject an empty/root-only pointer before building a path: filepath.Clean("")
+	// is ".", which Joins back to the root directory itself, so an empty (or "."/"/"
+	// -only) pointer would otherwise resolve to the root and target the directory
+	// rather than a snapshot file. A blob pointer must name a file under the root.
 	clean := filepath.Clean(pointer)
+	if clean == "." || clean == string(os.PathSeparator) {
+		return "", fmt.Errorf("invalid content pointer %q: empty or root", pointer)
+	}
 	full := filepath.Join(s.root, clean)
 	// filepath.Join cleans "..", so compare the result against the root prefix.
 	if full != s.root && !strings.HasPrefix(full, s.root+string(os.PathSeparator)) {

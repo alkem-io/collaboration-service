@@ -103,8 +103,19 @@ type ControlMessage struct {
 	Version int `json:"version,omitempty"`
 	// Error is a human-readable reason for ControlSaveError (never secrets).
 	Error string `json:"error,omitempty"`
-	// ReadOnly is the viewer/collaborator state for ControlReadOnlyState.
-	ReadOnly bool `json:"readOnly,omitempty"`
+	// ReadOnly is the viewer/collaborator state for ControlReadOnlyState. It is a
+	// pointer so the wire distinguishes three states: absent (nil — this frame
+	// does not carry a read-only state, e.g. a saved/room-user-change frame),
+	// explicit true (a downgrade to read-only), and explicit FALSE (an upgrade
+	// REGAINING edit access). The false case MUST survive on the wire: with a plain
+	// `bool,omitempty` a regain frame marshals to `{"kind":"read-only-state"}` —
+	// the key omitted, shape-identical to a frame that never set it — so a JS/TS
+	// client (no Go zero-value) never sees readOnly:false and stays locked
+	// read-only after an access regrant until a full reconnect (the upgrade is
+	// broken while the downgrade survives). A *bool keeps the false explicit while
+	// still omitting the key from every non-read-only-state frame. Set it with
+	// ReadOnlyState(true|false); read it with (ControlMessage).IsReadOnly().
+	ReadOnly *bool `json:"readOnly,omitempty"`
 	// Reason is the granular code (OPEN-1) explaining a downgrade. On a
 	// ControlCollaboratorMode it is a CollaboratorModeReason; on a
 	// ControlReadOnlyState it is usually a ReadOnlyReason, but an inactivity (or
@@ -118,4 +129,21 @@ type ControlMessage struct {
 	Mode CollaboratorMode `json:"mode,omitempty"`
 	// Users is the current participant count for ControlRoomUserChange.
 	Users int `json:"users,omitempty"`
+}
+
+// ReadOnlyState returns a *bool for ControlMessage.ReadOnly so a read-only-state
+// frame carries the value EXPLICITLY on the wire — including the regain case
+// (false), which must not be dropped (see the ReadOnly field doc). Use it for
+// every read-only-state frame so an upgrade (false) and a downgrade (true) are
+// equally unambiguous to a non-Go client.
+func ReadOnlyState(readOnly bool) *bool {
+	return &readOnly
+}
+
+// IsReadOnly reports whether this control message carries an explicit read-only
+// = true state. A nil ReadOnly (no read-only state on the frame) or an explicit
+// false (a regain/upgrade) both report false. Callers that must distinguish "no
+// state" from "explicitly editable" should inspect ReadOnly directly.
+func (m ControlMessage) IsReadOnly() bool {
+	return m.ReadOnly != nil && *m.ReadOnly
 }

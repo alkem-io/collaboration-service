@@ -48,7 +48,7 @@ func (m *recordingManager) Purge(_ context.Context, id model.DocumentID) error {
 	return nil
 }
 
-func (m *recordingManager) ReEvaluate(id model.DocumentID) {
+func (m *recordingManager) ReEvaluate(_ context.Context, id model.DocumentID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reEvaluated = append(m.reEvaluated, string(id))

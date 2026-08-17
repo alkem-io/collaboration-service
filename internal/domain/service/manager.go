@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -14,6 +15,11 @@ import (
 // errRoomUnavailable is returned when a room could not be joined because it kept
 // tearing down under a join race (should be vanishingly rare).
 var errRoomUnavailable = errors.New("collaboration room unavailable")
+
+// errShuttingDown is returned from acquire/Join once Manager.Close has begun, so a
+// late connection is refused rather than materializing a room that the shutdown
+// drain snapshot already missed and would never drain (002 FR-001).
+var errShuttingDown = errors.New("collaboration manager is shutting down")
 
 // ErrRoomFull is returned from Join when the room is at its connection cap
 // (FR-024 max connections per room). The handshake is refused; existing
@@ -24,6 +30,12 @@ var ErrRoomFull = errors.New("collaboration room is full")
 // connecting actor read access (a clean deny, not an error — the connection is
 // refused, distinct from a fail-closed authZ transport error).
 var ErrForbidden = errors.New("collaboration access denied")
+
+// shutdownDrainGrace is the headroom Manager.Close waits on top of one
+// BackendTimeout for live rooms to flush their final snapshot on shutdown before
+// giving up — a backstop so a room whose run loop is wedged off the backend-call
+// path cannot hang process exit.
+const shutdownDrainGrace = 5 * time.Second
 
 // Metrics is the observability surface the room lifecycle drives: the active
 // room/connection gauges and the snapshot counter (metrics.go). The inbound
@@ -67,6 +79,13 @@ type Manager struct {
 
 	mu    sync.Mutex
 	rooms map[model.DocumentID]*Room
+	// closed is set by Close under mu; acquire refuses new rooms once it is set, so
+	// no room is materialized after the shutdown drain snapshot (002 FR-001).
+	closed bool
+
+	// sf collapses concurrent first-connects for the same document onto ONE
+	// materialization, so newRoom runs OFF mu (002 FR-010 — no lock across I/O).
+	sf singleflight.Group
 }
 
 // NewManager constructs a room manager over the wired dependencies. A zero
@@ -148,11 +167,21 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		if !room.enqueue(command{kind: cmdJoin, conn: req.Conn, identity: req.Identity, done: res}) {
 			continue
 		}
-		jr := <-res
-		if jr.err != nil {
-			return nil, nil, jr.err
+		select {
+		case jr := <-res:
+			if jr.err != nil {
+				return nil, nil, jr.err
+			}
+			return &Session{room: room, id: jr.id}, jr.frames, nil
+		case <-room.done:
+			// The room tore down after our enqueue won the buffered-send race but
+			// before processing the join: its run loop has exited and nothing will
+			// ever write res, so a bare `<-res` would block this goroutine — and leak
+			// the hijacked WebSocket behind it — forever. Retry: a fresh acquire
+			// materializes a new room, and the 2-attempt budget then surfaces a
+			// genuinely unavailable room as errRoomUnavailable rather than hanging.
+			continue
 		}
-		return &Session{room: room, id: jr.id}, jr.frames, nil
 	}
 	return nil, nil, errRoomUnavailable
 }
@@ -172,7 +201,16 @@ func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
 	if live {
 		done := make(chan error, 1)
 		if room.enqueue(command{kind: cmdPurge, done2: done}) {
-			return <-done
+			select {
+			case err := <-done:
+				return err
+			case <-room.done:
+				// The room tore down without running our purge — its run loop exited
+				// after our enqueue won the buffered-send race, so `done` is never
+				// written and a bare `<-done` would block forever. Fall through to the
+				// direct durable purge below; it is idempotent, so even a purge that
+				// DID run is harmless to repeat.
+			}
 		}
 		// The room tore down between lookup and enqueue; fall through to a direct
 		// durable purge so no orphan is left.
@@ -205,12 +243,15 @@ func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
 // ReEvaluate asks a live room to re-run per-document authorization for its
 // connected members (lifecycle document.access_changed, T014/T015). It is a no-op
 // when no room is live for the document.
-func (m *Manager) ReEvaluate(id model.DocumentID) {
+func (m *Manager) ReEvaluate(ctx context.Context, id model.DocumentID) {
 	m.mu.Lock()
 	room, live := m.rooms[id]
 	m.mu.Unlock()
 	if live {
-		room.enqueue(command{kind: cmdReEvaluate})
+		// Bound the enqueue by the caller's context (the lifecycle handler timeout),
+		// so a busy room cannot head-of-line-block the single lifecycle consumer
+		// past its deadline (002 FR-014).
+		room.enqueueCtx(ctx, command{kind: cmdReEvaluate})
 	}
 }
 
@@ -227,33 +268,63 @@ func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
 // loop.
 func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content model.ContentType) (*Room, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if room, ok := m.rooms[id]; ok {
+		m.mu.Unlock()
 		return room, nil
 	}
+	if m.closed {
+		m.mu.Unlock()
+		return nil, errShuttingDown
+	}
+	m.mu.Unlock()
 
-	// Materialization (snapshot load) and the room's run loop outlive the
-	// connecting request, so they must not inherit its cancellation: a client
-	// disconnecting mid-load must not abort the room that other clients share.
-	//
-	// Wave-1 note: newRoom is called while holding m.mu, which serializes
-	// concurrent first-connects across all documents through one mutex. With
-	// the in-memory blob adapter the snapshot load is a map read (nanoseconds)
-	// so the lock is never held for meaningful time. When durable blob
-	// adapters (T005) land, m.mu should be dropped before I/O and re-acquired
-	// only for the map write, using a per-id singleflight to collapse races.
-	roomCtx := context.WithoutCancel(ctx)
-	room, err := newRoom(roomCtx, id, content, m.deps, m.cfg, m.metrics, m.logger.With(zap.String("doc", string(id))))
+	// Materialize OFF the registry lock (002 FR-010): newRoom does backend I/O
+	// (snapshot load, fan-out subscribe) that must NOT run under m.mu, or one
+	// unresponsive backend would wedge every Manager op — including shutdown. A
+	// per-id singleflight collapses concurrent first-connects for the same document
+	// onto ONE materialization; m.mu is taken only for the brief map check/insert.
+	// Materialization and the run loop outlive the connecting request, so they must
+	// not inherit its cancellation (context.WithoutCancel).
+	v, err, _ := m.sf.Do(string(id), func() (interface{}, error) {
+		// Re-check under the lock — another singleflight winner may have inserted.
+		m.mu.Lock()
+		if room, ok := m.rooms[id]; ok {
+			m.mu.Unlock()
+			return room, nil
+		}
+		if m.closed {
+			m.mu.Unlock()
+			return nil, errShuttingDown
+		}
+		m.mu.Unlock()
+
+		roomCtx := context.WithoutCancel(ctx)
+		room, err := newRoom(roomCtx, id, content, m.deps, m.cfg, m.metrics, m.logger.With(zap.String("doc", string(id))))
+		if err != nil {
+			return nil, err
+		}
+		room.onReleased = func() { m.remove(id, room) }
+
+		m.mu.Lock()
+		if m.closed {
+			// A shutdown began during materialization: don't register a room the
+			// drain snapshot already missed (it would never be drained). Tear the
+			// fresh, never-served room down directly.
+			m.mu.Unlock()
+			room.teardown(nil)
+			return nil, errShuttingDown
+		}
+		m.rooms[id] = room
+		m.mu.Unlock()
+
+		m.metrics.RoomOpened()
+		startRoom(room)
+		return room, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	room.onReleased = func() { m.remove(id, room) }
-	m.rooms[id] = room
-
-	m.metrics.RoomOpened()
-	startRoom(room)
-	return room, nil
+	return v.(*Room), nil
 }
 
 // startRoom launches a room's run loop. It deliberately takes no context: the
@@ -268,11 +339,18 @@ func startRoom(room *Room) {
 // this one released). Invoked from the room's run loop via onReleased.
 func (m *Manager) remove(id model.DocumentID, room *Room) {
 	m.mu.Lock()
+	removed := false
 	if cur, ok := m.rooms[id]; ok && cur == room {
 		delete(m.rooms, id)
+		removed = true
 	}
 	m.mu.Unlock()
-	m.metrics.RoomClosed()
+	// Only count a close for a room that was actually registered (and thus counted
+	// open via RoomOpened). The shutdown-abort path tears down a never-registered
+	// room, so emitting RoomClosed there would underflow the rooms_active gauge.
+	if removed {
+		m.metrics.RoomClosed()
+	}
 }
 
 // Forward hands one inbound framed wire message to the session's room for
@@ -292,14 +370,54 @@ func (s *Session) Leave() {
 // shutdown so in-flight edits are not lost.
 func (m *Manager) Close() {
 	m.mu.Lock()
+	m.closed = true // refuse new-room materialization from here on (acquire checks it)
 	rooms := make([]*Room, 0, len(m.rooms))
 	for _, room := range m.rooms {
 		rooms = append(rooms, room)
 	}
 	m.mu.Unlock()
 
+	// ONE deadline bounds the WHOLE shutdown — both the cmdClose signal AND the
+	// drain. App.Close drains closers last-in-first-out — Manager.Close first, THEN
+	// the durable backends (postgres/rabbitmq/redis) — so returning early would let
+	// those backends close out from under a room's in-flight save-on-shutdown persist,
+	// losing the last debounce window of edits (the very edits the final snapshot
+	// exists to save). cmdClose persists, then finish() closes r.done, so r.done is
+	// each room's completion signal; rooms drain concurrently on their own goroutines
+	// and each persist is bounded by cfg.BackendTimeout, so the whole drain is ~one
+	// BackendTimeout. The shared deadline is a backstop that still guarantees shutdown
+	// terminates even if a room's loop is wedged off the backend-call path.
+	budget := m.cfg.BackendTimeout
+	if budget <= 0 {
+		budget = defaultBackendTimeout
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), budget+shutdownDrainGrace)
+	defer cancel()
+
+	// Signal every room CONCURRENTLY, bounded by shutdownCtx. A serial enqueue with
+	// an unbounded context would let ONE room whose command buffer is saturated block
+	// up to enqueueDeadline (30s) before the next room is even signalled — worst case
+	// N×30s before the drain phase begins, far past the shutdown deadline (002 FR-001).
+	// Each signal goroutine parks at most until shutdownCtx fires, so a full buffer
+	// delays only its own room, never the others or the drain; defer cancel() releases
+	// any still-parked goroutine when Close returns.
 	for _, room := range rooms {
-		room.enqueue(command{kind: cmdClose})
+		room := room
+		go room.enqueueCtx(shutdownCtx, command{kind: cmdClose})
+	}
+
+	// Drain bounded by the SAME deadline. shutdownCtx.Done() is a channel that, once
+	// the deadline fires, STAYS closed for EVERY remaining room — unlike a one-shot
+	// timer channel, which delivers its value once and then blocks later iterations on
+	// room.done indefinitely.
+	for _, room := range rooms {
+		select {
+		case <-room.done:
+		case <-shutdownCtx.Done():
+			m.logger.Warn("shutdown room drain exceeded deadline; some final snapshots may be incomplete",
+				zap.Int("rooms_total", len(rooms)))
+			return
+		}
 	}
 }
 
