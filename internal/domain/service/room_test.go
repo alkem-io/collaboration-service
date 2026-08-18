@@ -8,13 +8,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -192,23 +195,27 @@ func testManager(t *testing.T, cfg RoomConfig) (*Manager, testDeps) {
 type testDeps struct {
 	Deps
 	meta *metainmem.Store
-	blob *blobinline.Store
+	// store is the in-process CheckpointStore backing these tests. It has the same
+	// SHAPE as the deployed file-service store — one current state per document,
+	// replaced on save — so a test never exercises a persistence model production
+	// does not use.
+	store *persistinprocess.Store
 }
 
 func newTestDeps() testDeps {
 	meta := metainmem.New()
-	blob := blobinline.New()
+	store := persistinprocess.New()
 	open := authopen.New()
 	return testDeps{
 		Deps: Deps{
 			Broadcaster: noopBroadcaster{},
 			Metadata:    meta,
-			Blob:        blob,
+			Checkpoint:  store,
 			Auth:        open,
 			AuthZ:       open,
 		},
-		meta: meta,
-		blob: blob,
+		meta:  meta,
+		store: store,
 	}
 }
 
@@ -223,4 +230,28 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timeout waiting for %s", what)
+}
+
+// --- stored-state helpers for tests -----------------------------------------
+//
+// The old BlobStore was addressed by content pointer; a CheckpointStore is
+// addressed by document id and returns the document's whole current state. These
+// keep the call sites readable and put the id conversion in one place.
+
+// storedState returns a document's stored state.
+func (d testDeps) storedState(ctx context.Context, id string) ([]byte, error) {
+	cp, err := d.store.LoadCheckpoint(ctx, backend.DocumentID(id))
+	if err != nil {
+		return nil, err
+	}
+	return cp.Update, nil
+}
+
+// putState writes a document's state directly, for tests that need durable state
+// to exist without driving a room.
+func (d testDeps) putState(ctx context.Context, id string, update []byte) error {
+	_, err := d.store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: backend.DocumentID(id), Update: update, StateVector: []byte("derived-on-read"),
+	})
+	return err
 }

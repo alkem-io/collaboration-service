@@ -19,6 +19,8 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/antst/go-yjs/backend/persistence"
+
 	httpAdapter "github.com/alkem-io/collaboration-service/internal/adapter/inbound/http"
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/lifecycle"
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/ws"
@@ -26,15 +28,14 @@ import (
 	authheader "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/header"
 	authoidc "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/oidc"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/fileservice"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
-	bloblocal "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/local"
-	blobs3 "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/s3"
 	fanoutinmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/fanout/inmemory"
 	fanoutredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/fanout/redis"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
 	metapostgres "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/postgres"
 	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/rabbitmq"
+	persistfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/fileservice"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
+	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/metapointer"
 	"github.com/alkem-io/collaboration-service/internal/config"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -120,7 +121,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		return service.Deps{}, nil, err
 	}
 
-	blob, err := buildBlob(cfg)
+	checkpoint, err := buildCheckpoint(cfg, metadata)
 	if err != nil {
 		cleanup()
 		return service.Deps{}, nil, err
@@ -136,7 +137,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 	return service.Deps{
 		Broadcaster: broadcaster,
 		Metadata:    metadata,
-		Blob:        blob,
+		Checkpoint:  checkpoint,
 		Auth:        auth,
 		AuthZ:       authz,
 		Contributor: contributor,
@@ -230,25 +231,30 @@ func lifecycleQueue(cfg *config.Config) string {
 	return config.DefaultLifecycleQueue
 }
 
-func buildBlob(cfg *config.Config) (port.BlobStore, error) {
-	switch cfg.BlobStore {
-	case config.BlobStoreFileService:
-		return blobfileservice.New(blobfileservice.Config{
-			BaseURL:         cfg.FileService.BaseURL,
-			StorageBucketID: cfg.FileService.StorageBucketID,
-			MaxUploadSize:   cfg.FileService.MaxUploadSize,
-		})
-	case config.BlobStoreS3:
-		return blobs3.New(context.Background(), blobs3.Config{
-			Bucket: cfg.S3.Bucket, Region: cfg.S3.Region, Endpoint: cfg.S3.Endpoint,
-			KeyPrefix: cfg.S3.KeyPrefix, AccessKeyID: cfg.S3.AccessKeyID,
-			SecretAccessKey: cfg.S3.SecretAccessKey, UsePathStyle: cfg.S3.UsePathStyle,
-		})
-	case config.BlobStoreLocal:
-		return bloblocal.New(cfg.LocalBlobRoot)
-	default:
-		return blobinline.New(), nil
+// checkpointStore is the persistence port plus the deletion capability the
+// contract does not (yet) carry — see service.CheckpointDeleter.
+type checkpointStore interface {
+	persistence.CheckpointStore
+	service.CheckpointDeleter
+}
+
+// buildCheckpoint selects the persistence adapter.
+//
+// Only two shapes exist now. file-service is the deployed one; everything else
+// resolves to the in-process store, which backs the test suite, the local
+// development loop and the zero-dependency smoke test (§III). The former
+// `local` and `s3` blob adapters have no persistence implementation: they
+// existed to serve the standalone deployment that constitution v3.0.0 §III
+// withdrew, and are legacy pending removal.
+func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (checkpointStore, error) {
+	if cfg.BlobStore == config.BlobStoreFileService {
+		return persistfileservice.New(persistfileservice.Config{
+			BaseURL:          cfg.FileService.BaseURL,
+			FallbackBucketID: cfg.FileService.StorageBucketID,
+			MaxUploadSize:    cfg.FileService.MaxUploadSize,
+		}, metapointer.New(metadata))
 	}
+	return persistinprocess.New(), nil
 }
 
 // buildAuthN selects the handshake-AuthN adapter from cfg.AuthMode, independently

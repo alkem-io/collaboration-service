@@ -130,3 +130,21 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 }
 
 var _ persistence.CheckpointStore = (*Store)(nil)
+
+// DeleteCheckpoint removes a document's durable state. Idempotent: deleting an
+// absent document succeeds, because the owner-delete cascade retries and a second
+// delete must not fail it.
+//
+// Local extension, not part of the persistence contract — see the note on the
+// domain's CheckpointDeleter.
+func (s *Store) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.blobs, id)
+	delete(s.revisions, id)
+	delete(s.fences, id)
+	return nil
+}

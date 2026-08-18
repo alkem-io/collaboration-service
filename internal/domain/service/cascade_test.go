@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -34,7 +37,7 @@ func TestPurgeDisconnectsAndPurgesLiveRoom(t *testing.T) {
 
 	// Wait for a snapshot so there is a blob to purge.
 	waitFor(t, "snapshot persisted", func() bool {
-		_, err := deps.blob.Get(context.Background(), "purge-live")
+		_, err := deps.storedState(context.Background(), "purge-live")
 		return err == nil
 	})
 
@@ -52,7 +55,7 @@ func TestPurgeDisconnectsAndPurgesLiveRoom(t *testing.T) {
 	if _, err := deps.meta.Load(context.Background(), "purge-live"); err == nil {
 		t.Fatal("metadata row not purged")
 	}
-	if _, err := deps.blob.Get(context.Background(), "purge-live"); err == nil {
+	if _, err := deps.storedState(context.Background(), "purge-live"); err == nil {
 		t.Fatal("snapshot blob not purged")
 	}
 }
@@ -72,7 +75,7 @@ func TestPurgeDurableOnlyDocument(t *testing.T) {
 	mgr, deps := testManager(t, fastConfig())
 
 	// Seed a metadata row + blob directly (the "persisted, room released" state).
-	if _, err := deps.blob.Put(context.Background(), "durable-only", "", []byte("snap")); err != nil {
+	if err := deps.putState(context.Background(), "durable-only", []byte("snap")); err != nil {
 		t.Fatalf("seed blob: %v", err)
 	}
 	if err := deps.meta.Save(context.Background(), model.Metadata{
@@ -88,7 +91,7 @@ func TestPurgeDurableOnlyDocument(t *testing.T) {
 	if _, err := deps.meta.Load(context.Background(), "durable-only"); err == nil {
 		t.Fatal("durable metadata not purged")
 	}
-	if _, err := deps.blob.Get(context.Background(), "durable-only"); err == nil {
+	if _, err := deps.storedState(context.Background(), "durable-only"); err == nil {
 		t.Fatal("durable blob not purged")
 	}
 }
@@ -125,10 +128,10 @@ func TestReEvaluateNoLiveRoomIsNoOp(t *testing.T) {
 func TestPurgeLiveRoomSurfacesBlobError(t *testing.T) {
 	open := authopen.New()
 	deps := Deps{
-		Metadata: metainmem.New(),
-		Blob:     deleteFailingBlob{inner: blobinline.New()},
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   metainmem.New(),
+		Checkpoint: deleteFailingStore{CheckpointStore: persistinprocess.New()},
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
@@ -149,31 +152,22 @@ func TestPurgeLiveRoomSurfacesBlobError(t *testing.T) {
 
 // TestPurgeDurableSurfacesMetadataLoadError asserts a metadata Load failure (non
 // NotFound) on a durable-only purge propagates out (no silent success).
-func TestPurgeDurableSurfacesMetadataLoadError(t *testing.T) {
-	open := authopen.New()
-	deps := Deps{
-		Metadata: failingMetaLoad{metainmem.New()},
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
-	}
-	mgr := NewManager(deps, fastConfig(), nil, nil)
-	if err := mgr.Purge(context.Background(), "load-err"); err == nil {
-		t.Fatal("expected purge to surface the metadata load error")
-	}
+// NOTE (FR-018a): a "purgeDurable surfaces the metadata LOAD error" test used to
+// live here. purgeDurable no longer loads the index row before deleting — it
+// deletes the stored state by document id, then the row — so there is no load to
+// fail and the test asserted a code path that no longer exists. The property it
+// defended (a failed cascade surfaces rather than reporting false success) is
+// covered by TestPurgeDurableSurfacesMetadataDeleteError below and by
+// TestPurgeLiveRoomSurfacesBlobError above.
+
+// deleteFailingStore is a CheckpointStore whose delete errors, to drive the
+// cascade error path — a failed cascade must surface rather than report a false
+// success and leave a half-deleted document.
+type deleteFailingStore struct {
+	persistence.CheckpointStore
 }
 
-// deleteFailingBlob is a BlobStore whose Delete errors (non-NotFound), to drive
-// the cascade error path.
-type deleteFailingBlob struct{ inner *blobinline.Store }
-
-func (d deleteFailingBlob) Put(ctx context.Context, p, bucketID string, data []byte) (string, error) {
-	return d.inner.Put(ctx, p, bucketID, data)
-}
-func (d deleteFailingBlob) Get(ctx context.Context, p string) ([]byte, error) {
-	return d.inner.Get(ctx, p)
-}
-func (deleteFailingBlob) Delete(context.Context, string) error {
+func (deleteFailingStore) DeleteCheckpoint(context.Context, backend.DocumentID) error {
 	return errInjectedBlobDelete
 }
 
@@ -196,10 +190,10 @@ func (failingMetaDelete) Delete(context.Context, model.DocumentID) error {
 func TestPurgeLiveRoomSurfacesMetadataDeleteError(t *testing.T) {
 	open := authopen.New()
 	deps := Deps{
-		Metadata: failingMetaDelete{metainmem.New()},
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   failingMetaDelete{metainmem.New()},
+		Checkpoint: persistinprocess.New(),
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
@@ -229,10 +223,10 @@ func TestPurgeDurableSurfacesMetadataDeleteError(t *testing.T) {
 		t.Fatalf("seed metadata: %v", err)
 	}
 	deps := Deps{
-		Metadata: failingMetaDelete{inner},
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   failingMetaDelete{inner},
+		Checkpoint: persistinprocess.New(),
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 	if err := mgr.Purge(context.Background(), "durable-del-err"); err == nil {

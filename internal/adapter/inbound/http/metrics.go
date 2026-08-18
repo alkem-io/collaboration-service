@@ -85,6 +85,46 @@ var (
 		Help:      "Distinct actors that contributed to a document in one flushed window (histogram, aggregated across rooms).",
 		Buckets:   []float64{0, 1, 2, 3, 5, 8, 13, 21, 34, 55},
 	})
+
+	// --- durability (FR-026) ---------------------------------------------------
+	//
+	// These make the DEGRADED window visible before anyone is disconnected. Without
+	// them a document failing every flush looks identical to a healthy one until
+	// escalation kicks its members off, and the first thing an operator learns is
+	// that users were dropped (SC-013).
+
+	// UndurableFlushFailures is the current consecutive-failure count; 0 when
+	// persisting normally. A gauge, not a counter: the question is "is anything
+	// undurable right now", which a monotonic counter cannot answer.
+	UndurableFlushFailures = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "collaboration_undurable_flush_failures",
+		Help: "Consecutive failed flushes for the most recently failing document (0 when durable).",
+	})
+	// UndurableSeconds is how long the current undurable window has lasted.
+	UndurableSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "collaboration_undurable_seconds",
+		Help: "Seconds the most recently failing document has been accepting edits it cannot persist (0 when durable).",
+	})
+	// DurabilityEscalationsTotal counts rooms torn down after repeated persist
+	// failures, DISCARDING their unsaved edits. Any non-zero value is data loss,
+	// which is why it is its own counter rather than another "error" label on
+	// SnapshotsTotal (FR-028, SC-016).
+	DurabilityEscalationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "collaboration_durability_escalations_total",
+		Help: "Rooms closed after repeated persist failures, discarding unsaved edits.",
+	})
+	// EscalationUndurableSeconds records how long each escalated document had been
+	// failing, so the size of the loss window is visible after the fact.
+	EscalationUndurableSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "collaboration_escalation_undurable_seconds",
+		Help:    "How long an escalated document had been undurable before its edits were discarded.",
+		Buckets: prometheus.ExponentialBuckets(1, 2, 10),
+	})
+	// GenerationInvalidationsTotal counts poisoned in-memory generations.
+	GenerationInvalidationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "collaboration_generation_invalidations_total",
+		Help: "Document generations poisoned and reloaded from storage.",
+	})
 )
 
 // InitMetrics registers the service collectors on the dedicated registry,
@@ -97,6 +137,11 @@ func InitMetrics() {
 			RoomsActive,
 			ConnectionsActive,
 			SnapshotsTotal,
+			UndurableFlushFailures,
+			UndurableSeconds,
+			DurabilityEscalationsTotal,
+			EscalationUndurableSeconds,
+			GenerationInvalidationsTotal,
 			FanoutTotal,
 			FanoutLagSeconds,
 			ContributingActors,
@@ -133,6 +178,41 @@ func (PrometheusMetrics) SnapshotSaved() { SnapshotsTotal.WithLabelValues("saved
 
 // SnapshotFailed counts a failed snapshot persist.
 func (PrometheusMetrics) SnapshotFailed() { SnapshotsTotal.WithLabelValues("error").Inc() }
+
+// DocumentUndurable publishes the degraded-durability window: how many
+// consecutive flushes have failed and how long the document has been accepting
+// edits it cannot persist.
+//
+// These are the signals that make the state visible BEFORE anyone is
+// disconnected (FR-026, SC-013). Without them a document failing every flush
+// looks identical to a healthy one until escalation kicks its members off, and
+// the first thing an operator learns is that users were dropped. Gauges rather
+// than counters: the question is "is anything undurable right now, and for how
+// long", which a monotonically increasing counter cannot answer.
+func (PrometheusMetrics) DocumentUndurable(consecutive int, since time.Duration) {
+	UndurableFlushFailures.Set(float64(consecutive))
+	UndurableSeconds.Set(since.Seconds())
+}
+
+// DocumentDurabilityRestored clears the degraded-durability gauges.
+func (PrometheusMetrics) DocumentDurabilityRestored() {
+	UndurableFlushFailures.Set(0)
+	UndurableSeconds.Set(0)
+}
+
+// DocumentEscalated counts a room torn down for repeated persist failures,
+// recording how long it had been undurable. This is the DATA LOSS signal — the
+// unsaved edits were discarded — so it is deliberately its own counter rather
+// than another "error" label on SnapshotsTotal (FR-028, SC-016).
+func (PrometheusMetrics) DocumentEscalated(undurableFor time.Duration) {
+	DurabilityEscalationsTotal.Inc()
+	UndurableSeconds.Set(0)
+	UndurableFlushFailures.Set(0)
+	EscalationUndurableSeconds.Observe(undurableFor.Seconds())
+}
+
+// GenerationInvalidated counts a poisoned in-memory generation.
+func (PrometheusMetrics) GenerationInvalidated() { GenerationInvalidationsTotal.Inc() }
 
 // FanoutPublished counts a cross-pod publish and records its lag (R10).
 func (PrometheusMetrics) FanoutPublished(lag time.Duration) {

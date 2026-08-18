@@ -7,26 +7,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
-// failingBlob is a BlobStore whose Put always errors, to drive the save-error
-// control path (R7: room keeps serving from memory, emits save-error).
-type failingBlob struct{ inner port.BlobStore }
+// failingStore is a CheckpointStore whose saves always error, to drive the
+// not-yet-durable control path (R7: the room keeps serving from memory and
+// reports that recent edits are not yet saved).
+type failingStore struct {
+	persistence.CheckpointStore
+	CheckpointDeleter
+}
 
-func (f failingBlob) Put(context.Context, string, string, []byte) (string, error) {
-	return "", errors.New("disk full")
+func (failingStore) SaveCheckpoint(context.Context, persistence.SaveCheckpointRequest) (persistence.Revision, error) {
+	return 0, errors.New("disk full")
 }
-func (f failingBlob) Get(ctx context.Context, p string) ([]byte, error) {
-	return f.inner.Get(ctx, p)
-}
-func (f failingBlob) Delete(ctx context.Context, p string) error { return f.inner.Delete(ctx, p) }
 
 // failingMetaLoad is a MetadataStore whose Load errors with a non-NotFound error,
 // to drive room materialization failure.
@@ -63,10 +66,10 @@ func TestSaveErrorControlOnBlobFailure(t *testing.T) {
 	open := authopen.New()
 	metrics := &countingMetrics{}
 	deps := Deps{
-		Metadata: meta,
-		Blob:     failingBlob{inner: blobinline.New()},
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   meta,
+		Checkpoint: failingStore{CheckpointStore: persistinprocess.New(), CheckpointDeleter: persistinprocess.New()},
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), metrics, nil)
 
@@ -91,10 +94,10 @@ func TestSaveErrorControlOnBlobFailure(t *testing.T) {
 func TestMaterializeFailsOnMetaLoadError(t *testing.T) {
 	open := authopen.New()
 	deps := Deps{
-		Metadata: failingMetaLoad{metainmem.New()},
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   failingMetaLoad{metainmem.New()},
+		Checkpoint: persistinprocess.New(),
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 
@@ -127,10 +130,10 @@ func TestManagerCloseReleasesRooms(t *testing.T) {
 
 	// The close-time snapshot persisted the content.
 	waitFor(t, "close snapshot", func() bool {
-		_, err := deps.blob.Get(context.Background(), "close-me")
+		_, err := deps.storedState(context.Background(), "close-me")
 		return err == nil
 	})
-	snap, _ := deps.blob.Get(context.Background(), "close-me")
+	snap, _ := deps.storedState(context.Background(), "close-me")
 	reloaded := ycrdt.NewDoc("guid")
 	_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 	if !contains(xmlText(reloaded), "kept") {
@@ -144,10 +147,10 @@ func TestLifecycleMetrics(t *testing.T) {
 	open := authopen.New()
 	metrics := &countingMetrics{}
 	deps := Deps{
-		Metadata: metainmem.New(),
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   metainmem.New(),
+		Checkpoint: persistinprocess.New(),
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), metrics, nil)
 
@@ -212,12 +215,15 @@ func (c *erroringConn) Send(_ []byte) error {
 	return errors.New("unreachable")
 }
 
-// failingBlobGet errors on Get with a non-NotFound error, to drive the
+// failingLoadStore errors on load with a non-NotFound error, to drive the
 // blob-fetch failure path of loadSnapshot.
-type failingBlobGet struct{ port.BlobStore }
+type failingLoadStore struct {
+	persistence.CheckpointStore
+	CheckpointDeleter
+}
 
-func (failingBlobGet) Get(context.Context, string) ([]byte, error) {
-	return nil, errors.New("blob backend down")
+func (failingLoadStore) LoadCheckpoint(context.Context, backend.DocumentID) (persistence.Checkpoint, error) {
+	return persistence.Checkpoint{}, errors.New("blob backend down")
 }
 
 // TestLoadSnapshotPropagatesBlobError asserts that a metadata row pointing at a
@@ -235,10 +241,10 @@ func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
 
 	open := authopen.New()
 	deps := Deps{
-		Metadata: meta,
-		Blob:     failingBlobGet{},
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   meta,
+		Checkpoint: failingLoadStore{CheckpointStore: persistinprocess.New(), CheckpointDeleter: persistinprocess.New()},
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 
@@ -268,3 +274,11 @@ func TestDoubleLeaveAndForwardAfterReleaseAreSafe(t *testing.T) {
 	session.Leave()
 	session.Forward([]byte{0})
 }
+
+// The durability signals are no-ops in this counter: these tests predate them and
+// assert on room/connection/snapshot counts, so absorbing them keeps the double
+// satisfying Metrics without pretending to observe what it does not check.
+func (m *countingMetrics) DocumentUndurable(int, time.Duration) {}
+func (m *countingMetrics) DocumentDurabilityRestored()          {}
+func (m *countingMetrics) DocumentEscalated(time.Duration)      {}
+func (m *countingMetrics) GenerationInvalidated()               {}

@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/antst/go-yjs/backend/persistence"
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/memory"
@@ -157,6 +160,15 @@ type Room struct {
 	// so it never under-estimates the true size between exact checks. Zero means
 	// "not yet established" — the cheap skip then defers to the exact check.
 	docBytes int
+
+	// flushFailures counts CONSECUTIVE failed flushes; undurableSince marks when
+	// the run of failures began. Both reset on a successful flush. They drive the
+	// durability state machine in flush.go.
+	flushFailures  int
+	undurableSince time.Time
+	// pointerChecked records that we have already looked for a store-assigned
+	// content pointer after the first save.
+	pointerChecked bool
 	// seededPending is true when the room materialized from the first-open seed
 	// (Metadata.SeedContent) and that seed has not yet been promoted to a real
 	// per-document snapshot. The run loop arms the save debounce once at start so
@@ -371,6 +383,11 @@ type RoomConfig struct {
 // defaults). A breach disconnects only the offending connection with a control
 // message; other collaborators are unaffected (constitution §V).
 type Limits struct {
+	// FlushFailureThreshold is how many CONSECUTIVE failed flushes are tolerated
+	// before the room is torn down and its unsaved edits discarded. It is not 1 by
+	// design: one transient backend blip must not cost a healthy session. Zero uses
+	// the documented default.
+	FlushFailureThreshold int
 	// MaxDocBytes rejects an update that would grow the encoded snapshot past
 	// this size (epic R9 default ~32 MiB). Zero disables the size check.
 	MaxDocBytes int
@@ -395,6 +412,12 @@ const (
 	// added, so the snapshot would be refused by the transport after passing our
 	// own budget check — the document would be accepted and then permanently
 	// unsaveable. 30 MiB leaves headroom for framing.
+	// defaultFlushFailureThreshold is how many CONSECUTIVE failed flushes are
+	// tolerated before a room is torn down and its unsaved edits discarded. It is
+	// deliberately not 1: a single transient backend blip must not cost a healthy
+	// session, and the retry usually succeeds.
+	defaultFlushFailureThreshold = 5
+
 	defaultMaxDocBytes             = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom         = 50
 	defaultUpdateRatePerSec        = 50
@@ -417,10 +440,11 @@ const (
 // DefaultLimits are the epic R9 defaults (all config-tunable, OPEN-4).
 func DefaultLimits() Limits {
 	return Limits{
-		MaxDocBytes:      defaultMaxDocBytes,
-		MaxConnsPerRoom:  defaultMaxConnsPerRoom,
-		UpdateRatePerSec: defaultUpdateRatePerSec,
-		UpdateBurst:      defaultUpdateRatePerSec,
+		MaxDocBytes:           defaultMaxDocBytes,
+		FlushFailureThreshold: defaultFlushFailureThreshold,
+		MaxConnsPerRoom:       defaultMaxConnsPerRoom,
+		UpdateRatePerSec:      defaultUpdateRatePerSec,
+		UpdateBurst:           defaultUpdateRatePerSec,
 	}
 }
 
@@ -612,38 +636,32 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 		r.blobKind = meta.BlobStore
 	}
 
-	// An empty ContentPointer means there is no live snapshot yet (an index row
-	// without a blob): seed from the server-delivered content if any, otherwise stay
-	// empty. persist() always writes the blob BEFORE upserting the pointer, so a row
-	// with a NON-EMPTY pointer must have a blob — a missing blob behind a populated
-	// pointer is corruption, NOT a "no snapshot yet" case. Seeding/blanking it would
-	// materialize stale or empty content and the next save would overwrite the last
-	// good snapshot, so fail materialization instead.
-	if meta.ContentPointer == "" {
+	// Load the document's stored state. ErrNotFound means it has never been
+	// saved — seed from the row's create-time content if any. ErrCorrupt means the
+	// index says state EXISTS but it could not be read; that must fail
+	// materialization rather than fall back to seeding, because seeding would
+	// resurrect stale content and the next save would overwrite the last good
+	// state with it (FR-014).
+	cp, err := r.deps.Checkpoint.LoadCheckpoint(ctx, backend.DocumentID(r.id))
+	switch {
+	case err == nil:
+	case errors.Is(err, persistence.ErrNotFound):
 		r.seedFromContent(meta.SeedContent)
 		return nil
+	default:
+		return fmt.Errorf("loading stored state for %s: %w", r.id, err)
 	}
 
-	data, err := r.deps.Blob.Get(ctx, meta.ContentPointer)
-	if err != nil {
-		if isNotFound(err) {
-			return fmt.Errorf("snapshot blob missing for %s (pointer %q): %w", r.id, meta.ContentPointer, err)
-		}
-		return err
-	}
-
-	// The snapshot is a full v2 update; applying it with a non-connection,
+	// The stored state is a full v2 update; applying it with a non-connection,
 	// peer-flagged origin means the update observer fans it to all members
 	// (there are none yet at load time) without re-publishing it to the bus —
-	// rehydration is local state, not a new edit to broadcast. A live snapshot
-	// is authoritative: any SeedContent on the row is a stale create-time bootstrap
+	// rehydration is local state, not a new edit to broadcast. Stored state is
+	// authoritative: any SeedContent on the row is a stale create-time bootstrap
 	// and is deliberately ignored (re-applying it would resurrect old content).
-	if err := ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0, peer: true}); err != nil {
-		// A stored snapshot that will not decode is corrupt. Surface it instead of
-		// opening the document on a half-applied state — the caller treats a load
-		// error as "do not serve this document from this data" (FR-014).
-		return fmt.Errorf("applying stored snapshot: %w", err)
+	if err := ycrdt.ApplyUpdateV2(r.doc, cp.Update, updateOrigin{src: 0, peer: true}); err != nil {
+		return fmt.Errorf("applying stored state: %w", err)
 	}
+	r.docBytes = len(cp.Update)
 	return nil
 }
 
@@ -1456,18 +1474,43 @@ func (r *Room) persist(ctx context.Context) {
 	// MaxDocBytes skip is measured against the true size (it would otherwise drift
 	// upward from the conservative per-update over-counting in onDocUpdate).
 	r.docBytes = len(snapshot)
-	oldPointer := r.pointer // the snapshot this save supersedes (empty on first save)
-	hint := r.pointer
-	if hint == "" {
-		hint = string(r.id) // first save: hint the document id (inline pointer == id).
+
+	// The state vector is required by the contract even where the store derives it
+	// on read. Deriving it here from the update we just encoded is free — we are
+	// holding the bytes — and keeps the store's obligation to bytes alone.
+	vector, err := ycrdt.EncodeStateVectorFromUpdateV2(snapshot)
+	if err != nil {
+		r.logger.Error("state vector derive failed", zap.String("doc", string(r.id)), zap.Error(err))
+		r.metrics.SnapshotFailed()
+		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "snapshot encode failed"})
+		return
 	}
 
-	pointer, err := r.deps.Blob.Put(ctx, hint, r.bucketID, snapshot)
-	if err != nil {
-		r.logger.Error("snapshot blob put failed", zap.String("doc", string(r.id)), zap.Error(err))
-		r.metrics.SnapshotFailed()
-		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "blob put failed"})
+	// SaveCheckpoint carries the document's COMPLETE state. That is the caller
+	// obligation the contract cannot check: a store replaces rather than merges, so
+	// a save covering less than a previous one discards the difference permanently
+	// and silently. EncodeStateAsUpdateV2 over the live doc gives that property by
+	// construction — never narrow it to a delta here.
+	if _, err := r.deps.Checkpoint.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID:  backend.DocumentID(r.id),
+		Update:      snapshot,
+		StateVector: vector,
+	}); err != nil {
+		r.onFlushFailed(err)
 		return
+	}
+
+	// First save only: a store that addresses content by pointer (file-service)
+	// created the document's file and recorded its pointer, so refresh the cached
+	// row to pick it up. The pointer is stable thereafter. The flag makes this cost
+	// one extra read per document LIFETIME rather than per flush — without it a
+	// store that keeps no pointer at all (the in-process one) would re-read on
+	// every single save, forever, and never find one.
+	if !r.pointerChecked {
+		r.pointerChecked = true
+		if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
+			r.pointer = meta.ContentPointer
+		}
 	}
 
 	newVersion := r.version + 1
@@ -1475,7 +1518,7 @@ func (r *Room) persist(ctx context.Context) {
 		ID:                    r.id,
 		ContentType:           r.content,
 		Version:               newVersion,
-		ContentPointer:        pointer,
+		ContentPointer:        r.pointer,
 		BlobStore:             r.blobKind,
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
@@ -1483,31 +1526,19 @@ func (r *Room) persist(ctx context.Context) {
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))
-		r.metrics.SnapshotFailed()
-		r.broadcastControl(model.ControlMessage{Kind: model.ControlSaveError, Error: "metadata save failed"})
+		r.onFlushFailed(err)
 		return
 	}
 
-	// Delete-after-commit (002 FR-002): only now that the new pointer is durably
-	// recorded do we drop the superseded blob. Had Save failed above, the old blob is
-	// untouched and the row still points at it — never a stranded pointer. Best-effort:
-	// a failed cleanup just leaves a reclaimable orphan.
-	if oldPointer != "" && oldPointer != pointer {
-		if err := r.deps.Blob.Delete(ctx, oldPointer); err != nil && !isNotFound(err) {
-			r.logger.Warn("superseded snapshot cleanup failed (orphaned blob)",
-				zap.String("doc", string(r.id)), zap.String("pointer", oldPointer), zap.Error(err))
-		}
-	}
-
-	r.pointer = pointer
 	r.version = newVersion
 	// r.version is the room's own save counter, not a read-back of the store's
 	// version — a redelivered no-op PreRegister can bump the persisted row ahead of
 	// it; harmless while Metadata.Version is reserved/unused (FR-025).
 	r.dirty = false
-	// The seed (if any) is now a real per-document snapshot located by
-	// ContentPointer; subsequent opens load the blob and never re-seed (T004).
+	// The seed (if any) is now real stored state; subsequent opens load it and
+	// never re-seed (T004).
 	r.seededPending = false
+	r.onFlushSucceeded()
 	r.metrics.SnapshotSaved()
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})
 }
@@ -1550,6 +1581,7 @@ func (r *Room) armIdleTimer(idleTimer *time.Timer) {
 func (r *Room) teardownInvalidated() {
 	r.logger.Warn("document generation invalidated; tearing down without persist",
 		zap.String("doc", string(r.id)))
+	r.metrics.GenerationInvalidated()
 	r.teardown(nil)
 }
 

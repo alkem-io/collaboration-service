@@ -5,6 +5,8 @@ import (
 	"context"
 	"testing"
 
+	ycrdt "github.com/antst/go-yjs/crdt"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -16,23 +18,34 @@ func TestInvPersistRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	deps := newTestDeps()
 
-	// Blob: bytes in == bytes out (includes embedded NULs / high bytes — no text mangling).
-	data := []byte{0x00, 0x01, 0xff, 0x42, 0x00, 0x99, 0x7f}
-	ptr, err := deps.blob.Put(ctx, "doc-rt", "bucket-1", data)
+	// State: bytes in == bytes out, with no text mangling.
+	//
+	// Restructured for the checkpoint profile (FR-018a): the original wrote an
+	// arbitrary byte string. A CheckpointStore DERIVES the state vector by parsing
+	// the stored update, so arbitrary bytes are correctly rejected as ErrCorrupt —
+	// the fixture had to become a real update. The property under test is unchanged
+	// and the fixture is if anything harsher: a v2 update carries embedded NULs and
+	// high bytes of its own, and the multi-byte text below adds more.
+	src := ycrdt.NewDoc("rt", ycrdt.WithClientID(7))
+	src.GetText("t").Insert(0, "round\x00trip — ünïcøde ✓", ycrdt.Object{})
+	data, err := ycrdt.EncodeStateAsUpdateV2(src, nil)
 	if err != nil {
-		t.Fatalf("Put: %v", err)
+		t.Fatalf("encode fixture: %v", err)
 	}
-	got, err := deps.blob.Get(ctx, ptr)
+	if err := deps.putState(ctx, "doc-rt", data); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := deps.storedState(ctx, "doc-rt")
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	if !bytes.Equal(got, data) {
-		t.Fatalf("blob round-trip changed bytes: got %x want %x", got, data)
+		t.Fatalf("state round-trip changed bytes: got %x want %x", got, data)
 	}
 
 	// Metastore: the index fields round-trip (version is store-managed, so not asserted).
 	meta := model.Metadata{
-		ID: "doc-rt", ContentType: model.ContentTypeWhiteboard, ContentPointer: ptr,
+		ID: "doc-rt", ContentType: model.ContentTypeWhiteboard, ContentPointer: "file-rt",
 		BlobStore: "inline", OwnerRef: "owner-9", AuthorizationPolicyID: "policy-3", StorageBucketID: "bucket-1",
 	}
 	if err := deps.meta.Save(ctx, meta); err != nil {

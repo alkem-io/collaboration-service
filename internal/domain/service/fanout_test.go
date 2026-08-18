@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -89,7 +89,7 @@ func newPodManager(t *testing.T, bus *sharedBus, source string) *Manager {
 	deps := Deps{
 		Broadcaster: &podBroadcaster{bus: bus, source: source},
 		Metadata:    metainmem.New(),
-		Blob:        blobinline.New(),
+		Checkpoint:  persistinprocess.New(),
 		Auth:        open,
 		AuthZ:       open,
 	}
@@ -223,7 +223,7 @@ func newManagerWithBroadcaster(t *testing.T, b interface {
 	deps := Deps{
 		Broadcaster: b,
 		Metadata:    metainmem.New(),
-		Blob:        blobinline.New(),
+		Checkpoint:  persistinprocess.New(),
 		Auth:        open,
 		AuthZ:       open,
 	}

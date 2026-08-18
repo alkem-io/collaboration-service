@@ -10,7 +10,7 @@ import (
 	"github.com/antst/go-yjs/protocol"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -30,10 +30,10 @@ func TestSaveErrorOnMetadataFailure(t *testing.T) {
 	open := authopen.New()
 	metrics := &countingMetrics{}
 	deps := Deps{
-		Metadata: failingMetaSave{},
-		Blob:     blobinline.New(),
-		Auth:     open,
-		AuthZ:    open,
+		Metadata:   failingMetaSave{},
+		Checkpoint: persistinprocess.New(),
+		Auth:       open,
+		AuthZ:      open,
 	}
 	mgr := NewManager(deps, fastConfig(), metrics, nil)
 

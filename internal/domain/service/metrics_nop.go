@@ -35,3 +35,15 @@ func (NopMetrics) FanoutFailed() {}
 
 // ContributingActors does nothing.
 func (NopMetrics) ContributingActors(int) {}
+
+// DocumentUndurable does nothing.
+func (NopMetrics) DocumentUndurable(int, time.Duration) {}
+
+// DocumentDurabilityRestored does nothing.
+func (NopMetrics) DocumentDurabilityRestored() {}
+
+// DocumentEscalated does nothing.
+func (NopMetrics) DocumentEscalated(time.Duration) {}
+
+// GenerationInvalidated does nothing.
+func (NopMetrics) GenerationInvalidated() {}

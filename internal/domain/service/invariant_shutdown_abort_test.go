@@ -62,3 +62,8 @@ func TestInvShutdownAbortNoGaugeUnderflow(t *testing.T) {
 		t.Fatalf("rooms_active gauge underflow: RoomClosed=%d but RoomOpened=%d (the abort path emitted a Close for a never-opened room)", closed, opened)
 	}
 }
+
+func (m *gaugeMetrics) DocumentUndurable(int, time.Duration) {}
+func (m *gaugeMetrics) DocumentDurabilityRestored()          {}
+func (m *gaugeMetrics) DocumentEscalated(time.Duration)      {}
+func (m *gaugeMetrics) GenerationInvalidated()               {}

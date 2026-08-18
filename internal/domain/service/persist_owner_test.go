@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -36,7 +38,8 @@ func TestPersistCarriesOwnerRefForward(t *testing.T) {
 		t.Fatalf("pre-register metadata: %v", err)
 	}
 
-	mgr := NewManager(Deps{Metadata: meta, Blob: blobinline.New(), Auth: open, AuthZ: open}, RoomConfig{
+	store := persistinprocess.New()
+	mgr := NewManager(Deps{Metadata: meta, Checkpoint: store, Auth: open, AuthZ: open}, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
 		IdleTimeout:  10 * time.Second,
 		SendBuffer:   64,
@@ -57,7 +60,10 @@ func TestPersistCarriesOwnerRefForward(t *testing.T) {
 	if saved.OwnerRef != owner {
 		t.Fatalf("snapshot persist dropped OwnerRef: got %q, want preserved %q", saved.OwnerRef, owner)
 	}
-	if saved.ContentPointer == "" {
-		t.Fatalf("snapshot persist did not set a content pointer (sanity): %+v", saved)
+	// Sanity: the save actually happened. The signal is STORED STATE, not a
+	// content pointer — a pointer exists only for a store that addresses content by
+	// file id, and the in-process store used here keeps state by document id.
+	if _, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(docID)); err != nil {
+		t.Fatalf("snapshot persist did not store state (sanity): %v", err)
 	}
 }

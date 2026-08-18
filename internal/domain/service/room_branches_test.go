@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -155,23 +157,24 @@ func TestNewManagerNilMetricsDefaultsToNop(t *testing.T) {
 // and blob, leaving no orphan.
 func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
 	meta := metainmem.New()
-	blob := blobinline.New()
+	blob := persistinprocess.New()
 	open := authopen.New()
 	ctx := context.Background()
 
-	// Seed a durable document with a blob, but never materialize a room for it.
-	pointer, err := blob.Put(ctx, "orphan", "", []byte("snapshot"))
-	if err != nil {
-		t.Fatalf("seed blob: %v", err)
+	// Seed a durable document with stored state, but never materialize a room.
+	if _, err := blob.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "orphan", Update: []byte("snapshot"), StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("seed stored state: %v", err)
 	}
 	if err := meta.Save(ctx, model.Metadata{
 		ID: "orphan", ContentType: model.ContentTypeMemo,
-		ContentPointer: pointer, BlobStore: model.BlobStoreInline,
+		ContentPointer: "file-orphan", BlobStore: model.BlobStoreInline,
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}
 
-	mgr := NewManager(Deps{Metadata: meta, Blob: blob, Auth: open, AuthZ: open}, fastConfig(), nil, nil)
+	mgr := NewManager(Deps{Metadata: meta, Checkpoint: blob, Auth: open, AuthZ: open}, fastConfig(), nil, nil)
 	if err := mgr.Purge(ctx, "orphan"); err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -179,8 +182,8 @@ func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
 	if _, err := meta.Load(ctx, "orphan"); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("metadata row not purged: err=%v", err)
 	}
-	if _, err := blob.Get(ctx, pointer); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("blob not purged: err=%v", err)
+	if _, err := blob.LoadCheckpoint(ctx, "orphan"); !errors.Is(err, persistence.ErrNotFound) {
+		t.Fatalf("stored state not purged: err=%v", err)
 	}
 }
 
@@ -284,10 +287,10 @@ func TestSaveDebounceDisabledPersistsOnlyOnRelease(t *testing.T) {
 
 	// No debounce fired; the release-time snapshot is the one that persists.
 	waitFor(t, "release snapshot", func() bool {
-		_, err := deps.blob.Get(context.Background(), "no-debounce")
+		_, err := deps.storedState(context.Background(), "no-debounce")
 		return err == nil
 	})
-	snap, _ := deps.blob.Get(context.Background(), "no-debounce")
+	snap, _ := deps.storedState(context.Background(), "no-debounce")
 	reloaded := newRoomDoc("guid")
 	_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 	if !contains(xmlText(reloaded), "kept") {
@@ -328,9 +331,9 @@ func TestDispatchPersistFlushesDirtyDoc(t *testing.T) {
 	if room.dirty {
 		t.Fatal("cmdPersist did not flush the dirty doc")
 	}
-	deps := room.deps.Blob.(*blobinline.Store)
-	if _, err := deps.Get(context.Background(), "unit"); err != nil {
-		t.Fatalf("cmdPersist did not write a snapshot: %v", err)
+	store := room.deps.Checkpoint.(*persistinprocess.Store)
+	if _, err := store.LoadCheckpoint(context.Background(), "unit"); err != nil {
+		t.Fatalf("cmdPersist did not write stored state: %v", err)
 	}
 }
 
@@ -611,17 +614,13 @@ func TestSendBufferDefaultsWhenZeroWithOtherTimers(t *testing.T) {
 
 // --- manager.go: purgeDurable blob-delete error ---
 
-// failingDeleteBlob is a BlobStore whose Delete fails with a non-NotFound error,
-// to drive purgeDurable's blob-delete error branch.
-type failingDeleteBlob struct{ inner port.BlobStore }
+// failingDeleteStore is a CheckpointStore whose delete fails, to drive
+// purgeDurable's error branch.
+type failingDeleteStore struct {
+	persistence.CheckpointStore
+}
 
-func (f failingDeleteBlob) Put(ctx context.Context, p, bucketID string, d []byte) (string, error) {
-	return f.inner.Put(ctx, p, bucketID, d)
-}
-func (f failingDeleteBlob) Get(ctx context.Context, p string) ([]byte, error) {
-	return f.inner.Get(ctx, p)
-}
-func (failingDeleteBlob) Delete(context.Context, string) error {
+func (failingDeleteStore) DeleteCheckpoint(context.Context, backend.DocumentID) error {
 	return errors.New("blob backend down")
 }
 
@@ -640,7 +639,9 @@ func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
 	}
 
 	mgr := NewManager(Deps{
-		Metadata: meta, Blob: failingDeleteBlob{inner: blobinline.New()}, Auth: open, AuthZ: open,
+		Metadata:   meta,
+		Checkpoint: failingDeleteStore{CheckpointStore: persistinprocess.New()},
+		Auth:       open, AuthZ: open,
 	}, fastConfig(), nil, nil)
 
 	if err := mgr.Purge(ctx, "del-fail"); err == nil {
@@ -657,29 +658,18 @@ func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
 // a blob — a missing one is corruption, and seeding/blanking it would materialize
 // stale/empty content and let the next save overwrite the last good snapshot.
 // (The legitimate "no snapshot yet" case is an EMPTY ContentPointer, covered by
-// the seed tests.)
-func TestLoadSnapshotMissingBlobBehindPointerFailsMaterialization(t *testing.T) {
-	meta := metainmem.New()
-	open := authopen.New()
-	ctx := context.Background()
-	// Index row whose (non-empty) ContentPointer references a blob the empty store
-	// lacks — corruption, not the index-upsert/blob-write window.
-	if err := meta.Save(ctx, model.Metadata{
-		ID: "no-blob", ContentType: model.ContentTypeMemo,
-		ContentPointer: "no-blob", BlobStore: model.BlobStoreInline,
-	}); err != nil {
-		t.Fatalf("seed metadata: %v", err)
-	}
-
-	mgr := NewManager(Deps{Metadata: meta, Blob: blobinline.New(), Auth: open, AuthZ: open}, fastConfig(), nil, nil)
-	_, _, err := mgr.Join(ctx, JoinRequest{ID: "no-blob", Content: model.ContentTypeMemo, Conn: &captureConn{}})
-	if err == nil {
-		t.Fatal("Join with a populated pointer but missing blob must fail materialization, got nil error")
-	}
-	if !strings.Contains(err.Error(), "snapshot blob missing") {
-		t.Fatalf("Join error = %v, want a snapshot-blob-missing materialization failure", err)
-	}
-}
+// NOTE (FR-018a): "a populated pointer whose blob is missing must fail
+// materialization" moved to the file-service store's tests. The property is
+// unchanged and still defended — a document whose index says state EXISTS but
+// whose content is gone must NOT be treated as "nothing stored", or seeding would
+// resurrect stale content and the next save would overwrite the last good state.
+//
+// It cannot be expressed here any more: the distinction requires a store that
+// addresses content by POINTER, so that "pointer set, content missing" is
+// representable. The in-process store keeps state by document id and has no
+// pointer, so for it there is only "present" or "absent". The file-service store
+// returns ErrCorrupt (not ErrNotFound) for exactly this case, and loadSnapshot
+// only seeds on ErrNotFound.
 
 // --- room.go: handleLeave / dropMember absent member ---
 
@@ -763,5 +753,5 @@ func TestDispatchSyncUnknownSubTagIsNoOp(t *testing.T) {
 var (
 	_ port.ClusterBroadcaster = erroringSubBroadcaster{}
 	_ port.ClusterBroadcaster = erroringPubBroadcaster{}
-	_ port.BlobStore          = failingDeleteBlob{}
+	_ CheckpointDeleter       = failingDeleteStore{}
 )

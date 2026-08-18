@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -155,10 +157,12 @@ func (r *Room) reEvaluateMembers(ctx context.Context) {
 // not-found blob/metadata delete is success (constitution §V, lifecycle-events.md).
 func (r *Room) purge(ctx context.Context) error {
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed, Error: "document deleted"})
-	if r.pointer != "" {
-		if err := r.deps.Blob.Delete(ctx, r.pointer); err != nil && !isNotFound(err) {
-			return err
-		}
+	del, err := r.deps.deleter()
+	if err != nil {
+		return err
+	}
+	if err := del.DeleteCheckpoint(ctx, backend.DocumentID(r.id)); err != nil {
+		return err
 	}
 	if err := r.deps.Metadata.Delete(ctx, r.id); err != nil && !isNotFound(err) {
 		return err

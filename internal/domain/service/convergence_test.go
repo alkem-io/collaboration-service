@@ -122,10 +122,10 @@ func TestAwarenessFanOutAndNotPersisted(t *testing.T) {
 	// Wait for the debounced snapshot, then decode it and assert it has the doc
 	// edit but no awareness/ephemeral leakage.
 	waitFor(t, "snapshot saved", func() bool {
-		_, err := deps.blob.Get(context.Background(), string(docID))
+		_, err := deps.storedState(context.Background(), string(docID))
 		return err == nil
 	})
-	snap, err := deps.blob.Get(context.Background(), string(docID))
+	snap, err := deps.storedState(context.Background(), string(docID))
 	if err != nil {
 		t.Fatalf("blob get: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestIdleReleasePersistsFinalSnapshot(t *testing.T) {
 
 	waitFor(t, "room released", func() bool { return mgr.RoomCount() == 0 })
 	waitFor(t, "final snapshot saved", func() bool {
-		_, err := deps.blob.Get(context.Background(), string(docID))
+		_, err := deps.storedState(context.Background(), string(docID))
 		return err == nil
 	})
 }

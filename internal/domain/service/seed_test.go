@@ -5,12 +5,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -109,7 +112,7 @@ func TestRoomSeedsFromStoredContentOnFirstOpen(t *testing.T) {
 			const docID = "seed-doc"
 
 			meta := metainmem.New()
-			blob := blobinline.New()
+			blob := persistinprocess.New()
 			open := authopen.New()
 
 			// The server pre-registers the document on create with its stored
@@ -125,7 +128,7 @@ func TestRoomSeedsFromStoredContentOnFirstOpen(t *testing.T) {
 				t.Fatalf("seed metadata: %v", err)
 			}
 
-			mgr := NewManager(Deps{Metadata: meta, Blob: blob, Auth: open, AuthZ: open}, RoomConfig{
+			mgr := NewManager(Deps{Metadata: meta, Checkpoint: blob, Auth: open, AuthZ: open}, RoomConfig{
 				SaveDebounce: 10 * time.Millisecond,
 				IdleTimeout:  10 * time.Second,
 				SendBuffer:   64,
@@ -139,27 +142,26 @@ func TestRoomSeedsFromStoredContentOnFirstOpen(t *testing.T) {
 			// The creation content is present and the document is non-empty on open.
 			tc.assertSeen(t, c)
 
-			// First save promotes the seed to a real per-document snapshot: a
-			// ContentPointer is written so subsequent opens load the blob.
-			waitFor(t, "seed promoted to a persisted snapshot", func() bool {
-				m, err := meta.Load(context.Background(), docID)
-				return err == nil && m.ContentPointer != ""
+			// First save promotes the seed to real stored state, so subsequent opens
+			// load it instead of re-seeding.
+			//
+			// The promotion signal is STORED STATE, not a ContentPointer: a pointer
+			// only exists for a store that addresses content by file id
+			// (file-service). The in-process store keeps state by document id and has
+			// no pointer, so asserting on one would be testing the backend rather than
+			// the seed.
+			waitFor(t, "seed promoted to persisted state", func() bool {
+				_, err := blob.LoadCheckpoint(context.Background(), backend.DocumentID(docID))
+				return err == nil
 			})
 
-			saved, err := meta.Load(context.Background(), docID)
-			if err != nil {
-				t.Fatalf("reload metadata: %v", err)
-			}
-			if saved.ContentPointer == "" {
-				t.Fatal("first save did not set a ContentPointer (seed not promoted)")
-			}
-
-			// The promoted blob carries the seeded content (the seed became the
+			// The promoted state carries the seeded content (the seed became the
 			// document's first real snapshot, not a transient in-memory state).
-			snap, err := blob.Get(context.Background(), saved.ContentPointer)
+			cp, err := blob.LoadCheckpoint(context.Background(), backend.DocumentID(docID))
 			if err != nil {
-				t.Fatalf("get promoted snapshot: %v", err)
+				t.Fatalf("load promoted state: %v", err)
 			}
+			snap := cp.Update
 			reloaded := newRoomDoc("verify")
 			_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 			tc.assertBlob(t, reloaded)
@@ -177,7 +179,7 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 	const docID = "already-saved"
 
 	meta := metainmem.New()
-	blob := blobinline.New()
+	blob := persistinprocess.New()
 	open := authopen.New()
 
 	// The live snapshot says "live content"; the (stale) seed says "stale seed".
@@ -187,10 +189,12 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode live snapshot: %v", err)
 	}
-	pointer, err := blob.Put(context.Background(), docID, "", liveSnap)
-	if err != nil {
-		t.Fatalf("seed blob: %v", err)
+	if _, err := blob.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: backend.DocumentID(docID), Update: liveSnap, StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("seed stored state: %v", err)
 	}
+	pointer := "file-" + string(docID)
 	if err := meta.Save(context.Background(), model.Metadata{
 		ID:             docID,
 		ContentType:    model.ContentTypeMemo,
@@ -202,7 +206,7 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 		t.Fatalf("seed metadata: %v", err)
 	}
 
-	mgr := NewManager(Deps{Metadata: meta, Blob: blob, Auth: open, AuthZ: open}, RoomConfig{
+	mgr := NewManager(Deps{Metadata: meta, Checkpoint: blob, Auth: open, AuthZ: open}, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
 		IdleTimeout:  10 * time.Second,
 		SendBuffer:   64,
@@ -225,7 +229,7 @@ func TestRoomFreshWithoutSeedStaysEmpty(t *testing.T) {
 	const docID = "empty-fresh"
 
 	meta := metainmem.New()
-	blob := blobinline.New()
+	blob := persistinprocess.New()
 	open := authopen.New()
 
 	if err := meta.Save(context.Background(), model.Metadata{
@@ -237,7 +241,7 @@ func TestRoomFreshWithoutSeedStaysEmpty(t *testing.T) {
 		t.Fatalf("seed metadata: %v", err)
 	}
 
-	mgr := NewManager(Deps{Metadata: meta, Blob: blob, Auth: open, AuthZ: open}, RoomConfig{
+	mgr := NewManager(Deps{Metadata: meta, Checkpoint: blob, Auth: open, AuthZ: open}, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
 		IdleTimeout:  10 * time.Second,
 		SendBuffer:   64,

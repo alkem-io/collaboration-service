@@ -54,38 +54,6 @@ type MetadataStore interface {
 	Delete(ctx context.Context, id model.DocumentID) error
 }
 
-// BlobStore persists the encoded full Y.Doc v2 snapshot (debounced). The
-// default adapter is inline (blob in the main DB); optional adapters offload to
-// file-service, S3, or local disk. The pointer is opaque to the domain — its
-// shape is the adapter's concern (inline row key / file-service object id / S3
-// key).
-//
-// Maps to: contracts/persistence-ports.md (BlobStore port) and data-model.md
-// (Snapshot, content-blob store).
-type BlobStore interface {
-	// Put stores the encoded snapshot bytes for a document and returns the
-	// content pointer under which they can be retrieved. The caller passes the
-	// document's current pointer (the document id on first save, or the pointer
-	// from the last save) as a hint; an adapter that addresses blobs by a stable
-	// key (inline, local, s3) echoes it back, while an adapter whose backend
-	// assigns its own id (file-service) returns that id. The returned pointer is
-	// persisted in the metadata index and used by Get/Delete, so a document
-	// always rehydrates from the right location (data-model.md ContentPointer).
-	//
-	// bucketID is the document's own storage bucket (from the metadata index):
-	// the file-service adapter uploads the snapshot into THIS bucket so blobs
-	// co-locate with the document, falling back to its configured bucket when
-	// bucketID is empty (standalone / no-metadata). Adapters that do not address
-	// blobs by bucket (inline, local, s3) ignore it.
-	Put(ctx context.Context, pointer, bucketID string, data []byte) (string, error)
-	// Get returns the snapshot bytes for pointer, or model.ErrNotFound when
-	// none has been stored.
-	Get(ctx context.Context, pointer string) ([]byte, error)
-	// Delete removes the snapshot on the owner-delete cascade. Idempotent:
-	// deleting an absent pointer is a no-op.
-	Delete(ctx context.Context, pointer string) error
-}
-
 // Auth resolves the connecting principal at the WebSocket handshake from the
 // domain-typed credential set (model.HandshakeCredentials: gateway actor-id
 // header / BFF cookie session / Hydra bearer / guest name). It is authentication

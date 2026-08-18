@@ -13,8 +13,12 @@ package service
 
 import (
 	"context"
+	"fmt"
+
+	"github.com/antst/go-yjs/backend"
 
 	"github.com/antst/go-yjs/backend/memory"
+	"github.com/antst/go-yjs/backend/persistence"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -29,8 +33,11 @@ type Deps struct {
 	Broadcaster port.ClusterBroadcaster
 	// Metadata persists the queryable document index (RabbitMQ/Postgres).
 	Metadata port.MetadataStore
-	// Blob persists the encoded Y.Doc v2 snapshot (inline/file-service/S3).
-	Blob port.BlobStore
+	// Checkpoint persists the document's current state — one whole-document
+	// snapshot per document, replaced on every save. It is the CRDT core's own
+	// contract, which §II makes the port for this concern.
+	Checkpoint persistence.CheckpointStore
+
 	// Auth resolves the handshake identity (Alkemio token / open).
 	Auth port.Auth
 	// AuthZ evaluates per-document grants (auth-evaluation-service / open).
@@ -46,6 +53,37 @@ type Deps struct {
 	// registry, which is correct for a lone room (one room owns one document) and
 	// keeps a directly-constructed Room usable.
 	Registry memory.Registry
+}
+
+// CheckpointDeleter removes a document's durable state.
+//
+// Idempotent by contract: deleting an absent document succeeds. The owner-delete
+// cascade retries, and a second delete must not fail it.
+//
+// Ordering matters and is the caller's job: the document's in-memory generation
+// must be invalidated BEFORE the durable state is deleted. A room still serving
+// the document would otherwise persist it again on its next flush and silently
+// resurrect deleted content.
+type CheckpointDeleter interface {
+	// DeleteCheckpoint removes a document's durable state. It succeeds when the
+	// document has no stored state, so a retried cascade does not fail.
+	DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error
+}
+
+// deleter returns the checkpoint store's deletion capability.
+//
+// It is derived from Checkpoint rather than wired as a separate Deps field on
+// purpose: the two must be the SAME instance, and a struct with both invites
+// wiring one store as the reader and a different one as the deleter — a bug that
+// compiles, passes most tests, and silently fails to delete anything. When the
+// persistence contract grows a deletion method this helper disappears and the
+// call sites use Checkpoint directly.
+func (d Deps) deleter() (CheckpointDeleter, error) {
+	del, ok := d.Checkpoint.(CheckpointDeleter)
+	if !ok {
+		return nil, fmt.Errorf("checkpoint store %T cannot delete documents; the owner-delete cascade requires it", d.Checkpoint)
+	}
+	return del, nil
 }
 
 // noopBroadcaster is the single-pod default used when Deps.Broadcaster is nil:

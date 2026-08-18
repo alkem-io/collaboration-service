@@ -7,6 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend/persistence"
+
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
+
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/memory"
 	ycrdt "github.com/antst/go-yjs/crdt"
@@ -29,39 +33,40 @@ import (
 // document written over good stored content is silent corruption, and the
 // obvious implementation ("always flush on teardown") produces exactly that.
 
-// countingBlob counts Put calls so a test can assert whether a teardown path
+// countingStore counts saves so a test can assert whether a teardown path
 // persisted, without depending on what it wrote.
-type countingBlob struct {
-	puts atomic.Int64
-	data atomic.Value // []byte, the most recent payload
+type countingStore struct {
+	inner *persistinprocess.Store
+	saves atomic.Int64
 }
 
-func (b *countingBlob) Put(_ context.Context, pointer, _ string, data []byte) (string, error) {
-	b.puts.Add(1)
-	b.data.Store(append([]byte(nil), data...))
-	if pointer == "" {
-		return "ptr", nil
-	}
-	return pointer, nil
+func newCountingStore() *countingStore {
+	return &countingStore{inner: persistinprocess.New()}
 }
 
-func (b *countingBlob) Get(_ context.Context, _ string) ([]byte, error) {
-	if v, ok := b.data.Load().([]byte); ok {
-		return append([]byte(nil), v...), nil
-	}
-	return nil, model.ErrNotFound
+func (s *countingStore) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpointRequest) (persistence.Revision, error) {
+	s.saves.Add(1)
+	return s.inner.SaveCheckpoint(ctx, req)
 }
 
-func (b *countingBlob) Delete(_ context.Context, _ string) error { return nil }
+func (s *countingStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (persistence.Checkpoint, error) {
+	return s.inner.LoadCheckpoint(ctx, id)
+}
+
+func (s *countingStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+	return s.inner.DeleteCheckpoint(ctx, id)
+}
+
+func (s *countingStore) FenceMode() persistence.FenceMode { return s.inner.FenceMode() }
 
 // dirtyRoomWithRegistry builds a started room, backed by a shared registry so the
 // test can invalidate the document out from under it, and leaves it dirty with
 // unsaved content.
-func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.InProcessRegistry, *countingBlob) {
+func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.InProcessRegistry, *countingStore) {
 	t.Helper()
 	deps := newTestDeps()
-	blob := &countingBlob{}
-	deps.Blob = blob
+	store := newCountingStore()
+	deps.Checkpoint = store
 	reg := memory.NewRegistry()
 	deps.Registry = reg
 
@@ -77,7 +82,7 @@ func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.In
 	}
 	insertText(room.doc, "unsaved-content")
 	room.dirty = true
-	return room, reg, blob
+	return room, reg, store
 }
 
 // TestTeardownDoesNotFlushAnInvalidatedDocument is the FR-011a ratchet for the
@@ -89,7 +94,7 @@ func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.In
 // Non-vacuity: change the invalidation case in run() to teardown(r.persistNow)
 // and the Put count becomes 1, tripping the assertion.
 func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
-	room, reg, blob := dirtyRoomWithRegistry(t, "doc-invalidated")
+	room, reg, store := dirtyRoomWithRegistry(t, "doc-invalidated")
 	startRoom(room)
 
 	if err := reg.Invalidate(context.Background(), backend.DocumentID("doc-invalidated")); err != nil {
@@ -102,7 +107,7 @@ func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
 		t.Fatal("invalidation did not tear the room down")
 	}
 
-	if n := blob.puts.Load(); n != 0 {
+	if n := store.saves.Load(); n != 0 {
 		t.Fatalf("an invalidated document was persisted %d time(s); a poisoned generation must NOT be written over stored content", n)
 	}
 }
@@ -119,7 +124,7 @@ func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
 // Non-vacuity: change releaseIfEmpty to teardown(nil) and the Put count becomes
 // 0, tripping the assertion.
 func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
-	room, _, blob := dirtyRoomWithRegistry(t, "doc-idle")
+	room, _, store := dirtyRoomWithRegistry(t, "doc-idle")
 
 	if !room.releaseIfEmpty() {
 		t.Fatal("an empty room must be released")
@@ -130,7 +135,7 @@ func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
 		t.Fatal("release did not tear the room down")
 	}
 
-	if n := blob.puts.Load(); n != 1 {
+	if n := store.saves.Load(); n != 1 {
 		t.Fatalf("idle release persisted %d time(s), want exactly 1; a good document must not be dropped on release", n)
 	}
 }

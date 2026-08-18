@@ -69,6 +69,17 @@ const (
 	// ReasonNotAuthenticated marks a read-only client that is not authenticated,
 	// so it may view but not mutate (legacy readOnlyCode "not-authenticated").
 	ReasonNotAuthenticated ReadOnlyReason = "not-authenticated"
+	// ReasonNotYetDurable marks a save-error whose cause is transient: the
+	// document is still being served and the flush is being retried, so the
+	// client's recent edits exist but are not yet safe. It is deliberately
+	// distinct from a terminal failure so a client can say "saving..." rather
+	// than "save failed" (FR-027).
+	ReasonNotYetDurable ReadOnlyReason = "not-yet-durable"
+	// ReasonEditsNotSaved marks a room closed because repeated persist failures
+	// crossed the escalation threshold and the unsaved edits were DISCARDED. It
+	// must be distinguishable from an ordinary disconnect: the user lost work,
+	// and a generic close reason would hide that (FR-028, SC-016).
+	ReasonEditsNotSaved ReadOnlyReason = "edits-not-saved"
 	// ReasonNoUpdateAccess marks a read-only client whose authZ granted read but
 	// denied update-content, so the actor is a viewer (legacy "no-update-access").
 	ReasonNoUpdateAccess ReadOnlyReason = "no-update-access"

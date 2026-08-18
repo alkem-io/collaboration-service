@@ -6,11 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
-	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
 // wedgeRoom builds a room with NO run loop and registers it so the manager's first
@@ -94,33 +98,35 @@ func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	}
 }
 
-// gateBlob wraps a BlobStore and holds Put open until release is closed, so a test
-// can observe whether Manager.Close returns before the final shutdown snapshot has
-// actually been written.
-type gateBlob struct {
-	inner   port.BlobStore
+// gateStore wraps a CheckpointStore and holds SaveCheckpoint open until release
+// is closed, so a test can observe whether Manager.Close returns before the final
+// shutdown save has actually been written.
+type gateStore struct {
+	inner   *persistinprocess.Store
 	once    sync.Once
 	started chan struct{}
 	release chan struct{}
 }
 
-func (g *gateBlob) Put(ctx context.Context, pointer, bucketID string, data []byte) (string, error) {
+func (g *gateStore) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpointRequest) (persistence.Revision, error) {
 	g.once.Do(func() { close(g.started) })
 	select {
 	case <-g.release:
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return 0, ctx.Err()
 	}
-	return g.inner.Put(ctx, pointer, bucketID, data)
+	return g.inner.SaveCheckpoint(ctx, req)
 }
 
-func (g *gateBlob) Get(ctx context.Context, pointer string) ([]byte, error) {
-	return g.inner.Get(ctx, pointer)
+func (g *gateStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (persistence.Checkpoint, error) {
+	return g.inner.LoadCheckpoint(ctx, id)
 }
 
-func (g *gateBlob) Delete(ctx context.Context, pointer string) error {
-	return g.inner.Delete(ctx, pointer)
+func (g *gateStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+	return g.inner.DeleteCheckpoint(ctx, id)
 }
+
+func (g *gateStore) FenceMode() persistence.FenceMode { return g.inner.FenceMode() }
 
 // TestManagerCloseWaitsForFinalSnapshotDrain is the regression guard for the
 // shutdown snapshot-loss bug: Manager.Close enqueued cmdClose and returned
@@ -131,8 +137,8 @@ func (g *gateBlob) Delete(ctx context.Context, pointer string) error {
 // Close stays blocked until we release it, then that the snapshot landed durably.
 func TestManagerCloseWaitsForFinalSnapshotDrain(t *testing.T) {
 	deps := newTestDeps()
-	gate := &gateBlob{inner: deps.blob, started: make(chan struct{}), release: make(chan struct{})}
-	deps.Blob = gate
+	gate := &gateStore{inner: deps.store, started: make(chan struct{}), release: make(chan struct{})}
+	deps.Checkpoint = gate
 	// SaveDebounce/IdleTimeout long so the ONLY persist is the cmdClose one and the
 	// room does not release on its own mid-test.
 	m := NewManager(deps.Deps, RoomConfig{SendBuffer: 16, SaveDebounce: time.Hour, IdleTimeout: time.Hour, BackendTimeout: 30 * time.Second}, nil, zap.NewNop())

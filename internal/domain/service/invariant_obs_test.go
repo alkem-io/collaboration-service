@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -24,13 +26,16 @@ import (
 
 // --- OBS-1: a panic on the run loop must tear the room down, not wedge it ---
 
-// panicOnPutBlob panics on Put (the snapshot persist call), modelling a handler
-// that panics on the single-writer run loop. Get/Delete delegate to a real inline
-// store so materialization (which may Get) is unaffected.
-type panicOnPutBlob struct{ port.BlobStore }
+// panicOnSaveStore panics on SaveCheckpoint (the persist call), modelling a
+// handler that panics on the single-writer run loop. Load/Delete delegate to a
+// real store so materialization is unaffected.
+type panicOnSaveStore struct {
+	persistence.CheckpointStore
+	CheckpointDeleter
+}
 
-func (panicOnPutBlob) Put(context.Context, string, string, []byte) (string, error) {
-	panic("induced blob put panic on the run loop")
+func (panicOnSaveStore) SaveCheckpoint(context.Context, persistence.SaveCheckpointRequest) (persistence.Revision, error) {
+	panic("induced persist panic on the run loop")
 }
 
 // TestRunLoopRecoversFromHandlerPanic is the OBS-1 ratchet. A panic in any run-loop
@@ -45,7 +50,9 @@ func (panicOnPutBlob) Put(context.Context, string, string, []byte) (string, erro
 // the suite goes RED hard.
 func TestRunLoopRecoversFromHandlerPanic(t *testing.T) {
 	deps := newTestDeps()
-	deps.Blob = panicOnPutBlob{BlobStore: blobinline.New()}
+	inner := persistinprocess.New()
+	panicking := panicOnSaveStore{CheckpointStore: inner}
+	deps.Checkpoint = panicking
 	// A short debounce so the edit below triggers a (panicking) persist promptly; a
 	// long idle so the room is not released by idleness before that persist runs.
 	m := NewManager(deps.Deps, RoomConfig{
@@ -222,64 +229,69 @@ func TestBudgetSkipNeverAdmitsPastCap(t *testing.T) {
 	}
 }
 
-// --- OBS-5b: persist must delete the predecessor blob only AFTER the commit ---
+// --- OBS-5b: RESTRUCTURED — the stranding window no longer exists -------------
+//
+// The original asserted delete-after-commit ordering: persist uploaded a NEW blob
+// per save, and deleting the predecessor before the metadata commit could strand
+// the row on a missing blob if that commit failed.
+//
+// That hazard is gone by construction. A document now owns ONE file for its
+// lifetime, rewritten in place, so there is no predecessor to delete and the
+// pointer never changes — there is no window in which the row names something
+// that is not there. Per FR-018a the test is restructured to assert the property
+// it was defending rather than the mechanism that used to provide it, and the
+// mechanism-specific doubles (versioningBlob, failNthSaveMeta) are removed with
+// it because nothing they modelled can still happen.
 
-// versioningBlob returns a fresh pointer per Put (so each save supersedes a distinct
-// predecessor) and records every Delete, so a test can assert ordering.
-type versioningBlob struct {
-	mu      sync.Mutex
-	seq     int
-	live    map[string][]byte
-	deleted []string
-}
+// TestFailedSaveLeavesStoredStateIntact is the surviving guarantee: a save whose
+// metadata commit fails must leave the previously stored state readable, so the
+// document still opens. It is what "never strands the row" means once the
+// pointer is stable.
+func TestFailedSaveLeavesStoredStateIntact(t *testing.T) {
+	deps := newTestDeps()
+	failing := &failNthMetaSave{MetadataStore: deps.meta, failOn: 2}
+	deps.Metadata = failing
 
-func newVersioningBlob() *versioningBlob { return &versioningBlob{live: map[string][]byte{}} }
-
-func (b *versioningBlob) Put(_ context.Context, _, _ string, data []byte) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.seq++
-	p := fmt.Sprintf("blob-v%d", b.seq)
-	b.live[p] = append([]byte(nil), data...)
-	return p, nil
-}
-
-func (b *versioningBlob) Get(_ context.Context, pointer string) ([]byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	d, ok := b.live[pointer]
-	if !ok {
-		return nil, model.ErrNotFound
+	room, err := newRoom(context.Background(), "doc-strand", model.ContentTypeMemo,
+		deps.Deps, DefaultRoomConfig(), NopMetrics{}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newRoom: %v", err)
 	}
-	return append([]byte(nil), d...), nil
+	t.Cleanup(room.finish)
+
+	insertText(room.doc, "first")
+	room.dirty = true
+	room.persist(context.Background())
+
+	first, err := deps.store.LoadCheckpoint(context.Background(), backend.DocumentID("doc-strand"))
+	if err != nil {
+		t.Fatalf("stored state after the first save: %v", err)
+	}
+
+	// Second save: the state is written, then the metadata commit fails.
+	insertText(room.doc, "second")
+	room.dirty = true
+	room.persist(context.Background())
+
+	after, err := deps.store.LoadCheckpoint(context.Background(), backend.DocumentID("doc-strand"))
+	if err != nil {
+		t.Fatalf("stored state must remain readable after a failed commit, got: %v", err)
+	}
+	if len(after.Update) < len(first.Update) {
+		t.Fatal("a failed commit left LESS stored state than before; the document must never regress")
+	}
 }
 
-func (b *versioningBlob) Delete(_ context.Context, pointer string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.live, pointer)
-	b.deleted = append(b.deleted, pointer)
-	return nil
-}
-
-func (b *versioningBlob) deletedPointers() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.deleted...)
-}
-
-var _ port.BlobStore = (*versioningBlob)(nil)
-
-// failNthSaveMeta wraps an inmemory metadata store and fails the Nth Save call, so a
-// test can drive a save whose blob upload succeeds but whose metadata commit fails.
-type failNthSaveMeta struct {
-	*metainmem.Store
+// failNthMetaSave fails the Nth Save so a test can drive a save whose state write
+// succeeds but whose index commit fails.
+type failNthMetaSave struct {
+	port.MetadataStore
 	mu     sync.Mutex
 	saves  int
 	failOn int
 }
 
-func (m *failNthSaveMeta) Save(ctx context.Context, meta model.Metadata) error {
+func (m *failNthMetaSave) Save(ctx context.Context, meta model.Metadata) error {
 	m.mu.Lock()
 	m.saves++
 	n := m.saves
@@ -287,56 +299,5 @@ func (m *failNthSaveMeta) Save(ctx context.Context, meta model.Metadata) error {
 	if n == m.failOn {
 		return errors.New("induced metadata save failure")
 	}
-	return m.Store.Save(ctx, meta)
-}
-
-var _ port.MetadataStore = (*failNthSaveMeta)(nil)
-
-// TestPersistDeletesPredecessorOnlyAfterCommit is the OBS-5b ratchet. persist uploads
-// the new snapshot, commits the new pointer to metadata, and only THEN deletes the
-// superseded blob (delete-after-commit, 002 FR-002). If the metadata commit fails, the
-// predecessor blob and the durable pointer to it must remain intact, so the document
-// stays openable — a failed commit leaves a benign forward orphan (the uncommitted new
-// blob), never a stranded pointer.
-//
-// Non-vacuity: move the `Blob.Delete(oldPointer)` in room.persist BEFORE the
-// Metadata.Save commit and the failed second commit strands blob-v1 — Get(blob-v1) then
-// fails (and blob.deleted is non-empty), tripping the assertions.
-func TestPersistDeletesPredecessorOnlyAfterCommit(t *testing.T) {
-	room := newBareRoom(t)
-	blob := newVersioningBlob()
-	meta := &failNthSaveMeta{Store: metainmem.New(), failOn: 2}
-	room.deps.Blob = blob
-	room.deps.Metadata = meta
-
-	// First save: uploads blob-v1 and commits. oldPointer was empty, so nothing is
-	// deleted — this just establishes the predecessor the second save will supersede.
-	room.dirty = true
-	room.persist(context.Background())
-	if room.pointer != "blob-v1" {
-		t.Fatalf("first save: room.pointer = %q, want blob-v1", room.pointer)
-	}
-	if d := blob.deletedPointers(); len(d) != 0 {
-		t.Fatalf("first save deleted %v; nothing should be deleted on the first save", d)
-	}
-
-	// Second save: uploads blob-v2, THEN the metadata commit FAILS. Delete-after-commit
-	// means blob-v1 (still the committed pointer) must NOT be deleted.
-	room.dirty = true
-	room.persist(context.Background())
-
-	if d := blob.deletedPointers(); len(d) != 0 {
-		t.Fatalf("a failed metadata commit deleted %v; the committed predecessor must survive", d)
-	}
-	if _, err := blob.Get(context.Background(), "blob-v1"); err != nil {
-		t.Fatalf("predecessor blob-v1 is gone after a failed commit (stranded pointer): %v", err)
-	}
-	// The durable row still points at the committed predecessor, not the uncommitted v2.
-	got, err := meta.Load(context.Background(), room.id)
-	if err != nil {
-		t.Fatalf("metadata load: %v", err)
-	}
-	if got.ContentPointer != "blob-v1" {
-		t.Fatalf("durable row points at %q; want the committed blob-v1 (a failed save must not advance it)", got.ContentPointer)
-	}
+	return m.MetadataStore.Save(ctx, meta)
 }

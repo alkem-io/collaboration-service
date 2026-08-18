@@ -351,3 +351,46 @@ func textOf(t *testing.T, update []byte) string {
 	}
 	return doc.GetText("t").ToString()
 }
+
+// TestLoadReportsCorruptWhenTheFileIsGone is the property that used to live in the
+// service package as "a populated pointer whose blob is missing must fail
+// materialization" (FR-018a).
+//
+// The index saying a document HAS state while the content is gone is NOT the same
+// as a document that was never saved, and the difference is load-bearing: the room
+// seeds create-time content on ErrNotFound, so collapsing the two would resurrect
+// stale content over a document that had real content, and the next save would
+// overwrite the last good state with it. ErrNotFound is reserved for a document
+// with no pointer at all.
+//
+// Non-vacuity: return persistence.ErrNotFound from fetch's 404 branch instead, and
+// this test fails.
+func TestLoadReportsCorruptWhenTheFileIsGone(t *testing.T) {
+	store, stub := newStoreForTest(t)
+	save(t, store, "doc-1", realUpdate(t, "state-1"))
+
+	// The pointer stays recorded; the file disappears out of band.
+	stub.mu.Lock()
+	for id := range stub.byID {
+		delete(stub.byID, id)
+	}
+	stub.mu.Unlock()
+
+	_, err := store.LoadCheckpoint(context.Background(), "doc-1")
+	if errors.Is(err, persistence.ErrNotFound) {
+		t.Fatal("a pointer whose content is gone must NOT report ErrNotFound: the caller would seed over a document that had real content")
+	}
+	if !errors.Is(err, persistence.ErrCorrupt) {
+		t.Fatalf("LoadCheckpoint with a missing file = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestLoadReportsNotFoundForADocumentWithNoPointer is the other side: a document
+// that genuinely has no stored state reports ErrNotFound, which is what lets the
+// room seed its create-time content.
+func TestLoadReportsNotFoundForADocumentWithNoPointer(t *testing.T) {
+	store, _ := newStoreForTest(t)
+	if _, err := store.LoadCheckpoint(context.Background(), "never-saved"); !errors.Is(err, persistence.ErrNotFound) {
+		t.Fatalf("LoadCheckpoint on a never-saved document = %v, want ErrNotFound", err)
+	}
+}

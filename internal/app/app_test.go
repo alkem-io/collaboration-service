@@ -82,63 +82,33 @@ func TestNewFailsOnBroadcasterError(t *testing.T) {
 	}
 }
 
-// TestNewFailsOnLocalBlobMissingRoot asserts BlobStore=local with no LocalBlobRoot
-// fails in buildBlob (the local store rejects an empty root), so New errors rather
-// than booting with an unwritable blob backend.
-func TestNewFailsOnLocalBlobMissingRoot(t *testing.T) {
-	cfg := standaloneConfig()
-	cfg.BlobStore = config.BlobStoreLocal
-	cfg.LocalBlobRoot = "" // invalid: the local store requires a root
-
-	if _, err := New(cfg, zap.NewNop()); err == nil {
-		t.Fatal("New must fail when BLOB_STORE=local has no root configured")
+// TestBuildCheckpointErrorsOnIncompleteConfig asserts the file-service branch
+// fails fast when its base URL is missing, rather than constructing a store that
+// cannot reach anything.
+//
+// Restructured from the old buildBlob tests (FR-018a): the s3 and local branches
+// are gone. They existed to serve the standalone deployment that constitution
+// v3.0.0 §III withdrew, and there is no persistence implementation for them —
+// everything that is not file-service resolves to the in-process store.
+func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
+	cfg := &config.Config{BlobStore: config.BlobStoreFileService}
+	if _, err := buildCheckpoint(cfg, metainmem.New()); err == nil {
+		t.Fatal("buildCheckpoint must error when file-service has no base URL")
 	}
 }
 
-// TestBuildBlobErrorsOnIncompleteConfig asserts buildBlob fails fast for each
-// durable blob backend whose required config is missing (file-service without a
-// BaseURL, s3 without a bucket, local without a root). These are the
-// fail-fast-on-incomplete-config branches (constitution §XV).
-func TestBuildBlobErrorsOnIncompleteConfig(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  *config.Config
-	}{
-		{"file-service without base url", &config.Config{BlobStore: config.BlobStoreFileService}},
-		{"s3 without bucket", &config.Config{BlobStore: config.BlobStoreS3}},
-		{"local without root", &config.Config{BlobStore: config.BlobStoreLocal}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := buildBlob(tc.cfg); err == nil {
-				t.Fatalf("buildBlob(%s) must error on incomplete config", tc.name)
-			}
-		})
-	}
-}
-
-// TestBuildBlobLocalSucceedsWithRoot asserts the local blob branch builds a usable
-// store when a root is supplied (the happy local branch, app.go ~145-147).
-func TestBuildBlobLocalSucceedsWithRoot(t *testing.T) {
-	cfg := &config.Config{BlobStore: config.BlobStoreLocal, LocalBlobRoot: t.TempDir()}
-	blob, err := buildBlob(cfg)
-	if err != nil {
-		t.Fatalf("buildBlob(local): %v", err)
-	}
-	if blob == nil {
-		t.Fatal("buildBlob(local) returned a nil store")
-	}
-}
-
-// TestBuildBlobInlineDefault asserts an unrecognized/default blob selection wires
-// the inline store (the zero-dependency default).
-func TestBuildBlobInlineDefault(t *testing.T) {
-	blob, err := buildBlob(&config.Config{BlobStore: config.BlobStoreInline})
-	if err != nil {
-		t.Fatalf("buildBlob(inline): %v", err)
-	}
-	if blob == nil {
-		t.Fatal("buildBlob(inline) returned a nil store")
+// TestBuildCheckpointFallsBackToInProcess asserts every non-file-service selection
+// resolves to the in-process store, which backs the test suite, the local
+// development loop and the zero-dependency smoke test (§III).
+func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
+	for _, mode := range []config.BlobStoreMode{config.BlobStoreInline, config.BlobStoreLocal, config.BlobStoreS3} {
+		store, err := buildCheckpoint(&config.Config{BlobStore: mode}, metainmem.New())
+		if err != nil {
+			t.Fatalf("buildCheckpoint(%v): %v", mode, err)
+		}
+		if store == nil {
+			t.Fatalf("buildCheckpoint(%v) returned no store", mode)
+		}
 	}
 }
 
@@ -212,7 +182,7 @@ func TestBuildDepsStandaloneSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDeps (standalone): %v", err)
 	}
-	if deps.Broadcaster == nil || deps.Metadata == nil || deps.Blob == nil ||
+	if deps.Broadcaster == nil || deps.Metadata == nil || deps.Checkpoint == nil ||
 		deps.Auth == nil || deps.AuthZ == nil {
 		t.Fatal("buildDeps left an outbound port nil")
 	}

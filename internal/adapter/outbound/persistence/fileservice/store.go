@@ -300,9 +300,14 @@ func (s *Store) fetch(ctx context.Context, pointer string) ([]byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		// The pointer resolves to nothing: the document's state is gone, which is
-		// indistinguishable from never having been saved as far as recovery goes.
-		return nil, persistence.ErrNotFound
+		// CORRUPT, not "not found". The index says this document HAS state — it
+		// carries a pointer — and the file behind that pointer is gone. That is a
+		// different situation from a document that was never saved, and the
+		// difference is load-bearing: a caller that treats it as "nothing stored"
+		// would seed create-time content over a document that had real content, and
+		// the next save would overwrite the last good state with it. ErrNotFound is
+		// reserved for a document with no pointer at all.
+		return nil, fmt.Errorf("%w: file %q behind the document pointer is missing", persistence.ErrCorrupt, pointer)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("file-service fetch: unexpected status %d", resp.StatusCode)
@@ -316,3 +321,41 @@ func readErrBody(r io.Reader) string {
 }
 
 var _ persistence.CheckpointStore = (*Store)(nil)
+
+// DeleteCheckpoint removes the document's file. Idempotent: a document with no
+// pointer, or whose file is already gone, deletes successfully — the cascade
+// retries, and a second delete must not fail it.
+//
+// Local extension, not part of the persistence contract — see the note on the
+// domain's CheckpointDeleter.
+func (s *Store) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	pointer, _, err := s.pointers.Pointer(ctx, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNoPointer):
+		return nil // never had a file
+	default:
+		return fmt.Errorf("resolving file pointer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer), nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("file-service delete: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("file-service delete: unexpected status %d: %s", resp.StatusCode, readErrBody(resp.Body))
+	}
+}

@@ -58,6 +58,22 @@ type Metrics interface {
 	SnapshotSaved()
 	// SnapshotFailed is called on each failed snapshot persist.
 	SnapshotFailed()
+	// DocumentUndurable reports that a document is accepting edits it has not
+	// managed to persist: consecutive is the number of failed flushes in a row,
+	// and since is how long it has been in that state. It is emitted on EVERY
+	// failed flush, not only at escalation, so the degraded window is visible
+	// before anyone is disconnected (FR-026).
+	DocumentUndurable(consecutive int, since time.Duration)
+	// DocumentDurabilityRestored reports that a document that had been failing to
+	// persist has succeeded again.
+	DocumentDurabilityRestored()
+	// DocumentEscalated reports that repeated persist failures crossed the
+	// threshold and the document was torn down, DISCARDING undurable edits.
+	// undurableFor is how long it had been failing (FR-028).
+	DocumentEscalated(undurableFor time.Duration)
+	// GenerationInvalidated reports that a document's in-memory generation was
+	// poisoned and must be reloaded from storage.
+	GenerationInvalidated()
 	// FanoutPublished is called on each successful cross-pod publish, carrying
 	// the publish latency (R10 fan-out lag).
 	FanoutPublished(lag time.Duration)
@@ -236,17 +252,16 @@ func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
 // no live room. It resolves the blob pointer from the metadata row (a missing row
 // means nothing to purge). Idempotent: not-found is success.
 func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
-	meta, err := m.deps.Metadata.Load(ctx, id)
+	// Delete the durable state FIRST, then the index row. The deleter is
+	// idempotent, so a document that never had stored state is not an error, and
+	// the index row is what makes the state findable — dropping it first would
+	// orphan the content instead of removing it.
+	del, err := m.deps.deleter()
 	if err != nil {
-		if errors.Is(err, model.ErrNotFound) {
-			return nil
-		}
 		return err
 	}
-	if meta.ContentPointer != "" {
-		if err := m.deps.Blob.Delete(ctx, meta.ContentPointer); err != nil && !errors.Is(err, model.ErrNotFound) {
-			return err
-		}
+	if err := del.DeleteCheckpoint(ctx, backend.DocumentID(id)); err != nil {
+		return err
 	}
 	if err := m.deps.Metadata.Delete(ctx, id); err != nil && !errors.Is(err, model.ErrNotFound) {
 		return err
