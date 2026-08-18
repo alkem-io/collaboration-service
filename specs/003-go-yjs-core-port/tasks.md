@@ -127,12 +127,12 @@ the rebuilt service.
 
 - [ ] T036 [US3] Restructure the `002` invariant tests that reach into removed structures, across `internal/domain/service/invariant_*_test.go` — same or stronger property, never weakened (FR-018a)
 - [ ] T037 [US3] Build the non-vacuity ledger over `internal/domain/service/invariant_*_test.go`, recording it in `specs/003-go-yjs-core-port/non-vacuity-ledger.md`: revert each restructured guarantee in isolation, confirm its test goes RED, restore, record the proof (FR-018a, SC-005)
-- [ ] T038 [P] [US3] Add teardown-flush matrix tests in `internal/domain/service/invariant_teardown_flush_test.go` proving graceful shutdown and idle release **persist**, while invalidation, escalation, and post-panic teardown **do not** (SC-018, FR-011a)
-- [ ] T039 [P] [US3] Add a test in `internal/domain/service/invariant_uncooperative_holder_test.go` asserting correctness does not depend on cooperative handle holders (contracts/registry-session.md)
+- [X] T038 [P] [US3] Add teardown-flush matrix tests in `internal/domain/service/invariant_teardown_flush_test.go` proving graceful shutdown and idle release **persist**, while invalidation, escalation, and post-panic teardown **do not** (SC-018, FR-011a)
+- [X] T039 [P] [US3] Add a test in `internal/domain/service/invariant_uncooperative_holder_test.go` asserting correctness does not depend on cooperative handle holders (contracts/registry-session.md)
 
 ### Implementation for User Story 3
 
-- [ ] T040 [US3] Implement the teardown-flush matrix in `internal/domain/service/room.go`; a path that is neither known-good nor poisoned MUST NOT default to flushing (FR-011a/b, D9)
+- [X] T040 [US3] Implement the teardown-flush matrix in `internal/domain/service/room.go`; a path that is neither known-good nor poisoned MUST NOT default to flushing (FR-011a/b, D9)
 - [ ] T041 [US3] Preserve the shutdown drain ordering in `internal/domain/service/manager.go` that persists dirty documents before durable backends close, now expressed over handles (FR-001)
 - [ ] T042 [US3] Preserve the single mutation chokepoint in `internal/domain/service/room.go` so limits apply on every entry point, local and cross-pod alike (FR-019)
 - [ ] T043 [US3] Confirm auth and authz behaviour is unchanged across `internal/adapter/outbound/auth/` and `internal/adapter/inbound/ws/handler.go`, including fail-closed evaluation and handshake authentication (FR-020)
