@@ -5,12 +5,17 @@
 // (collaborative-document-service's collaboration-document-save/-fetch and
 // whiteboard-collaboration-service's save/fetch) — OPEN-3.
 //
-// CROSS-REPO CONTRACT (hand-off to the `server` owner): the consumer side of
-// these patterns lives in the Alkemio `server` repo and DOES NOT EXIST YET. This
-// adapter publishes to the contract below; `server` must implement the matching
-// @MessagePattern / @EventPattern handlers. The wire shape is the NestJS RMQ
-// request/reply envelope { pattern, data, id } with AMQP correlationId + replyTo,
-// so a NestJS @MessagePattern handler consumes it natively.
+// CROSS-REPO CONTRACT: the consumer side lives in the Alkemio `server` repo and
+// IS IMPLEMENTED as of the 006 work — see server's
+// src/services/collaboration-integration/collaboration-integration.controller.ts
+// (@MessagePattern SAVE/FETCH/DELETE/INFO over Transport.RMQ). It reached
+// `server` on feat/006-collab-content-unification, so a check against `develop`
+// alone will suggest it is missing; it is not. The wire shape is the NestJS RMQ
+// request/reply envelope { pattern, data, id } with AMQP correlationId +
+// replyTo, so a NestJS @MessagePattern handler consumes it natively.
+//
+// Changing any payload or pattern below is therefore a BREAKING cross-repo
+// change requiring a matching `server` change, not a local edit.
 //
 //	REQUEST/REPLY (publish to the server queue, await a reply on a reply queue):
 //	  pattern "collaboration-save"   data SaveData    → reply { success: true } | { error }
