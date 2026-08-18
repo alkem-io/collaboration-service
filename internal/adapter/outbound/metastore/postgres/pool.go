@@ -10,15 +10,29 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// poolAdapter bridges a *pgxpool.Pool to the store's querier interface, wrapping
+// pgxPool is the slice of *pgxpool.Pool that poolAdapter forwards to.
+//
+// Declared as an interface rather than taking the concrete pool so the adapter
+// itself is reachable in the unit lane: pgxmock's pool satisfies this, which
+// makes the forwarding testable without a live Postgres. The store's own querier
+// seam already covered the SQL and the row mapping; what was left uncovered was
+// exactly this bridge, and a bridge that forwards to the wrong pool method or
+// drops the command tag is a real defect that no amount of store-level testing
+// would see.
+type pgxPool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// poolAdapter bridges a pgx pool to the store's querier interface, wrapping
 // pgx's concrete pgconn.CommandTag in the narrow pgconnCommandTag the store
 // reads (so the fake querier in tests need not build a real tag).
 type poolAdapter struct {
-	pool *pgxpool.Pool
+	pool pgxPool
 }
 
 // QueryRow runs a single-row query on the pool.

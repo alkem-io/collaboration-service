@@ -63,6 +63,54 @@ type Manager interface {
 	PreRegister(ctx context.Context, meta model.Metadata) error
 }
 
+// brokerChannel and brokerConn are the narrow slices of amqp091-go this consumer
+// actually uses, so its wiring can be exercised without a live broker.
+//
+// They exist because amqp091-go exposes no interfaces and ships no test helpers,
+// and the RabbitMQ team declined to add them (amqp091-go#17). Without a seam the
+// dial/declare/qos/consume sequence — including every failure branch that must
+// close what it already opened — is reachable only against a real broker, which
+// means it is not reachable in the unit lane at all.
+//
+// Deliberately narrow: only the calls Connect makes. A wider interface would be a
+// second definition of the AMQP API rather than a description of what this
+// consumer needs.
+type brokerChannel interface {
+	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
+	Qos(prefetchCount, prefetchSize int, global bool) error
+	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
+	Close() error
+}
+
+type brokerConn interface {
+	Channel() (brokerChannel, error)
+	Close() error
+}
+
+// amqpConn adapts *amqp.Connection to brokerConn. The wrapper is needed because
+// amqp.Connection.Channel returns the CONCRETE *amqp.Channel, so the real type
+// cannot satisfy an interface whose Channel returns an interface.
+type amqpConn struct{ *amqp.Connection }
+
+// Channel opens an AMQP channel and returns it as the narrow brokerChannel.
+func (c amqpConn) Channel() (brokerChannel, error) {
+	ch, err := c.Connection.Channel()
+	if err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// dialBroker is the connection factory. Tests replace it to drive Connect's
+// wiring and its failure branches; production always dials RabbitMQ.
+var dialBroker = func(url string) (brokerConn, error) {
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+	return amqpConn{conn}, nil
+}
+
 // Connect dials RabbitMQ, declares the durable lifecycle queue, starts consuming,
 // and routes each event to the Manager. Close it on shutdown. The returned
 // Consumer keeps running until Close or a connection drop.
@@ -73,7 +121,7 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	if cfg.Queue == "" {
 		return nil, fmt.Errorf("lifecycle consumer: Queue is required")
 	}
-	conn, err := amqp.Dial(cfg.URL)
+	conn, err := dialBroker(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rabbitmq: %w", err)
 	}

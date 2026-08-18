@@ -108,7 +108,34 @@ func (s *stubFileService) handler() http.Handler {
 		}
 		_, _ = w.Write(body)
 	})
+	mux.HandleFunc("DELETE /internal/file/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		s.mu.Lock()
+		body, ok := s.byID[id]
+		if ok {
+			delete(s.byHash, hashKey(s.bucket[id], body))
+			delete(s.bucket, id)
+			delete(s.byID, id)
+		}
+		s.mu.Unlock()
+		if !ok {
+			// file-service answers 404 for an id it does not hold. The adapter
+			// treats that as success, because a retried cascade must not fail on
+			// the second attempt.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	return mux
+}
+
+// count reports how many files the stub currently holds, so a test can assert
+// erasure actually happened rather than trusting a nil error.
+func (s *stubFileService) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.byID)
 }
 
 // mapResolver is the DocumentID -> file pointer map the real wiring keeps in the
@@ -392,5 +419,77 @@ func TestLoadReportsNotFoundForADocumentWithNoPointer(t *testing.T) {
 	store, _ := newStoreForTest(t)
 	if _, err := store.LoadCheckpoint(context.Background(), "never-saved"); !errors.Is(err, persistence.ErrNotFound) {
 		t.Fatalf("LoadCheckpoint on a never-saved document = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteRemovesTheDocumentsFile covers the production erasure path, which had
+// no test at all — Delete sat at 0% while the owner-delete cascade depended on it.
+//
+// The four properties the contract names, against a real HTTP round-trip rather
+// than the in-process store that stands in for this one everywhere else.
+func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
+	store, stub := newStoreForTest(t)
+	ctx := context.Background()
+
+	update := realUpdate(t, "delete-me")
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if stub.count() != 1 {
+		t.Fatalf("precondition: expected one stored file, got %d", stub.count())
+	}
+
+	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if stub.count() != 0 {
+		t.Fatalf("the file survived Delete: %d still stored", stub.count())
+	}
+
+	// IDEMPOTENT. The cascade retries, and the second attempt must not fail the
+	// operation it is completing.
+	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
+		t.Fatalf("second Delete must succeed (the cascade retries): %v", err)
+	}
+}
+
+// TestDeleteSucceedsForADocumentThatNeverHadAFile is the other idempotence case:
+// the document has no pointer at all, so there is nothing to erase. A cascade
+// over a document that was created and deleted without ever being saved must not
+// fail on this step.
+func TestDeleteSucceedsForADocumentThatNeverHadAFile(t *testing.T) {
+	store, _ := newStoreForTest(t)
+	if err := store.Delete(context.Background(), persistence.DeleteRequest{DocumentID: "never-saved"}); err != nil {
+		t.Fatalf("Delete on a document with no file: %v", err)
+	}
+}
+
+// TestDeleteRejectsAFenceWithoutTouchingTheNetwork pins the Unfenced contract at
+// the erasure path.
+//
+// This store cannot hold an epoch, so it reports Unfenced and a non-zero fence is
+// ErrUnexpectedFence. The assertion that matters is the SECOND one: the rejection
+// must happen before the pointer is resolved and before any request is sent. A
+// store that returned the right error after issuing the DELETE would satisfy an
+// error-only check while having already erased the document — which is the whole
+// failure mode "a rejected delete leaves the state intact" exists to prevent.
+func TestDeleteRejectsAFenceWithoutTouchingTheNetwork(t *testing.T) {
+	store, stub := newStoreForTest(t)
+	ctx := context.Background()
+
+	update := realUpdate(t, "fenced-delete")
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc", Fence: 9}); !errors.Is(err, persistence.ErrUnexpectedFence) {
+		t.Fatalf("Delete with a fence against an Unfenced store = %v, want ErrUnexpectedFence", err)
+	}
+	if stub.count() != 1 {
+		t.Fatal("a rejected delete erased the file anyway; the fence must be checked before the request is sent")
 	}
 }

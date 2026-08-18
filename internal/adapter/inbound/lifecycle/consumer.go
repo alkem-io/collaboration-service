@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -64,8 +63,8 @@ type Consumer struct {
 	mgr    Manager
 	logger *zap.Logger
 
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	conn brokerConn
+	ch   brokerChannel
 
 	// handlerTimeout bounds the processing context of a single delivery (resolved
 	// from Config.HandlerTimeout, defaulting to DefaultHandlerTimeout) so one stuck

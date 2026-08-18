@@ -32,11 +32,53 @@ type amqpChannel interface {
 	Close() error
 }
 
+// setupChannel adds the calls Connect makes during wiring, on top of the publish
+// surface the Client keeps afterwards. Split in two because they have different
+// lifetimes: the Client holds amqpChannel for the life of the connection, while
+// these are used once, during setup, and are what the failure branches must clean
+// up after.
+type setupChannel interface {
+	amqpChannel
+	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
+	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
+}
+
+// rpcConn is the connection surface Connect uses, so the dial/declare/consume
+// wiring is reachable without a live broker. amqp091-go exposes no interfaces
+// (amqp091-go#17), so the seam has to be declared here.
+type rpcConn interface {
+	Channel() (setupChannel, error)
+	Close() error
+}
+
+// amqpRPCConn adapts *amqp.Connection, whose Channel returns the CONCRETE
+// *amqp.Channel and therefore cannot satisfy rpcConn directly.
+type amqpRPCConn struct{ *amqp.Connection }
+
+// Channel opens an AMQP channel and returns it as the narrow setupChannel.
+func (c amqpRPCConn) Channel() (setupChannel, error) {
+	ch, err := c.Connection.Channel()
+	if err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// dialRPC is the connection factory. Tests replace it to drive Connect's wiring
+// and its failure branches; production always dials RabbitMQ.
+var dialRPC = func(url string) (rpcConn, error) {
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+	return amqpRPCConn{conn}, nil
+}
+
 // Client is the amqp091-backed rpc transport: it publishes NestJS-style RPC
 // requests to the server queue with correlationId + replyTo and matches replies
 // on a per-connection reply queue. It satisfies the store's rpc interface.
 type Client struct {
-	conn        *amqp.Connection
+	conn        rpcConn
 	ch          amqpChannel
 	replyQ      string
 	serverQueue string
@@ -77,7 +119,7 @@ func Connect(cfg Config) (*Client, *Store, error) {
 	if cfg.Queue == "" {
 		return nil, nil, fmt.Errorf("rabbitmq metadata store: Queue is required")
 	}
-	conn, err := amqp.Dial(cfg.URL)
+	conn, err := dialRPC(cfg.URL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial rabbitmq: %w", err)
 	}
