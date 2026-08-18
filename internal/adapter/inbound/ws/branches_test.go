@@ -13,8 +13,8 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
@@ -76,20 +76,27 @@ func (viewerAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.Documen
 	return model.AuthDecision{Allowed: false}, nil
 }
 
-// TestServeReturnsWhenInitialFrameSendOverflows drives serve's initial-frame
-// send-error early return: with a depth-1 outbound buffer and a viewer join that
-// yields two initial frames (SyncStep1 + read-only control), the second Send
-// overflows before the writer goroutine starts, so serve sheds the connection and
-// returns instead of blocking. The server closing the just-upgraded socket is the
-// observable outcome.
-func TestServeReturnsWhenInitialFrameSendOverflows(t *testing.T) {
+// TestHandshakeBatchIsNotShedOnASmallSendBuffer asserts the joiner-facing
+// outcome of the handshake-send policy: a viewer whose join yields two initial
+// frames (SyncStep1 + the read-only control frame) receives BOTH over a
+// connection whose outbound queue holds only one, and is not dropped.
+//
+// This replaces an earlier test that asserted the opposite — that the second
+// frame overflowed and the server shed the connection. That was never the
+// intended behavior (serve starts the writer precisely so the batch drains as it
+// fills) and the test only passed when it won a scheduling race: starting the
+// writer goroutine does not mean it has RUN, so whether the queue had space was
+// luck. Shedding a client for the server's own handshake frames is a defect, and
+// sendInitial is the fix; this test pins the outcome that matters to a joiner.
+func TestHandshakeBatchIsNotShedOnASmallSendBuffer(t *testing.T) {
 	deps := service.Deps{
-		Metadata: metainmem.New(),
-		Blob:     blobinline.New(),
-		Auth:     authopen.New(),
-		AuthZ:    viewerAuthZ{},
+		Metadata:   metainmem.New(),
+		Checkpoint: persistinprocess.New(),
+		Auth:       authopen.New(),
+		AuthZ:      viewerAuthZ{},
 	}
-	// SendBuffer 1 is a valid (>0) config, so SendBuffer() returns it verbatim.
+	// SendBuffer 1 is a valid (>0) config, so SendBuffer() returns it verbatim —
+	// one slot for a two-frame batch.
 	mgr := service.NewManager(deps, service.RoomConfig{
 		SaveDebounce: 20 * time.Millisecond,
 		IdleTimeout:  5 * time.Second,
@@ -108,23 +115,22 @@ func TestServeReturnsWhenInitialFrameSendOverflows(t *testing.T) {
 	t.Cleanup(srv.Close)
 	base := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, resp, err := websocket.Dial(ctx, base+"/collab/overflow", nil)
+	conn, resp, err := websocket.Dial(ctx, base+"/collab/small-buffer", nil)
 	if err != nil {
-		// An immediate close surfaced as a dial error is also a valid "shed" outcome.
-		return
+		t.Fatalf("dial: %v", err)
 	}
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
-	// The server shed the connection on the overflowing initial Send, so the
-	// client's read returns an error (close / EOF) rather than hanging.
-	if _, _, readErr := conn.Read(ctx); readErr == nil {
-		t.Fatal("expected the server to close the connection after an initial-frame overflow")
+	for i := range 2 {
+		if _, _, readErr := conn.Read(ctx); readErr != nil {
+			t.Fatalf("handshake frame %d not delivered over a depth-1 queue: %v", i+1, readErr)
+		}
 	}
 }
 
@@ -135,10 +141,10 @@ func TestServeReturnsWhenInitialFrameSendOverflows(t *testing.T) {
 // returned cleanly and the connection was left.
 func TestReadLoopLogsAbnormalClose(t *testing.T) {
 	deps := service.Deps{
-		Metadata: metainmem.New(),
-		Blob:     blobinline.New(),
-		Auth:     authopen.New(),
-		AuthZ:    authopen.New(),
+		Metadata:   metainmem.New(),
+		Checkpoint: persistinprocess.New(),
+		Auth:       authopen.New(),
+		AuthZ:      authopen.New(),
 	}
 	mgr := service.NewManager(deps, service.RoomConfig{
 		SaveDebounce: 20 * time.Millisecond,

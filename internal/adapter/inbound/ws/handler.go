@@ -200,14 +200,20 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 	defer session.Leave()
 
 	// Start the writer before enqueuing any frames so the bounded send queue is
-	// drained as it fills: the initial handshake batch then cannot overflow a
-	// small SendBuffer and trip the slow-consumer eviction before delivery.
+	// drained as it fills rather than after the batch is complete.
 	wc.startWriter()
 
 	// Drive the handshake: the server sends SyncStep1 (+ awareness snapshot) so
 	// the client replies with SyncStep2 and its own SyncStep1.
+	//
+	// sendInitial, not Send: starting the writer above does not mean it has been
+	// SCHEDULED, so on a small SendBuffer the batch can still fill the queue and
+	// Send's slow-consumer shed would drop a client that has done nothing wrong.
+	// The batch waits for space instead, bounded by handshakeSendTimeout.
+	sendCtx, cancelSend := context.WithTimeout(connCtx, handshakeSendTimeout)
+	defer cancelSend()
 	for _, frame := range initial {
-		if err := wc.Send(frame); err != nil {
+		if err := wc.sendInitial(sendCtx, frame); err != nil {
 			return
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
@@ -14,6 +15,11 @@ import (
 // errConnClosed is returned by Send once the connection has been torn down, so
 // the room evicts the member from its registry.
 var errConnClosed = errors.New("ws: connection closed")
+
+// handshakeSendTimeout bounds how long the handshake batch will wait for queue
+// space. A peer that has not drained a single frame in this long is not reading
+// at all, and shedding it then is correct rather than merely impatient.
+const handshakeSendTimeout = 10 * time.Second
 
 // wsConn adapts a coder/websocket connection to the room's service.Conn port:
 // the room fans framed messages out by calling Send, which enqueues onto a
@@ -65,6 +71,37 @@ func (c *wsConn) Send(frame []byte) error {
 	default:
 		// Slow consumer: shed it rather than block the room.
 		c.logger.Debug("send queue full; dropping slow connection")
+		c.close()
+		return errConnClosed
+	}
+}
+
+// sendInitial enqueues a handshake frame, WAITING for queue space rather than
+// shedding on a full queue.
+//
+// The shedding policy in Send exists to protect the room's single run loop from
+// a slow client. The handshake batch is different on both counts: it is sent
+// from the per-connection handler goroutine, where blocking stalls nobody else,
+// and the frames are the SERVER's own — a full queue here is not evidence of a
+// slow consumer, it just means the writer goroutine has not been scheduled yet.
+// Shedding on that would drop legitimate joiners on a small SendBuffer purely on
+// scheduler timing, which is a race rather than a policy.
+//
+// The wait is bounded by ctx (see handshakeSendTimeout): a peer that never makes
+// room is genuinely not reading, and is shed like any other.
+func (c *wsConn) sendInitial(ctx context.Context, frame []byte) error {
+	select {
+	case <-c.closed:
+		return errConnClosed
+	default:
+	}
+	select {
+	case c.send <- frame:
+		return nil
+	case <-c.closed:
+		return errConnClosed
+	case <-ctx.Done():
+		c.logger.Debug("handshake frame could not be enqueued; dropping connection")
 		c.close()
 		return errConnClosed
 	}

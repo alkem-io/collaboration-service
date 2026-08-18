@@ -18,8 +18,8 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
@@ -168,10 +168,10 @@ func newTestServer(t *testing.T, auth interface {
 }) (*httptest.Server, string) {
 	t.Helper()
 	deps := service.Deps{
-		Metadata: metainmem.New(),
-		Blob:     blobinline.New(),
-		Auth:     authopen.New(),
-		AuthZ:    authopen.New(),
+		Metadata:   metainmem.New(),
+		Checkpoint: persistinprocess.New(),
+		Auth:       authopen.New(),
+		AuthZ:      authopen.New(),
 	}
 	mgr := service.NewManager(deps, service.RoomConfig{
 		SaveDebounce: 20 * time.Millisecond,
@@ -216,10 +216,10 @@ func newTestServerWithManager(t *testing.T, mgr *service.Manager) string {
 // the handler's joinCloseStatus path).
 func TestRefusedJoinClosesSocket(t *testing.T) {
 	deps := service.Deps{
-		Metadata: metainmem.New(),
-		Blob:     blobinline.New(),
-		Auth:     authopen.New(),
-		AuthZ:    authopen.New(),
+		Metadata:   metainmem.New(),
+		Checkpoint: persistinprocess.New(),
+		Auth:       authopen.New(),
+		AuthZ:      authopen.New(),
 	}
 	cfg := service.RoomConfig{SaveDebounce: 20 * time.Millisecond, IdleTimeout: 5 * time.Second, SendBuffer: 64}
 	cfg.Limits.MaxConnsPerRoom = 1
