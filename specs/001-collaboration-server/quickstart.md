@@ -119,7 +119,6 @@ go test -tags e2e -race ./test/e2e/...
 # The build-tagged integration suites against live backends:
 export POSTGRES_TEST_DSN=postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
 export RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
-export S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=collab-test \
 go test -tags integration -race ./...
 
 # The ≥95% combined coverage gate (unit + integration + e2e, merged), as CI runs it:

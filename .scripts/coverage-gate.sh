@@ -25,8 +25,7 @@
 # Usage:
 #   .scripts/coverage-gate.sh [threshold]
 # Env (optional; integration lane backends — unset ⇒ those tests skip):
-#   POSTGRES_TEST_DSN, RABBITMQ_TEST_URL,
-#   S3_TEST_ENDPOINT, S3_TEST_BUCKET, S3_TEST_REGION, S3_TEST_ACCESS_KEY, S3_TEST_SECRET_KEY
+#   POSTGRES_TEST_DSN, RABBITMQ_TEST_URL
 
 set -euo pipefail
 
