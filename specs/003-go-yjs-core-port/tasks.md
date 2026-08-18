@@ -90,8 +90,8 @@ completed flush.
 
 ### Tests for User Story 2
 
-- [ ] T020 [P] [US2] Add a kill/restart durability test in `internal/domain/service/durability_crash_test.go` asserting recovery to the last completed flush across repeated cycles (SC-004)
-- [ ] T021 [P] [US2] Add a cold-load cost test in `internal/domain/service/durability_coldload_test.go` asserting cost tracks document size, not accumulated edit count (SC-012)
+- [X] T020 [P] [US2] Add a kill/restart durability test in `internal/domain/service/durability_crash_test.go` asserting recovery to the last completed flush across repeated cycles (SC-004)
+- [X] T021 [P] [US2] Add a cold-load cost test in `internal/domain/service/durability_coldload_test.go` asserting cost tracks document size, not accumulated edit count (SC-012)
 - [X] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/seed_exactly_once_test.go` asserting seeding happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
 - [X] T023 [P] [US2] Add a degraded-durability test in `internal/domain/service/durability_degraded_test.go`: with the backend failing, assert the session keeps serving, retries, and surfaces the not-yet-durable state **via metrics before anyone is disconnected** (SC-013)
 - [X] T024 [P] [US2] Add an escalation test in `internal/domain/service/durability_escalation_test.go` asserting a distinct counter, a log entry naming document and undurable duration, and a non-generic disconnect reason (SC-016, FR-028)
