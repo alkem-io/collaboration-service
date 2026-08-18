@@ -493,3 +493,124 @@ func TestDeleteRejectsAFenceWithoutTouchingTheNetwork(t *testing.T) {
 		t.Fatal("a rejected delete erased the file anyway; the fence must be checked before the request is sent")
 	}
 }
+
+// storeAgainst builds a store pointed at an arbitrary handler, for driving the
+// HTTP failure branches a well-behaved stub never produces.
+func storeAgainst(t *testing.T, h http.HandlerFunc, pointers map[backend.DocumentID]string) *Store {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	res := &mapResolver{pointers: pointers, bucket: "bucket-test"}
+	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "bucket-test"}, res)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return store
+}
+
+// TestUnexpectedStatusesAreSurfacedNotSwallowed covers the default branches on
+// all three verbs.
+//
+// The shared reason is that file-service is a separate service that can fail in
+// ways this adapter has no mapping for — a 500, a 502 from a proxy, a 403 from a
+// misconfigured gateway. Every one of those must surface. Swallowing them means a
+// save silently not persisting, a load silently returning nothing, or a delete
+// silently leaving content behind for a document the owner erased.
+func TestUnexpectedStatusesAreSurfacedNotSwallowed(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "gateway blew up", http.StatusBadGateway)
+		}, map[backend.DocumentID]string{})
+
+		_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+			DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+		})
+		if err == nil {
+			t.Fatal("a 502 on create must surface; swallowing it means the save silently did not persist")
+		}
+		if !strings.Contains(err.Error(), "502") {
+			t.Fatalf("error = %v, want it to carry the status", err)
+		}
+	})
+
+	t.Run("fetch", func(t *testing.T) {
+		store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}, map[backend.DocumentID]string{"doc": "file-1"})
+
+		if _, err := store.LoadCheckpoint(context.Background(), "doc"); err == nil {
+			t.Fatal("a 403 on fetch must surface; swallowing it would look like an empty document")
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "nope", http.StatusInternalServerError)
+		}, map[backend.DocumentID]string{"doc": "file-1"})
+
+		if err := store.Delete(context.Background(), persistence.DeleteRequest{DocumentID: "doc"}); err == nil {
+			t.Fatal("a 500 on delete must surface; the owner-delete cascade would otherwise report success while the content is still there")
+		}
+	})
+}
+
+// TestCreateRejectsAResponseWithNoID covers the guard on a syntactically valid
+// but useless create response.
+//
+// An empty id is worse than an error: the bytes are stored, but nothing can ever
+// address them again. Recording "" as the pointer would make every later load
+// resolve to nothing and every later save create yet another orphan.
+func TestCreateRejectsAResponseWithNoID(t *testing.T) {
+	store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"","externalID":"abc"}`))
+	}, map[backend.DocumentID]string{})
+
+	_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+	})
+	if err == nil {
+		t.Fatal("a create response with an empty id must fail; the bytes are stored but nothing could ever address them again")
+	}
+}
+
+// TestCreateRejectsAnUndecodableResponse covers the JSON-decode branch.
+func TestCreateRejectsAnUndecodableResponse(t *testing.T) {
+	store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`not json`))
+	}, map[backend.DocumentID]string{})
+
+	_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+	})
+	if err == nil {
+		t.Fatal("an undecodable create response must fail rather than yield a zero-value pointer")
+	}
+}
+
+// TestSaveRejectsAnOversizeSnapshotBeforeUploading covers the MaxUploadSize guard.
+//
+// It runs BEFORE the request, which is the point: file-service would refuse the
+// body anyway, but only after the whole snapshot crossed the network. On a
+// document near the cap that is tens of megabytes uploaded per flush to be
+// rejected every time.
+func TestSaveRejectsAnOversizeSnapshotBeforeUploading(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	t.Cleanup(srv.Close)
+	res := &mapResolver{pointers: map[backend.DocumentID]string{}, bucket: "bucket-test"}
+	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "bucket-test", MaxUploadSize: 8}, res)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: realUpdate(t, "well over eight bytes"), StateVector: []byte("v"),
+	}); err == nil {
+		t.Fatal("a snapshot over MaxUploadSize must be refused")
+	}
+	if reached {
+		t.Fatal("the oversize snapshot was uploaded before being refused; the guard must run before the request")
+	}
+}
