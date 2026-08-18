@@ -1,5 +1,16 @@
 <!--
 Sync Impact Report
+- Version change: 3.0.0 → 3.0.1 (PATCH — §III clarification; no principle change)
+- 3.0.1 (2026-08-18): §III — widen the retained in-process path from a "test
+  capability" to a "development and testing capability". 3.0.0 understated it:
+  the same path is also the local development loop (real editors driven against
+  the service without Alkemio infrastructure) and the documented zero-dependency
+  smoke test that isolates the WebSocket path from authZ. All three are now
+  enumerated, with an explicit instruction that the adapters serving them are
+  retained on that basis and MUST NOT be pruned as unused — closing the gap
+  where a later §X dead-code pass could have removed them on the strength of the
+  narrower wording. No principle is redefined and no configuration changes
+  status: the standalone deployment remains withdrawn.
 - Version change: 2.0.0 → 3.0.0 (MAJOR — §III redefined; a supported product
   configuration is withdrawn)
 - 3.0.0 (2026-08-18): Withdraw the zero-dependency standalone product promise.
@@ -217,12 +228,20 @@ This service holds **no database of its own and opens no database
 connection**: `server` owns the durable rows, blobs live in
 file-service, and every durable interaction is a service call.
 
-- The service MUST run entirely **in-process for tests**, with no
-  database, bus, blob store, or auth service, using in-process fixtures
-  and the core's shipped single-process defaults. This is a **test
-  capability, not a deployment mode**: it carries no durability
-  guarantee and MUST NOT be represented as a supported way to run the
-  service.
+- The service MUST run entirely **in-process**, with no database, bus,
+  blob store, or auth service, using in-process fixtures and the core's
+  shipped single-process defaults. This path serves three distinct
+  purposes, all of which MUST keep working:
+  1. the automated test suite;
+  2. the local development loop, including driving real editors against
+     the service without Alkemio infrastructure;
+  3. the documented zero-dependency smoke test that isolates the
+     WebSocket path from authZ.
+  It is a **development and testing capability, not a deployment
+  mode**: it carries no durability guarantee and MUST NOT be
+  represented as a supported way to run the service in an environment
+  that matters. Adapters serving it are retained on this basis and MUST
+  NOT be pruned as unused.
 - The Alkemio configuration MUST authenticate at the handshake from
   the Alkemio token/cookie (Oathkeeper/Kratos) and authorize per
   document via the authorization-evaluation-service.
@@ -536,4 +555,4 @@ informal conventions and ad-hoc decisions.
 - **Review cadence**: The constitution SHOULD be reviewed quarterly or
   when significant architectural decisions arise.
 
-**Version**: 3.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-08-18
+**Version**: 3.0.1 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-08-18
