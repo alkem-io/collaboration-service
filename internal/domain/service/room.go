@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/memory"
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
@@ -122,10 +124,15 @@ type Room struct {
 	content   model.ContentType
 	doc       *ycrdt.Doc
 	awareness *ycrdt.Awareness
-	deps      Deps
-	cfg       RoomConfig
-	metrics   Metrics
-	logger    *zap.Logger
+	// handle is this room's acquisition of the document from the registry. The
+	// registry owns document identity and lifetime; the room holds the document
+	// only for as long as this handle is live, and must stop serving when it is
+	// invalidated (contracts/registry-session.md).
+	handle  memory.Handle
+	deps    Deps
+	cfg     RoomConfig
+	metrics Metrics
+	logger  *zap.Logger
 
 	commands chan command
 	// peerUpdates is the bounded queue of cross-pod fan-out payloads (002 FR-009):
@@ -445,7 +452,24 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	if cfg.BackendTimeout <= 0 {
 		cfg.BackendTimeout = defaultBackendTimeout
 	}
-	doc := newRoomDoc(string(id))
+	registry := deps.Registry
+	if registry == nil {
+		// A lone room owns exactly one document, so a private registry is
+		// semantically correct here; Manager supplies a shared one so concurrent
+		// opens of the same document coalesce onto a single materialization.
+		registry = memory.NewRegistry()
+	}
+	deps.Registry = registry
+	// The registry coalesces concurrent cache misses for the same document onto ONE
+	// open, which is what makes first-open restore exactly-once by construction
+	// rather than guarded by a racing emptiness check (FR-004a/b).
+	handle, err := registry.Acquire(ctx, backend.DocumentID(id), func(context.Context) (*ycrdt.Doc, error) {
+		return newRoomDoc(string(id)), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("acquiring document: %w", err)
+	}
+	doc := handle.Doc()
 	// ycrdt.NewAwareness seeds the doc-local empty client state for the server's own
 	// client id; left in place, awarenessSnapshot would emit a synthetic presence
 	// entry for the server on the first join. The server holds no presence, so clear
@@ -482,13 +506,14 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		contributors: make(map[string]struct{}),
 		ctx:          roomCtx,
 		cancel:       cancel,
+		handle:       handle,
 	}
 
 	// Bound the materialization I/O (metadata load + blob fetch) so a hung backend
 	// cannot park the first-connect cohort indefinitely — the run loop's per-call
 	// opCtx bound is otherwise applied only after the room starts (002 FR-006/FR-010).
 	loadCtx, loadCancel := r.opCtx()
-	err := r.loadSnapshot(loadCtx)
+	err = r.loadSnapshot(loadCtx)
 	loadCancel()
 	if err != nil {
 		cancel()
@@ -681,22 +706,8 @@ func (r *Room) run() {
 	defer sweepTimer.Stop()
 	defer contribTimer.Stop()
 
-	armSave := func() {
-		if r.cfg.SaveDebounce <= 0 {
-			return
-		}
-		stopTimer(saveTimer)
-		saveTimer.Reset(r.cfg.SaveDebounce)
-	}
-	armIdle := func() {
-		stopTimer(idleTimer)
-		if r.cfg.IdleTimeout <= 0 {
-			// Release immediately on the next loop tick via a zero-length timer.
-			idleTimer.Reset(time.Nanosecond)
-			return
-		}
-		idleTimer.Reset(r.cfg.IdleTimeout)
-	}
+	armSave := func() { r.armSaveTimer(saveTimer) }
+	armIdle := func() { r.armIdleTimer(idleTimer) }
 
 	// A room materialized from the first-open seed has unpersisted content but no
 	// edit to arm the debounce; promote the seed to a real snapshot on the normal
@@ -721,12 +732,15 @@ func (r *Room) run() {
 				armSave()
 			}
 
+		case <-r.handle.Done():
+			r.teardownInvalidated()
+			return
+
 		case <-saveTimer.C:
 			r.persistNow()
 
 		case <-idleTimer.C:
-			if len(r.members) == 0 {
-				r.teardown(r.persistNow)
+			if r.releaseIfEmpty() {
 				return
 			}
 
@@ -1500,6 +1514,51 @@ func (r *Room) persist(ctx context.Context) {
 // notify the Manager → mark Closed. beginTeardown is the idempotent guard: only the
 // first caller runs the sequence; the rest return immediately (no double close, no
 // re-notify). Runs on the run-loop goroutine.
+// armSaveTimer (re)arms the save debounce, unless debouncing is disabled — in
+// which case the save-on-release path persists instead.
+func (r *Room) armSaveTimer(saveTimer *time.Timer) {
+	if r.cfg.SaveDebounce <= 0 {
+		return
+	}
+	stopTimer(saveTimer)
+	saveTimer.Reset(r.cfg.SaveDebounce)
+}
+
+// armIdleTimer (re)arms the idle-release timer. A non-positive IdleTimeout means
+// release as soon as the room is empty, expressed as a zero-length timer so the
+// decision still runs on the next loop tick rather than inline.
+func (r *Room) armIdleTimer(idleTimer *time.Timer) {
+	stopTimer(idleTimer)
+	if r.cfg.IdleTimeout <= 0 {
+		idleTimer.Reset(time.Nanosecond)
+		return
+	}
+	idleTimer.Reset(r.cfg.IdleTimeout)
+}
+
+// teardownInvalidated tears the room down after the registry poisoned this
+// document's generation. It does NOT flush: the in-memory copy may have diverged
+// from durable state, and writing a document of doubtful integrity over good
+// stored content is precisely the failure the teardown-flush matrix exists to
+// prevent (FR-011a). New acquisitions reload from persistence.
+func (r *Room) teardownInvalidated() {
+	r.logger.Warn("document generation invalidated; tearing down without persist",
+		zap.String("doc", string(r.id)))
+	r.teardown(nil)
+}
+
+// releaseIfEmpty releases an idle room that has no members left, reporting
+// whether the run loop should stop. An idle release DOES flush: the document is
+// believed good, so idling out must not silently cost a window of edits
+// (FR-011a).
+func (r *Room) releaseIfEmpty() bool {
+	if len(r.members) != 0 {
+		return false
+	}
+	r.teardown(r.persistNow)
+	return true
+}
+
 func (r *Room) teardown(flush func()) {
 	if !r.lc.beginTeardown() {
 		return
@@ -1528,6 +1587,12 @@ func (r *Room) teardown(flush func()) {
 	}
 	if r.cancelSub != nil {
 		r.cancelSub()
+	}
+	// Release the registry acquisition LAST, after the flush and the auxiliary
+	// teardown above: the document must stay valid for the save-on-release path.
+	// Release is idempotent.
+	if r.handle != nil {
+		r.handle.Release()
 	}
 	close(r.done)
 	if r.onReleased != nil {

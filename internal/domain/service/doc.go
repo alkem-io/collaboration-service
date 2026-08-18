@@ -14,6 +14,8 @@ package service
 import (
 	"context"
 
+	"github.com/antst/go-yjs/backend/memory"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -36,6 +38,14 @@ type Deps struct {
 	// Contributor emits the north-star contribution event in Alkemio mode
 	// (rabbitmq); nil defaults to a no-op so standalone pays nothing (T013).
 	Contributor port.Contributor
+	// Registry owns in-process document identity, coalesced acquisition, eviction
+	// and invalidation. It is the CRDT core's own contract, which §II makes the
+	// port for this concern — the domain depends on the contract, never on a
+	// concrete implementation. Manager supplies one shared registry so concurrent
+	// opens of the same document coalesce; nil defaults to a private in-process
+	// registry, which is correct for a lone room (one room owns one document) and
+	// keeps a directly-constructed Room usable.
+	Registry memory.Registry
 }
 
 // noopBroadcaster is the single-pod default used when Deps.Broadcaster is nil:

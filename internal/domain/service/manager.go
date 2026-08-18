@@ -6,6 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/memory"
+
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 
@@ -86,11 +89,21 @@ type Manager struct {
 	// sf collapses concurrent first-connects for the same document onto ONE
 	// materialization, so newRoom runs OFF mu (002 FR-010 — no lock across I/O).
 	sf singleflight.Group
+
+	// registry owns document identity, coalesced acquisition, eviction and
+	// invalidation (§II — the core's contract IS the port). It is shared across
+	// every room so two rooms can never hold two live copies of one document, and
+	// so Invalidate reaches whichever room currently serves it.
+	registry *memory.InProcessRegistry
 }
 
 // NewManager constructs a room manager over the wired dependencies. A zero
 // RoomConfig falls back to DefaultRoomConfig; a nil Metrics to NopMetrics.
 func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) *Manager {
+	// One registry for the whole manager: document identity is process-wide, so a
+	// per-room registry would let two rooms hold two live copies of one document.
+	registry := memory.NewRegistry()
+	deps.Registry = registry
 	if cfg.SendBuffer == 0 && cfg.SaveDebounce == 0 && cfg.IdleTimeout == 0 {
 		cfg = DefaultRoomConfig()
 	}
@@ -107,11 +120,12 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 		deps.Contributor = noopContributor{}
 	}
 	return &Manager{
-		deps:    deps,
-		cfg:     cfg,
-		metrics: metrics,
-		logger:  logger,
-		rooms:   make(map[model.DocumentID]*Room),
+		registry: registry,
+		deps:     deps,
+		cfg:      cfg,
+		metrics:  metrics,
+		logger:   logger,
+		rooms:    make(map[model.DocumentID]*Room),
 	}
 }
 
@@ -350,6 +364,12 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 	// room, so emitting RoomClosed there would underflow the rooms_active gauge.
 	if removed {
 		m.metrics.RoomClosed()
+		// Release the document's registry slot too, so identity does not outlive the
+		// room that owned it. Evict never invalidates an outstanding handle, so a
+		// concurrent late holder is unaffected.
+		if err := m.registry.Evict(backend.DocumentID(id)); err != nil {
+			m.logger.Warn("evicting document from registry failed", zap.String("doc", string(id)), zap.Error(err))
+		}
 	}
 }
 
@@ -416,8 +436,21 @@ func (m *Manager) Close() {
 		case <-shutdownCtx.Done():
 			m.logger.Warn("shutdown room drain exceeded deadline; some final snapshots may be incomplete",
 				zap.Int("rooms_total", len(rooms)))
+			// Still close the registry: the drain gave up, but leaving document
+			// identity live after shutdown would pin every doc that never drained.
+			m.closeRegistry()
 			return
 		}
+	}
+	m.closeRegistry()
+}
+
+// closeRegistry releases the document registry once the drain has finished (or
+// given up). It runs AFTER the drain so a room's save-on-shutdown persist still
+// has a valid document to encode.
+func (m *Manager) closeRegistry() {
+	if err := m.registry.Close(); err != nil {
+		m.logger.Warn("closing document registry failed", zap.Error(err))
 	}
 }
 

@@ -2,8 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"sync"
 	"testing"
+
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/memory"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
@@ -18,10 +22,23 @@ func newBareRoom(t *testing.T) *Room {
 	t.Helper()
 	deps := newTestDeps()
 	deps.Contributor = noopContributor{}
+	// Acquire through a registry like production does, so a bare room has a valid
+	// handle: the run loop selects on handle.Done(), and a nil handle would panic
+	// there. A private registry is correct — one room, one document.
+	reg := memory.NewRegistry()
+	handle, err := reg.Acquire(context.Background(), backend.DocumentID("unit"), func(context.Context) (*ycrdt.Doc, error) {
+		return newRoomDoc("unit"), nil
+	})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	t.Cleanup(handle.Release)
+	deps.Registry = reg
 	r := &Room{
 		id:           "unit",
 		content:      model.ContentTypeMemo,
-		doc:          newRoomDoc("unit"),
+		doc:          handle.Doc(),
+		handle:       handle,
 		deps:         deps.Deps,
 		cfg:          DefaultRoomConfig(),
 		metrics:      NopMetrics{},
