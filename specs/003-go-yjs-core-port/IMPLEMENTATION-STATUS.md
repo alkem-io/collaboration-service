@@ -23,6 +23,7 @@ gone from the code and from the module graph. The full test suite — including 
 | Document registry | ✅ `memory.Registry` owns identity, acquisition, eviction, invalidation |
 | Teardown-flush matrix | ✅ implemented **and** ratcheted (both halves RED-on-revert) |
 | `persistence.Store` | ⚠️ **in-process only**; file-service implementation NOT started |
+| file-service adapter | ✅ **defect fixed** (`fb32d05`): rewrites in place, stable pointer |
 | Flush batching / escalation | ❌ not started |
 | `hub.Hub` (Redis) | ❌ not started |
 | Conformance | ✅ persistence ×3, memory, hub — 18 subtests, verified executing |
@@ -60,34 +61,65 @@ holder can delay destruction but cannot prevent invalidation.
 
 ---
 
-## The one architectural fork I deliberately did NOT decide
+## The remaining persistence decision — much smaller than first described
 
-**How does a file-service `persistence.Store` resolve `DocumentID` → bytes?**
+> **Superseded.** An earlier version of this section claimed the file-service
+> `Store` was blocked on a significant architectural fork. That framing rested on
+> a misreading of the file-service contract, corrected in `fb32d05`.
 
-`Store.Load(ctx, DocumentID, opts)` must find its own bytes. file-service assigns
-its own blob id, so there is no deterministic addressing from a document id — the
-pointer has to be persisted somewhere, and the only durable place is the metadata
-index. That forces the file-service `Store` to compose **file-service (bytes) +
-`MetadataStore` (pointer + revision)**.
+**What was wrong**: I read "file-service assigns the id on create" as meaning a
+new id per save, and concluded the `Store` would need per-save pointer
+bookkeeping through `MetadataStore`.
 
-It is a *forced* conclusion rather than a free choice, but it is still a real
-architectural decision that:
+**What is actually true**: a file id is a **stable identifier — a filename, not a
+version**. `PUT /internal/file/{id}/content` ("store-and-link") rewrites the
+content behind the same id; file-service swaps the underlying blob and its
+content-hash `externalID`, which is its own business. The adapter was creating a
+new file per save, which was a **defect**, now fixed with regression tests
+(`fb32d05`).
 
-- makes the `Store` depend on the index, and
-- rewrites `persist()` / `loadSnapshot()` — exactly the code paths `002` hardened
-  (delete-after-commit, no stranded pointer, bounded backend calls).
+**What that leaves**, and it is modest:
 
-I stopped here rather than commit that shape unreviewed at the end of a long
-autonomous run. Doing it badly would be worse than not doing it, and it is the
-last decision in the feature that a human should see before it sets.
+- `Load(DocumentID)` → resolve the document's stable pointer **once** → one GET.
+- `Append` → one PUT. No pointer churn, no predecessor, no delete-after-commit.
+- The only residual coupling is the `DocumentID → file id` mapping, which
+  file-service cannot supply (`CreateDocumentInput` has no ID field, so the id
+  cannot be caller-chosen). It is written **once** at first save and read once at
+  load — not per flush.
 
----
+So the `Store` still reads the index, but as a one-time resolution rather than a
+per-save write path. That is an implementation detail, not an architecture fork,
+and it no longer needs adjudicating before work continues.
+
+**Optional simplification, still open**: expanding file-service to accept a
+caller-supplied id is pre-authorized by the constitution ("expanding it is
+pre-authorized if the store needs a capability it does not yet expose"). If the
+snapshot's file id could simply BE the collaboration document id, the `Store`
+becomes fully self-sufficient with no index read at all. Worth doing only if
+file-service is being touched anyway — `006` already modifies it.
+
+**Two file-service behaviours any implementation must respect** (both now covered
+by tests in the adapter):
+
+- **409 is content dedup**, not a transient fault:
+  `unique(externalID, storageBucketID)` refuses bytes already stored under
+  another file in the same bucket. It must not be retried as if it were transient.
+- **Only a 404 may fall back to creating.** A 500 on rewrite must surface —
+  creating a second file forks the document, leaving the row on the old pointer
+  while new content lands somewhere unread.
+
+**Also changed**: `MAX_DOC_BYTES` default 32 MiB → **30 MiB**. file-service caps
+the rewrite body at exactly 32 MiB, so a document on a 32 MiB budget encodes past
+it once v2 framing is added — it would clear our own budget check and then be
+refused by the transport, leaving the document accepted and permanently
+unsaveable.
 
 ## Recommended next steps, in order
 
 1. **Confirm or reject D1a.** Everything downstream in persistence assumes it.
-2. **Decide the file-service `Store` composition** (the fork above), then
-   T025/T026.
+   This is now the ONLY item needing a human decision before implementation.
+2. **T025/T026** — the file-service `Store`, on the corrected stable-pointer
+   model: resolve the pointer once, `Append` = one PUT, `Load` = one GET.
 3. **Then** T028–T035: flush batching above the store, the durability state
    machine, escalation, observability, and deleting `BlobStore`.
 4. **Then** T050–T058 (Redis hub) — the shipped in-process hub is already
