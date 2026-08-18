@@ -35,6 +35,54 @@ interval is the control; the envelope must be documented (SC-020).
 
 ---
 
+## D1a — CONFLICT FOUND IN IMPLEMENTATION: checkpoint-only cannot conform
+
+**Status**: D1's premise is **wrong**, discovered while implementing T025/T045.
+Recorded here rather than silently resolved, because it overturns a decision
+taken in clarification (Q1) and an assumption written into FR-008b.
+
+**What D1 assumed**: that a checkpoint-only store is "a legitimate point in the
+contract's design space" because `Compactor` is optional and a `Loader` may
+return a checkpoint covering all history — so `conformance.PersistenceCompaction`
+would simply not apply.
+
+**What the suite actually requires** (`backend/conformance/persistence.go`):
+
+- **Per-record fidelity.** It appends `[]byte("first")` then `[]byte("second")`
+  and asserts `history[0].Update == "first"`, `history[1].Update == "second"`.
+  Records are **opaque bytes**, not CRDT updates — so a checkpoint-only store
+  cannot merge them into one covering checkpoint. There is nothing to merge.
+- **Pagination with a fixed recovery view.** `Limit: 1` must return one record
+  plus a continuation token; the continuation must exclude appends that landed
+  after the first page, while a fresh load must include them.
+- **Caller-owned slices**, `ErrNotFound` for absent history, `ErrUnexpectedFence`
+  for a fenced write to an unfenced store, and context cancellation honoured.
+
+None of that is satisfiable by storing only the latest whole-document blob.
+
+**The conflict**: FR-008/SC-006 require every implementation to pass its
+conformance suites; Q1/FR-008b specify a shape that cannot.
+
+**Reconciliation adopted** (satisfies both, and preserves Q1's *intent*):
+
+Implement a **genuine append-log store WITH compaction** — `CompactingStore`,
+not the bare `Store` D1 described. Then:
+
+- `conformance.Persistence` and `conformance.PersistenceCompaction` both pass,
+  so FR-008/SC-006 hold and FR-008b's "compaction does not apply" is withdrawn.
+- The service's *usage* is unchanged from Q1's intent: a flush still writes one
+  whole-document update per window, and compaction installs it as the checkpoint
+  immediately. Steady state is therefore exactly what Q1 asked for — one
+  checkpoint, no trailing records, one blob read on load.
+- FR-012 (bounded recovery cost) is now satisfied *by compaction* rather than
+  by the absence of history, which is the stronger guarantee: without compaction
+  a conforming log would grow without bound.
+
+**What the user should confirm**: this makes `Compactor` required rather than
+excluded. The alternative — keep checkpoint-only and skip `conformance.Persistence`
+— was rejected because it violates FR-008 and would leave the one contract with
+no shipped implementation entirely unvalidated.
+
 ## D2 — Flush batching lives **above** the `Store`
 
 **Decision**: the service merges a flush window and calls `Append` **once** per window.

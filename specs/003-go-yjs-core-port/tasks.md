@@ -30,7 +30,7 @@ Existing hexagonal layout (see plan.md Structure Decision). Domain core in
 **Purpose**: dependency and scaffolding, nothing behavioural.
 
 - [X] T001 Add `github.com/antst/go-yjs` pinned to an explicit version in `go.mod`, and remove the `replace` directive redirecting `github.com/skyterra/y-crdt` (§XIV, FR-024)
-- [ ] T002 [P] Create the adapter package skeletons `internal/adapter/outbound/persistence/` and `internal/adapter/outbound/hub/` per plan.md Structure Decision
+- [X] T002 [P] Create the adapter package skeletons `internal/adapter/outbound/persistence/` and `internal/adapter/outbound/hub/` per plan.md Structure Decision
 - [ ] T003 [P] Wire the core's `backend/conformance` suites into the CI workflow so they run per package
 - [ ] T004 Record the pinned version and the oracle-reverification rule in `specs/003-go-yjs-core-port/research.md` sequencing notes
 
@@ -100,7 +100,7 @@ completed flush.
 
 - [ ] T025 [US2] Implement the checkpoint-only `persistence.Store` over file-service in `internal/adapter/outbound/persistence/fileservice/` — `Appender` + `Loader` + `FenceMode`, deliberately no `Compactor` (D1, contracts/persistence-store.md)
 - [ ] T026 [US2] Make the store in `internal/adapter/outbound/persistence/fileservice/` constructible in **both** fence modes, threading the epoch through the write path though it is always zero in deployment (FR-008a, D6)
-- [ ] T027 [P] [US2] Implement the in-process `persistence.Store` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
+- [X] T027 [P] [US2] Implement the in-process `persistence.Store` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
 - [ ] T028 [US2] Implement flush batching **above** the store in a new `internal/domain/service/flush.go`: merge a window, call `Append` once, so `Append` never overstates durability (D2, FR-007a)
 - [ ] T029 [US2] Make the flush interval operator-configurable in `internal/config/config.go` with a documented default, armed only when the document changed; shutdown flush unconditional (FR-010)
 - [ ] T030 [US2] Implement the durability state machine (clean → dirty → undurable → escalated) in `internal/domain/service/flush.go` with retry/backoff and a configurable consecutive-failure threshold (FR-013, D10)
@@ -150,8 +150,8 @@ by this repo's tests.
 
 **Independent test**: conformance suites run in CI and pass.
 
-- [ ] T045 [P] [US4] Wire `conformance.Persistence` against both store implementations (SC-006)
-- [ ] T046 [US4] Wire `conformance.PersistenceFencing` against a **fenced** instance, though no deployment enables fencing (FR-008a, SC-017)
+- [X] T045 [P] [US4] Wire `conformance.Persistence` against both store implementations (SC-006)
+- [X] T046 [US4] Wire `conformance.PersistenceFencing` against a **fenced** instance, though no deployment enables fencing (FR-008a, SC-017)
 - [ ] T047 [P] [US4] Wire `conformance.Memory` against the registry usage (SC-006)
 - [ ] T048 [US4] Record which suites apply and **why each non-applicable suite is not run** — notably compaction, since the store implements no `Compactor` (FR-008b)
 - [ ] T049 [P] [US4] Assert in `internal/app/app.go` that the core's shipped single-process defaults are used **as shipped** in the in-process path, with no bespoke reimplementation (§X, §XI)
