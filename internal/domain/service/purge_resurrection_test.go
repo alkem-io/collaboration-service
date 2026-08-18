@@ -20,7 +20,7 @@ import (
 )
 
 // gatedDeleteStore is an in-process CheckpointStore that parks inside
-// DeleteCheckpoint, AFTER the content is gone but BEFORE the caller moves on to
+// Delete, AFTER the content is gone but BEFORE the caller moves on to
 // the index row. That is the resurrection window, and parking there is what makes
 // the race deterministic instead of a timing lottery.
 type gatedDeleteStore struct {
@@ -38,8 +38,8 @@ func newGatedDeleteStore() *gatedDeleteStore {
 	}
 }
 
-func (g *gatedDeleteStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
-	if err := g.Store.DeleteCheckpoint(ctx, id); err != nil {
+func (g *gatedDeleteStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
+	if err := g.Store.Delete(ctx, req); err != nil {
 		return err
 	}
 	// sync.Once: the cascade may reach this twice (the room-loop purge, then the

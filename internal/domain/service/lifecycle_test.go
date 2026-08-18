@@ -227,8 +227,7 @@ func (c *erroringConn) Send(_ []byte) error {
 // failingLoadStore errors on load with a non-NotFound error, to drive the
 // blob-fetch failure path of loadSnapshot.
 type failingLoadStore struct {
-	persistence.CheckpointStore
-	CheckpointDeleter
+	*persistinprocess.Store
 }
 
 func (failingLoadStore) LoadCheckpoint(context.Context, backend.DocumentID) (persistence.Checkpoint, error) {
@@ -251,7 +250,7 @@ func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
 	open := authopen.New()
 	deps := Deps{
 		Metadata:   meta,
-		Checkpoint: failingLoadStore{CheckpointStore: persistinprocess.New(), CheckpointDeleter: persistinprocess.New()},
+		Checkpoint: failingLoadStore{Store: persistinprocess.New()},
 		Auth:       open,
 		AuthZ:      open,
 	}

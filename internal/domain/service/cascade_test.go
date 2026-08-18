@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -167,7 +166,7 @@ type deleteFailingStore struct {
 	persistence.CheckpointStore
 }
 
-func (deleteFailingStore) DeleteCheckpoint(context.Context, backend.DocumentID) error {
+func (deleteFailingStore) Delete(context.Context, persistence.DeleteRequest) error {
 	return errInjectedBlobDelete
 }
 

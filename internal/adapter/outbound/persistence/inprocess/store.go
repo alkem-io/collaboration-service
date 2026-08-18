@@ -131,20 +131,32 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 
 var _ persistence.CheckpointStore = (*Store)(nil)
 
-// DeleteCheckpoint removes a document's durable state. Idempotent: deleting an
-// absent document succeeds, because the owner-delete cascade retries and a second
-// delete must not fail it.
+// Delete removes a document's durable state (persistence.Deleter).
 //
-// Local extension, not part of the persistence contract — see the note on the
-// domain's CheckpointDeleter.
-func (s *Store) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+// Idempotent: deleting an absent document succeeds. The owner-delete cascade
+// retries, and the second attempt must not fail the operation it is completing.
+//
+// A REJECTED delete leaves the state intact. That is the property that stops a
+// superseded owner erasing what its replacement is serving, so the fence is
+// checked before anything is removed rather than alongside.
+func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.blobs, id)
-	delete(s.revisions, id)
-	delete(s.fences, id)
+
+	if err := s.checkFence(req.DocumentID, req.Fence); err != nil {
+		return err
+	}
+	// The fence high-water mark is retained across the delete: a stale owner must
+	// not be able to erase, then re-save under its old epoch as if it were current.
+	if req.Fence > s.fences[req.DocumentID] {
+		s.fences[req.DocumentID] = req.Fence
+	}
+	delete(s.blobs, req.DocumentID)
+	delete(s.revisions, req.DocumentID)
 	return nil
 }
+
+var _ persistence.DeletingCheckpointStore = (*Store)(nil)

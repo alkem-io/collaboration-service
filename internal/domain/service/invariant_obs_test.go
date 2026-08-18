@@ -30,8 +30,7 @@ import (
 // handler that panics on the single-writer run loop. Load/Delete delegate to a
 // real store so materialization is unaffected.
 type panicOnSaveStore struct {
-	persistence.CheckpointStore
-	CheckpointDeleter
+	*persistinprocess.Store
 }
 
 func (panicOnSaveStore) SaveCheckpoint(context.Context, persistence.SaveCheckpointRequest) (persistence.Revision, error) {
@@ -51,7 +50,7 @@ func (panicOnSaveStore) SaveCheckpoint(context.Context, persistence.SaveCheckpoi
 func TestRunLoopRecoversFromHandlerPanic(t *testing.T) {
 	deps := newTestDeps()
 	inner := persistinprocess.New()
-	panicking := panicOnSaveStore{CheckpointStore: inner}
+	panicking := panicOnSaveStore{Store: inner}
 	deps.Checkpoint = panicking
 	// A short debounce so the edit below triggers a (panicking) persist promptly; a
 	// long idle so the room is not released by idleness before that persist runs.

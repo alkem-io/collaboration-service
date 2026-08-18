@@ -61,8 +61,8 @@ func (s *outageStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID)
 	return s.inner.LoadCheckpoint(ctx, id)
 }
 
-func (s *outageStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
-	return s.inner.DeleteCheckpoint(ctx, id)
+func (s *outageStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
+	return s.inner.Delete(ctx, req)
 }
 
 func (s *outageStore) FenceMode() persistence.FenceMode { return s.inner.FenceMode() }

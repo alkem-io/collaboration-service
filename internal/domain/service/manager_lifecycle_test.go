@@ -122,8 +122,8 @@ func (g *gateStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (
 	return g.inner.LoadCheckpoint(ctx, id)
 }
 
-func (g *gateStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
-	return g.inner.DeleteCheckpoint(ctx, id)
+func (g *gateStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
+	return g.inner.Delete(ctx, req)
 }
 
 func (g *gateStore) FenceMode() persistence.FenceMode { return g.inner.FenceMode() }

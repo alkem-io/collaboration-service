@@ -53,8 +53,8 @@ func (s *countingStore) LoadCheckpoint(ctx context.Context, id backend.DocumentI
 	return s.inner.LoadCheckpoint(ctx, id)
 }
 
-func (s *countingStore) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
-	return s.inner.DeleteCheckpoint(ctx, id)
+func (s *countingStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
+	return s.inner.Delete(ctx, req)
 }
 
 func (s *countingStore) FenceMode() persistence.FenceMode { return s.inner.FenceMode() }

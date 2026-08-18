@@ -8,6 +8,7 @@ import (
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/memory"
+	"github.com/antst/go-yjs/backend/persistence"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -305,7 +306,7 @@ func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
 	if err != nil {
 		return err
 	}
-	if err := del.DeleteCheckpoint(ctx, backend.DocumentID(id)); err != nil {
+	if err := del.Delete(ctx, persistence.DeleteRequest{DocumentID: backend.DocumentID(id)}); err != nil {
 		return err
 	}
 	if err := m.deps.Metadata.Delete(ctx, id); err != nil && !errors.Is(err, model.ErrNotFound) {

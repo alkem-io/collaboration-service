@@ -231,22 +231,21 @@ func lifecycleQueue(cfg *config.Config) string {
 	return config.DefaultLifecycleQueue
 }
 
-// checkpointStore is the persistence port plus the deletion capability the
-// contract does not (yet) carry — see service.CheckpointDeleter.
-type checkpointStore interface {
-	persistence.CheckpointStore
-	service.CheckpointDeleter
-}
-
 // buildCheckpoint selects the persistence adapter.
 //
-// Only two shapes exist now. file-service is the deployed one; everything else
-// resolves to the in-process store, which backs the test suite, the local
-// development loop and the zero-dependency smoke test (§III). The former
-// `local` and `s3` blob adapters have no persistence implementation: they
-// existed to serve the standalone deployment that constitution v3.0.0 §III
-// withdrew, and are legacy pending removal.
-func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (checkpointStore, error) {
+// The return type is persistence.DeletingCheckpointStore, not CheckpointStore:
+// deletion is OPTIONAL in the contract (some media are forbidden to delete — WORM
+// storage, object locks, regulated archival tiers), so a caller that needs
+// erasure must type-assert and fail loudly rather than trust that Delete exists.
+// Asserting it HERE means a store that cannot delete fails startup, instead of
+// surfacing the first time an owner deletes a document and the cascade cannot
+// complete.
+//
+// Only two shapes exist. file-service is the deployed one; `inline` resolves to
+// the in-process store, which backs the test suite, the local development loop
+// and the zero-dependency smoke test (§III). The retired `local` and `s3` values
+// are rejected by config.Load and cannot reach here.
+func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.DeletingCheckpointStore, error) {
 	if cfg.BlobStore == config.BlobStoreFileService {
 		return persistfileservice.New(persistfileservice.Config{
 			BaseURL:          cfg.FileService.BaseURL,

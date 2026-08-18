@@ -320,19 +320,25 @@ func readErrBody(r io.Reader) string {
 	return strings.TrimSpace(string(b))
 }
 
-var _ persistence.CheckpointStore = (*Store)(nil)
+var _ persistence.DeletingCheckpointStore = (*Store)(nil)
 
-// DeleteCheckpoint removes the document's file. Idempotent: a document with no
-// pointer, or whose file is already gone, deletes successfully — the cascade
-// retries, and a second delete must not fail it.
+// Delete removes the document's file (persistence.Deleter).
 //
-// Local extension, not part of the persistence contract — see the note on the
-// domain's CheckpointDeleter.
-func (s *Store) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error {
+// Idempotent: a document with no pointer, or whose file is already gone,
+// deletes successfully — the cascade retries, and a second delete must not fail
+// the operation it is completing.
+//
+// The store is Unfenced, so a non-zero fence is ErrUnexpectedFence and the state
+// is left intact. Checked BEFORE the pointer is resolved: a rejected delete must
+// not have reached the network at all.
+func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	pointer, _, err := s.pointers.Pointer(ctx, id)
+	if req.Fence != 0 {
+		return persistence.ErrUnexpectedFence
+	}
+	pointer, _, err := s.pointers.Pointer(ctx, req.DocumentID)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNoPointer):
@@ -341,12 +347,12 @@ func (s *Store) DeleteCheckpoint(ctx context.Context, id backend.DocumentID) err
 		return fmt.Errorf("resolving file pointer: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	resp, err := s.client.Do(req)
+	resp, err := s.client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("file-service delete: %w", err)
 	}

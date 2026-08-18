@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
 
 	"go.uber.org/zap"
 
@@ -161,7 +162,7 @@ func (r *Room) purge(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := del.DeleteCheckpoint(ctx, backend.DocumentID(r.id)); err != nil {
+	if err := del.Delete(ctx, persistence.DeleteRequest{DocumentID: backend.DocumentID(r.id)}); err != nil {
 		return err
 	}
 	if err := r.deps.Metadata.Delete(ctx, r.id); err != nil && !isNotFound(err) {

@@ -15,8 +15,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/antst/go-yjs/backend"
-
 	"github.com/antst/go-yjs/backend/memory"
 	"github.com/antst/go-yjs/backend/persistence"
 
@@ -55,31 +53,25 @@ type Deps struct {
 	Registry memory.Registry
 }
 
-// CheckpointDeleter removes a document's durable state.
+// deleter returns the checkpoint store's deletion capability
+// (persistence.Deleter, adopted from the core in go-yjs v0.0.3).
 //
-// Idempotent by contract: deleting an absent document succeeds. The owner-delete
-// cascade retries, and a second delete must not fail it.
-//
-// Ordering matters and is the caller's job: the document's in-memory generation
-// must be invalidated BEFORE the durable state is deleted. A room still serving
-// the document would otherwise persist it again on its next flush and silently
-// resurrect deleted content.
-type CheckpointDeleter interface {
-	// DeleteCheckpoint removes a document's durable state. It succeeds when the
-	// document has no stored state, so a retried cascade does not fail.
-	DeleteCheckpoint(ctx context.Context, id backend.DocumentID) error
-}
-
-// deleter returns the checkpoint store's deletion capability.
+// Deletion is OPTIONAL in the contract, and deliberately so: some media are
+// forbidden to delete (WORM storage, object locks, regulated archival tiers), and
+// a mandatory Delete cannot express that. A caller that needs erasure therefore
+// type-asserts and fails loudly when it is absent, which beats a store whose
+// Delete silently does nothing.
 //
 // It is derived from Checkpoint rather than wired as a separate Deps field on
 // purpose: the two must be the SAME instance, and a struct with both invites
 // wiring one store as the reader and a different one as the deleter — a bug that
-// compiles, passes most tests, and silently fails to delete anything. When the
-// persistence contract grows a deletion method this helper disappears and the
-// call sites use Checkpoint directly.
-func (d Deps) deleter() (CheckpointDeleter, error) {
-	del, ok := d.Checkpoint.(CheckpointDeleter)
+// compiles, passes most tests, and silently fails to delete anything.
+//
+// app.New asserts persistence.DeletingCheckpointStore at construction, so a store
+// that cannot delete fails startup rather than surfacing here when an owner
+// deletes a document.
+func (d Deps) deleter() (persistence.Deleter, error) {
+	del, ok := d.Checkpoint.(persistence.Deleter)
 	if !ok {
 		return nil, fmt.Errorf("checkpoint store %T cannot delete documents; the owner-delete cascade requires it", d.Checkpoint)
 	}

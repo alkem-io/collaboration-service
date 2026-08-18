@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
@@ -620,7 +619,7 @@ type failingDeleteStore struct {
 	persistence.CheckpointStore
 }
 
-func (failingDeleteStore) DeleteCheckpoint(context.Context, backend.DocumentID) error {
+func (failingDeleteStore) Delete(context.Context, persistence.DeleteRequest) error {
 	return errors.New("blob backend down")
 }
 
@@ -753,5 +752,5 @@ func TestDispatchSyncUnknownSubTagIsNoOp(t *testing.T) {
 var (
 	_ port.ClusterBroadcaster = erroringSubBroadcaster{}
 	_ port.ClusterBroadcaster = erroringPubBroadcaster{}
-	_ CheckpointDeleter       = failingDeleteStore{}
+	_ persistence.Deleter     = failingDeleteStore{}
 )
