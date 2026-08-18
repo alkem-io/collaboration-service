@@ -446,13 +446,14 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 	// room, so emitting RoomClosed there would underflow the rooms_active gauge.
 	if removed {
 		m.metrics.RoomClosed()
-		// Release the document's registry slot too, so identity does not outlive the
-		// room that owned it. Evict never invalidates an outstanding handle, so a
-		// concurrent late holder is unaffected.
-		if err := m.registry.Evict(backend.DocumentID(id)); err != nil {
-			m.logger.Warn("evicting document from registry failed", zap.String("doc", string(id)), zap.Error(err))
-		}
 	}
+	// The registry slot is NOT evicted here. It is evicted by the room's own
+	// teardown, which covers this path and one this path cannot reach: a room torn
+	// down during materialization — a shutdown race, or a purge cascade raising the
+	// tombstone while newRoom ran off the lock — never entered m.rooms, so `removed`
+	// is false and an evict guarded by it would never run. That room did acquire a
+	// registry handle, so the document would outlive every room that ever owned it
+	// with nothing left to clean it up.
 }
 
 // Forward hands one inbound framed wire message to the session's room for

@@ -1669,12 +1669,38 @@ func (r *Room) teardown(flush func()) {
 	// Release is idempotent.
 	if r.handle != nil {
 		r.handle.Release()
+		r.evictFromRegistry()
 	}
 	close(r.done)
 	if r.onReleased != nil {
 		r.onReleased()
 	}
 	r.lc.finishDraining()
+}
+
+// evictFromRegistry destroys the document's registry entry once this room has
+// released its handle.
+//
+// Release alone only drops a reference — the entry, and the Y.Doc behind it, stay
+// resident. Nothing else evicts, so without this every document ever opened is
+// retained for the lifetime of the process: a service that serves N documents
+// holds N Y.Docs forever, each up to MAX_DOC_BYTES. That is a leak with no
+// symptom until the pod is OOM-killed, and it grows with traffic rather than with
+// concurrency, so it does not show up in load tests that reuse a few document ids.
+//
+// ErrInUse is the expected outcome, not a failure, whenever another handle is
+// still out: the registry refuses rather than invalidating a live acquisition,
+// and that room will evict when it releases. Anything else is worth seeing.
+func (r *Room) evictFromRegistry() {
+	if r.deps.Registry == nil {
+		return
+	}
+	err := r.deps.Registry.Evict(backend.DocumentID(r.id))
+	if err == nil || errors.Is(err, memory.ErrInUse) {
+		return
+	}
+	r.logger.Warn("evicting the document from the registry failed; it stays resident",
+		zap.String("doc", string(r.id)), zap.Error(err))
 }
 
 // finish releases the room with no extra flush (the caller already persisted/purged).
