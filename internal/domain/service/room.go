@@ -497,39 +497,14 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		registry = memory.NewRegistry()
 	}
 	deps.Registry = registry
-	// The registry coalesces concurrent cache misses for the same document onto ONE
-	// open, which is what makes first-open restore exactly-once by construction
-	// rather than guarded by a racing emptiness check (FR-004a/b).
-	handle, err := registry.Acquire(ctx, backend.DocumentID(id), func(context.Context) (*ycrdt.Doc, error) {
-		return newRoomDoc(string(id)), nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("acquiring document: %w", err)
-	}
-	doc := handle.Doc()
-	// ycrdt.NewAwareness seeds the doc-local empty client state for the server's own
-	// client id; left in place, awarenessSnapshot would emit a synthetic presence
-	// entry for the server on the first join. The server holds no presence, so clear
-	// the local state immediately — the zero Object is the cleared/null state
-	// (Object is a struct, so SetLocalState(ycrdt.Object{}) removes the entry, not a
-	// nil) — and a fresh room then reports zero awareness states until a real client
-	// announces one.
-	awareness := ycrdt.NewAwareness(doc)
-	if err := awareness.SetLocalState(ycrdt.Object{}); err != nil {
-		// The core surfaces this now; a failure here means the server would carry a
-		// phantom local awareness entry, so it is worth seeing rather than dropping.
-		logger.Warn("clearing server local awareness state failed", zap.Error(err))
-	}
-	// The room-lifetime context: every backend call on the run loop derives from
-	// it, and it is cancelled on release (finish) so a hung call unblocks at
-	// teardown. It is decoupled from any request lifetime (the caller already
-	// passes a context.WithoutCancel(reqCtx)).
+
+	// The room struct exists BEFORE the document does, because the document is
+	// initialized inside the registry's open function (below) and that function
+	// needs somewhere to record what it learned.
 	roomCtx, cancel := context.WithCancel(ctx)
 	r := &Room{
 		id:           id,
 		content:      content,
-		doc:          doc,
-		awareness:    awareness,
 		deps:         deps,
 		cfg:          cfg,
 		metrics:      metrics,
@@ -543,32 +518,78 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		contributors: make(map[string]struct{}),
 		ctx:          roomCtx,
 		cancel:       cancel,
-		handle:       handle,
 	}
 
-	// Bound the materialization I/O (metadata load + blob fetch) so a hung backend
+	// Bound the materialization I/O (metadata load + state fetch) so a hung backend
 	// cannot park the first-connect cohort indefinitely — the run loop's per-call
 	// opCtx bound is otherwise applied only after the room starts (002 FR-006/FR-010).
 	loadCtx, loadCancel := r.opCtx()
-	err = r.loadSnapshot(loadCtx)
-	loadCancel()
+	defer loadCancel()
+
+	// The metadata row is read OUTSIDE the open function, because it is per-ROOM
+	// state (version, pointer, policy id, owner, bucket, content type) that every
+	// room needs even when the document is already live and the open function will
+	// not run. Reading it inside would leave a room that joined a cached document
+	// with a zero version and no pointer, and its first flush would then write a
+	// metadata row claiming the document had never been saved.
+	meta, found, err := r.loadMetadata(loadCtx)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 
-	// Apply the document-type convention to a freshly created (empty) doc so the
-	// root shared type exists with the right shape (T010). Use r.content, NOT the
-	// `content` handshake parameter: loadSnapshot has already corrected r.content to
-	// the PERSISTED meta.ContentType (the persisted type wins per the documented
-	// contract), so seeding the convention off the stale handshake value would, for a
-	// document pre-registered as whiteboard but opened by a client that omits ?type=
-	// (which the WS adapter defaults to memo), materialize the MEMO root — a spurious
-	// Y.XmlFragment "default" instead of the whiteboard roots (elements/files/
-	// appState). That is a durable wrong-type root that defeats applyConvention's
-	// anti-race guarantee; persist() already keys off r.content, so only the
-	// convention was inconsistent.
-	applyConvention(doc, r.content)
+	// The DOCUMENT's content is initialized inside the open function, which is what
+	// makes first-open restore exactly-once BY CONSTRUCTION rather than by luck.
+	// Acquire coalesces concurrent cache misses onto one open call and publishes
+	// nothing until it returns, so no session can observe a document that has been
+	// created but not yet restored — the half-built state FR-004a forbids. Loading
+	// after Acquire would publish an empty document first and fill it in afterwards.
+	opened := false
+	handle, err := registry.Acquire(ctx, backend.DocumentID(id), func(openCtx context.Context) (*ycrdt.Doc, error) {
+		opened = true
+		doc := newRoomDoc(string(id))
+		if found {
+			if err := r.restoreInto(openCtx, doc, meta); err != nil {
+				return nil, err
+			}
+		}
+		// The convention seeds the root shared type with the right shape, and belongs
+		// inside the open function for the same reason the restore does: a document
+		// published without its root would be observable in a shape no client expects.
+		//
+		// r.content, NOT the `content` handshake parameter: loadMetadata has already
+		// corrected it to the PERSISTED content type (the persisted type wins per the
+		// documented contract). Seeding off the stale handshake value would, for a
+		// document pre-registered as whiteboard but opened by a client that omits
+		// ?type= (which the WS adapter defaults to memo), materialize the MEMO root —
+		// a spurious Y.XmlFragment "default" instead of the whiteboard roots. That is
+		// a durable wrong-type root; persist() already keys off r.content, so only the
+		// convention was ever inconsistent.
+		applyConvention(doc, r.content)
+		return doc, nil
+	})
+	if err != nil {
+		cancel()
+		if errors.Is(err, memory.ErrClosed) {
+			// The registry closes only in Manager.Close, so this IS the shutdown, and
+			// the caller must see it as one: a connection arriving during shutdown is
+			// refused, not failed. Mapping it here rather than leaving it as an opaque
+			// materialization error also makes the answer independent of WHERE in
+			// materialization the shutdown lands — before this change, a Join wedged
+			// on the metadata read reported "registry closed" while one wedged a step
+			// later reported errShuttingDown, for the same event.
+			return nil, errShuttingDown
+		}
+		return nil, fmt.Errorf("acquiring document: %w", err)
+	}
+	doc := handle.Doc()
+	r.doc = doc
+	r.handle = handle
+
+	if !opened {
+		r.measureLiveDoc(doc)
+	}
+	r.awareness = newServerAwareness(doc, logger)
 
 	// Observe applied updates and fan them out. The observer runs synchronously
 	// inside ApplyUpdate on the run-loop goroutine, so reading members here is
@@ -606,23 +627,61 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	return r, nil
 }
 
-// loadSnapshot lazily rehydrates the authoritative doc from the latest persisted
-// snapshot (US2/US5 no-regression): it reads the metadata index for the blob
-// pointer, fetches the v2-encoded bytes, and applies them. When no live snapshot
-// exists yet — a freshly-created document whose content the server persisted but
-// has no collaboration snapshot (no ContentPointer / no blob) — it falls back to
-// the first-open SEED, materializing the doc from the content the server
-// delivered on collaboration-fetch (Metadata.SeedContent, R4/US1) so the first
-// opener sees the creation content rather than an empty editor (FR-003). A
-// document with neither a snapshot nor a seed is a fresh empty room (FR-010), not
-// an error.
-func (r *Room) loadSnapshot(ctx context.Context) error {
+// measureLiveDoc sets docBytes from a document this room did not restore.
+//
+// A cache hit means another room already opened the document, so there is no
+// stored-update length to take it from. Leaving it at zero would under-report
+// every cheap MaxDocBytes skip until the first flush re-synced it — the budget
+// check would wave through updates it should have measured.
+func (r *Room) measureLiveDoc(doc *ycrdt.Doc) {
+	encoded, err := ycrdt.EncodeStateAsUpdateV2(doc, nil)
+	if err != nil {
+		r.logger.Warn("measuring the live document failed; the size budget starts from zero",
+			zap.String("doc", string(r.id)), zap.Error(err))
+		return
+	}
+	r.docBytes = len(encoded)
+}
+
+// newServerAwareness builds the room's awareness and clears the server's own
+// local state.
+//
+// ycrdt.NewAwareness seeds a doc-local empty client state for the server's client
+// id; left in place, awarenessSnapshot would emit a synthetic presence entry for
+// the SERVER on the first join. The server holds no presence, so it is cleared
+// immediately — the zero Object is the cleared/null state (Object is a struct, so
+// SetLocalState(ycrdt.Object{}) removes the entry rather than setting a nil) — and
+// a fresh room then reports zero awareness states until a real client announces
+// one.
+func newServerAwareness(doc *ycrdt.Doc, logger *zap.Logger) *ycrdt.Awareness {
+	awareness := ycrdt.NewAwareness(doc)
+	if err := awareness.SetLocalState(ycrdt.Object{}); err != nil {
+		// The core surfaces this now; a failure here means the server would carry a
+		// phantom local awareness entry, so it is worth seeing rather than dropping.
+		logger.Warn("clearing server local awareness state failed", zap.Error(err))
+	}
+	return awareness
+}
+
+// loadMetadata reads the document's index row and adopts it as this room's state.
+//
+// Split out of the restore because the two have different scopes. This is
+// per-ROOM state — version, content pointer, policy id, owner, bucket, content
+// type, blob kind — and every room needs it, including one that joins a document
+// already live in the registry and therefore never runs the open function. The
+// document's CONTENT, by contrast, is per-DOCUMENT and belongs inside that open
+// function (restoreInto).
+//
+// A missing row is not an error: a fresh document has nothing to load or seed.
+// The bool reports whether a row was found, so the caller can skip the restore
+// rather than infer it from a zero-valued struct.
+func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	meta, err := r.deps.Metadata.Load(ctx, r.id)
 	if err != nil {
 		if isNotFound(err) {
-			return nil // no metadata row — fresh document, nothing to load or seed.
+			return model.Metadata{}, false, nil
 		}
-		return err
+		return model.Metadata{}, false, err
 	}
 
 	r.version = meta.Version
@@ -636,24 +695,46 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	if meta.BlobStore != "" {
 		// Record the backend the document was last saved to so subsequent saves
 		// re-persist it in the metadata row (the row stays truthful about where the
-		// snapshot lives). Note this does not re-route the read below: r.deps.Blob
-		// is the single adapter selected at startup, so a running config whose
+		// state lives). Note this does not re-route the read below: the checkpoint
+		// store is the single adapter selected at startup, so a running config whose
 		// BLOB_STORE differs from meta.BlobStore must point that adapter at the same
 		// backing store to rehydrate (T005.6).
 		r.blobKind = meta.BlobStore
 	}
+	return meta, true, nil
+}
 
-	// Load the document's stored state. ErrNotFound means it has never been
-	// saved — seed from the row's create-time content if any. ErrCorrupt means the
-	// index says state EXISTS but it could not be read; that must fail
-	// materialization rather than fall back to seeding, because seeding would
-	// resurrect stale content and the next save would overwrite the last good
-	// state with it (FR-014).
+// restoreInto rehydrates a NEWLY OPENED document from durable state.
+//
+// It runs inside the registry's open function (FR-004a/b), which is what makes
+// first-open restore exactly-once by construction: Acquire coalesces concurrent
+// cache misses onto one call and publishes nothing until it returns, so no
+// session can observe a document that exists but has not been restored. Doing
+// this after Acquire would publish an empty document and fill it in afterwards,
+// leaving a window in which a second opener sees an empty editor for a document
+// that has content.
+//
+// It takes the doc explicitly rather than using r.doc, which is not assigned
+// until Acquire returns — and that is the point: there is no way to write this
+// against the room's own document, because the room does not have one yet.
+//
+// When no stored state exists — a freshly-created document whose content the
+// server persisted but which has no collaboration snapshot yet — it falls back to
+// the first-open SEED, materializing from the content the server delivered on
+// collaboration-fetch (Metadata.SeedContent, R4/US1) so the first opener sees the
+// creation content rather than an empty editor (FR-003). Neither state nor seed
+// is a fresh empty room (FR-010), not an error.
+func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc, meta model.Metadata) error {
+	// ErrNotFound means the document has never been saved — seed from the row's
+	// create-time content if any. ErrCorrupt means the index says state EXISTS but
+	// it could not be read; that must fail materialization rather than fall back to
+	// seeding, because seeding would resurrect stale content and the next save
+	// would overwrite the last good state with it (FR-014).
 	cp, err := r.deps.Checkpoint.LoadCheckpoint(ctx, backend.DocumentID(r.id))
 	switch {
 	case err == nil:
 	case errors.Is(err, persistence.ErrNotFound):
-		r.seedFromContent(meta.SeedContent)
+		r.seedInto(doc, meta.SeedContent)
 		return nil
 	default:
 		return fmt.Errorf("loading stored state for %s: %w", r.id, err)
@@ -665,14 +746,14 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	// rehydration is local state, not a new edit to broadcast. Stored state is
 	// authoritative: any SeedContent on the row is a stale create-time bootstrap
 	// and is deliberately ignored (re-applying it would resurrect old content).
-	if err := ycrdt.ApplyUpdateV2(r.doc, cp.Update, updateOrigin{src: 0, peer: true}); err != nil {
+	if err := ycrdt.ApplyUpdateV2(doc, cp.Update, updateOrigin{src: 0, peer: true}); err != nil {
 		return fmt.Errorf("applying stored state: %w", err)
 	}
 	r.docBytes = len(cp.Update)
 	return nil
 }
 
-// seedFromContent materializes a never-yet-saved document's Y.Doc from the
+// seedInto materializes a never-yet-saved document's Y.Doc from the
 // content the server delivered on collaboration-fetch (Metadata.SeedContent, R4).
 // The bytes are a full Yjs-V2 state for both document types — memo (the rich-text
 // snapshot) and whiteboard (the scene snapshot the binding produced server-side)
@@ -682,11 +763,11 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 // (ContentPointer set) — after which the blob is the source of truth and the seed
 // is never consulted again (T004). A nil/empty seed is a no-op: the room opens
 // empty and editable (FR-010).
-func (r *Room) seedFromContent(content []byte) {
+func (r *Room) seedInto(doc *ycrdt.Doc, content []byte) {
 	if len(content) == 0 {
 		return
 	}
-	if err := ycrdt.ApplyUpdateV2(r.doc, content, updateOrigin{src: 0, peer: true}); err != nil {
+	if err := ycrdt.ApplyUpdateV2(doc, content, updateOrigin{src: 0, peer: true}); err != nil {
 		// Do NOT mark dirty on a failed seed: promoting it would persist an EMPTY
 		// document as this document's first real snapshot, destroying the content the
 		// seed was carrying. Leave the room clean so the stored content is retried.

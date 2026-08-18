@@ -44,7 +44,7 @@ phase completes** — every story needs documents that exist on the new core.
 - [X] T005 Re-point the CRDT core across the four non-test domain files: `internal/domain/service/{room.go,sync.go,awareness_wire.go,convention.go}` — imports and types only, no behavioural change yet (FR-001)
 - [X] T006 Re-point the CRDT core across the test/e2e surface: `internal/domain/service/*_test.go`, `internal/adapter/inbound/ws/handler_test.go`, `internal/app/app_integration_test.go`, `test/e2e/*.go`
 - [X] T007 Adopt `memory.Registry` as the owner of document identity and lifetime in `internal/domain/service/manager.go`, replacing the hand-built registry and singleflight acquire (FR-005, D3)
-- [ ] T008 Implement the registry open function in `internal/domain/service/manager.go`: load from the store, else seed from the metadata-delivered content; a session must never observe a partially initialised document (FR-004a)
+- [X] T008 Implement the registry open function in `internal/domain/service/manager.go`: load from the store, else seed from the metadata-delivered content; a session must never observe a partially initialised document (FR-004a)
 - [X] T009 Rebuild `internal/domain/service/room.go` to hold a `memory.Handle` and observe its invalidation signal, ceasing to own document identity or teardown ordering (D3)
 - [ ] T010 Retire the parts of `internal/domain/service/lifecycle_state.go` that duplicate registry semantics; keep only what the registry does not absorb (D3)
 - [X] T011 Keep the `002` idle-release policy driving `Evict` in `internal/domain/service/room.go` — the registry starts no goroutines and has no eviction policy of its own (contracts/registry-session.md)
@@ -92,7 +92,7 @@ completed flush.
 
 - [ ] T020 [P] [US2] Add a kill/restart durability test in `internal/domain/service/durability_crash_test.go` asserting recovery to the last completed flush across repeated cycles (SC-004)
 - [ ] T021 [P] [US2] Add a cold-load cost test in `internal/domain/service/durability_coldload_test.go` asserting cost tracks document size, not accumulated edit count (SC-012)
-- [ ] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/seed_exactly_once_test.go` asserting seeding happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
+- [X] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/seed_exactly_once_test.go` asserting seeding happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
 - [X] T023 [P] [US2] Add a degraded-durability test in `internal/domain/service/durability_degraded_test.go`: with the backend failing, assert the session keeps serving, retries, and surfaces the not-yet-durable state **via metrics before anyone is disconnected** (SC-013)
 - [X] T024 [P] [US2] Add an escalation test in `internal/domain/service/durability_escalation_test.go` asserting a distinct counter, a log entry naming document and undurable duration, and a non-generic disconnect reason (SC-016, FR-028)
 
