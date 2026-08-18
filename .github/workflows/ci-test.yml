@@ -8,11 +8,15 @@ on:
 
 jobs:
   ci:
-    # Central org CI (lint · race tests · build). The OpenAPI staleness gate is
-    # intentionally not enabled yet: this service is WebSocket-first and exposes
-    # no apispec-annotated REST surface in Phase 1. It is added (with
-    # `openapi-make-target: openapi`) when the standalone create/delete HTTP API
-    # lands (task T016 of specs/003-unify-collab-yjs/tasks/collaboration-service.md).
+    # Central org CI (lint · race tests · build). `go test ./...` also runs the
+    # CRDT core's backend/conformance suites, which live as ordinary tests beside
+    # each port implementation (FR-008, SC-006) — no extra CI wiring is needed for
+    # them, and a failing contract fails the build like any other test.
+    #
+    # The OpenAPI staleness gate stays disabled: this service is WebSocket-first
+    # and exposes no apispec-annotated REST surface. It was previously pencilled in
+    # for the standalone create/delete HTTP API, which constitution v3.0.0 §III
+    # withdrew along with the standalone deployment.
     uses: antst/alkemio-github-workflows/.github/workflows/go-ci.yml@v1
     permissions:
       contents: read

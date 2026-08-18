@@ -31,7 +31,7 @@ Existing hexagonal layout (see plan.md Structure Decision). Domain core in
 
 - [X] T001 Add `github.com/antst/go-yjs` pinned to an explicit version in `go.mod`, and remove the `replace` directive redirecting `github.com/skyterra/y-crdt` (§XIV, FR-024)
 - [X] T002 [P] Create the adapter package skeletons `internal/adapter/outbound/persistence/` and `internal/adapter/outbound/hub/` per plan.md Structure Decision
-- [ ] T003 [P] Wire the core's `backend/conformance` suites into the CI workflow so they run per package
+- [X] T003 [P] Wire the core's `backend/conformance` suites into the CI workflow so they run per package — **satisfied without a CI change**: the suites are ordinary Go tests beside each implementation, so the existing `go test ./...` runs them; the workflow comment now records that
 - [ ] T004 Record the pinned version and the oracle-reverification rule in `specs/003-go-yjs-core-port/research.md` sequencing notes
 
 ---
@@ -136,7 +136,7 @@ the rebuilt service.
 - [ ] T041 [US3] Preserve the shutdown drain ordering in `internal/domain/service/manager.go` that persists dirty documents before durable backends close, now expressed over handles (FR-001)
 - [ ] T042 [US3] Preserve the single mutation chokepoint in `internal/domain/service/room.go` so limits apply on every entry point, local and cross-pod alike (FR-019)
 - [ ] T043 [US3] Confirm auth and authz behaviour is unchanged across `internal/adapter/outbound/auth/` and `internal/adapter/inbound/ws/handler.go`, including fail-closed evaluation and handshake authentication (FR-020)
-- [ ] T072 [P] [US3] Assert in `internal/domain/service/invariant_plaintext_test.go` that authoritative documents are held **plaintext** on the server — a preserved invariant from `001` with no current guard (FR-004)
+- [X] T072 [P] [US3] Assert in `internal/domain/service/invariant_plaintext_test.go` that authoritative documents are held **plaintext** on the server — a preserved invariant from `001` with no current guard (FR-004)
 - [ ] T044 [US3] Justify in writing any `002` invariant deleted rather than restructured, on the grounds that its property became unreachable by construction (SC-005a)
 
 **Checkpoint**: `002` suite green and every restructured test proven RED-on-revert.
