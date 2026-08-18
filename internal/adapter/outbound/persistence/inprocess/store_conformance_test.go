@@ -111,4 +111,16 @@ func TestFencedDeleteRejectsAStaleOwnerAndLeavesStateIntact(t *testing.T) {
 	if _, err := store.LoadCheckpoint(ctx, "doc"); !errors.Is(err, persistence.ErrNotFound) {
 		t.Fatalf("LoadCheckpoint after a successful Delete = %v, want ErrNotFound", err)
 	}
+
+	// THE HIGH-WATER MARK SURVIVES THE DELETE. The natural implementation forgets
+	// the epoch along with the state — they are both "this document's data" — and
+	// that is precisely wrong: a superseded owner could then write again the
+	// moment a document is deleted, which is exactly when a cascade is running and
+	// a stale node is most likely to still be trying. The document would come back
+	// under an epoch that was already retired.
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"), Fence: 3,
+	}); !errors.Is(err, persistence.ErrStaleFence) {
+		t.Fatalf("save from a stale owner AFTER a delete = %v, want ErrStaleFence; deleting the state must not reset the fence high-water mark", err)
+	}
 }
