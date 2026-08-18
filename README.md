@@ -38,7 +38,7 @@ internal/
     └── outbound/
         ├── fanout/{inmemory,redis}/
         ├── metastore/{inmemory,rabbitmq,postgres}/
-        ├── blobstore/{inline,fileservice,s3,local}/
+        ├── persistence/{inprocess,fileservice,metapointer}/
         └── auth/{open,authzeval}/
 ```
 

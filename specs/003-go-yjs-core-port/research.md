@@ -308,7 +308,7 @@ where durable state moved out from under the session.
 must produce a distinct counter, a log entry naming the document and its undurable
 duration, and a non-generic disconnect reason. **No secondary storage fallback** is
 built (FR-029) — escalation fires because the store is unreachable, and a fallback would
-reintroduce the `local`/`s3` adapters being deleted.
+reintroduce the content adapters being deleted.
 
 **Escalation must not depend on the backend being reachable**: if invalidation cannot
 reload because storage is still down, the session is still torn down rather than left
@@ -364,7 +364,7 @@ corrected at source so the next reader does not repeat the error.
    `y-crdt` by name.
 2. **Adapter removals are authorised but land separately.** The `postgres` metadata
    adapter (with `pgx`/`sqlc`/`golang-migrate` and the CI Postgres service), the
-   `local`/`s3` blob adapters, and the standalone create/delete HTTP API are legacy
+   the non-file-service content adapters, and the standalone create/delete HTTP API are legacy
    under v3.0.0 §III + §X. They are kept out of this feature so a foundational port does
    not also carry a multi-adapter deletion — and so a reviewer who disagrees with
    withdrawing standalone can say so without rejecting the port.

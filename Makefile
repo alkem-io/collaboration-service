@@ -22,9 +22,9 @@ test:
 e2e:
 	$(GO) test $(GOFLAGS) -tags e2e ./test/e2e/...
 
-# Build-tagged integration suites (redis/postgres/rabbitmq/s3 + the app.New
-# durable wiring) against live backends — set POSTGRES_TEST_DSN / RABBITMQ_TEST_URL
-# / S3_TEST_* (unset ⇒ those tests skip).
+# Build-tagged integration suites (redis/postgres/rabbitmq + the app.New durable
+# wiring) against live backends — set POSTGRES_TEST_DSN / RABBITMQ_TEST_URL
+# (unset ⇒ those tests skip).
 integration:
 	$(GO) test $(GOFLAGS) -tags integration ./...
 

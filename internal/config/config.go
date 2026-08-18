@@ -50,11 +50,6 @@ const (
 	BlobStoreInline BlobStoreMode = "inline"
 	// BlobStoreFileService offloads the blob to file-service.
 	BlobStoreFileService BlobStoreMode = "file-service"
-	// blobStoreS3 and blobStoreLocal are RETIRED selector values, kept unexported
-	// and only so parseBlobStore can reject them BY NAME with a message that says
-	// what to use instead. Their adapters were removed with the BlobStore port.
-	blobStoreS3    BlobStoreMode = "s3"
-	blobStoreLocal BlobStoreMode = "local"
 )
 
 // AuthMode selects the handshake-AuthN adapter (Wave 5: AuthN is named
@@ -678,17 +673,13 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 	switch BlobStoreMode(v) {
 	case BlobStoreInline, BlobStoreFileService:
 		return BlobStoreMode(v), nil
-	case blobStoreS3, blobStoreLocal:
-		// FAIL, do not fall back. These adapters were removed with the BlobStore
-		// port, but the selector kept accepting their names while buildCheckpoint
-		// answered anything it did not recognise with the IN-PROCESS store. An
-		// operator running BLOB_STORE=s3 would come up healthy, serve normally, and
-		// lose every document on the next restart — exactly the silent default
-		// FR-022d exists to forbid. The error names the replacement rather than the
-		// removal, so the fix travels with the message.
-		return "", fmt.Errorf("BLOB_STORE=%s is no longer supported (the %s adapter was removed): use BLOB_STORE=file-service for the durable store, or BLOB_STORE=inline for the non-durable in-process store used by tests and local development", v, v)
 	default:
-		return "", fmt.Errorf("BLOB_STORE must be one of inline, file-service (got %q)", v)
+		// FAIL, never fall back. buildCheckpoint answers anything it does not
+		// recognise with the IN-PROCESS store, so an unrecognised selector would
+		// bring the service up healthy, serving normally, and losing every document
+		// on the next restart — exactly the silent default FR-022d forbids. The
+		// error names the supported values so the fix travels with the message.
+		return "", fmt.Errorf("BLOB_STORE must be one of inline, file-service (got %q); inline is the non-durable in-process store used by tests and local development, file-service is the durable one", v)
 	}
 }
 

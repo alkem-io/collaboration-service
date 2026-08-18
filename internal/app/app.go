@@ -243,8 +243,8 @@ func lifecycleQueue(cfg *config.Config) string {
 //
 // Only two shapes exist. file-service is the deployed one; `inline` resolves to
 // the in-process store, which backs the test suite, the local development loop
-// and the zero-dependency smoke test (§III). The retired `local` and `s3` values
-// are rejected by config.Load and cannot reach here.
+// and the zero-dependency smoke test (§III). Any other value is rejected by
+// config.Load and cannot reach here.
 func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.DeletingCheckpointStore, error) {
 	if cfg.BlobStore == config.BlobStoreFileService {
 		return persistfileservice.New(persistfileservice.Config{

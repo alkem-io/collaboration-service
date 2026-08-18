@@ -190,14 +190,13 @@ func TestLoadRejectsUnknownContentType(t *testing.T) {
 // TestLoadRejectsUnknownBlobStore asserts a server reply carrying a blobStore
 // this service cannot read is rejected at the adapter boundary.
 //
-// "s3" and "local" are in the table deliberately. Both were once accepted values
-// here, and their adapters are gone — so accepting such a row would mean taking a
-// metadata row that says "this document's content is in S3", and then reading it
-// from whichever store this process happens to be configured with. That is the
-// wrong backend, silently, on a path where being wrong means serving or
-// overwriting the wrong document content. Rejecting is the truthful answer.
+// There are exactly two backends this service can read: file-service and the
+// in-process store. A row naming anything else must be refused, not tolerated —
+// accepting it would mean reading the document through whichever store this
+// process happens to be configured with, which is the wrong backend, silently, on
+// the path where being wrong serves or overwrites the wrong document content.
 func TestLoadRejectsUnknownBlobStore(t *testing.T) {
-	for _, kind := range []string{"gdrive", "s3", "local"} {
+	for _, kind := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
 				Found: true, ContentType: "memo", BlobStore: kind,

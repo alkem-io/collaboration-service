@@ -15,7 +15,7 @@ dialects:
 The unified collaboration-service holds **one** representation (a v2 `Y.Doc`
 snapshot) for **both** content types and applies the **metadata/blob split**
 (`persistence-ports.md`): the **blob goes to the BlobStore** (inline /
-file-service / S3 / local) and **only the index** crosses this bus. The legacy
+file-service) and **only the index** crosses this bus. The legacy
 `binaryStateInBase64` / `content` blob fields are therefore **gone**.
 
 ## Transport
@@ -48,8 +48,8 @@ Request `data`:
   "id": "<documentId>",          // single id namespace (memo + whiteboard)
   "contentType": "memo" | "whiteboard",
   "version": 4,                   // bumped per persisted snapshot
-  "contentPointer": "<locator>", // inline row key | file-service UUID | S3 key | local path
-  "blobStore": "inline" | "file-service" | "s3" | "local",
+  "contentPointer": "<locator>", // inline row key | file-service UUID
+  "blobStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>", // OPEN-1; may be "" in open/standalone
   "ownerRef": "<parent entity id>"   // delete-cascade key (FR-023); optional
 }
@@ -79,7 +79,7 @@ Reply:
   "contentType": "memo" | "whiteboard",
   "version": 4,
   "contentPointer": "<locator>",
-  "blobStore": "inline" | "file-service" | "s3" | "local",
+  "blobStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>",
   "storageBucketId": "<uuid>",        // the document's OWN storage bucket; snapshots persist into it (per-doc bucket)
   "content": "<base64 Yjs-V2 state>", // FIRST-OPEN SEED (006-collab-content-unification): present ONLY when the

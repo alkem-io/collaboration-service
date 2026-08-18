@@ -73,11 +73,10 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 - [X] **T004.3** [W2] Wired `Room` to publish each applied **local** update (raw v1 bytes on `doc:`) and each awareness/ephemeral frame (on `awareness:`) through `Deps.Broadcaster`; peer-pod payloads apply as **peer-origin** updates (fanned to local members, never re-published — ping-pong guard). Fan-out lag metric (R10): `collaboration_fanout_total{outcome}` + `collaboration_fanout_lag_seconds`. Proven: `fanout_test.go` (`TestTwoPodDocUpdateConverges`, `TestTwoPodAwarenessConverges`, `TestPeerUpdateNotEchoedBackToBus`).
 - [X] **T004.4** [W2] `cmd/server` selects `redis` on `FANOUT_MODE=redis` from `REDIS_URL`; `inmemory` stays default (a domain `noopBroadcaster` defaults a nil port).
 
-### T005 — Durable metastore + blobstore (R7) — `metastore/{rabbitmq,postgres}/`, `blobstore/{fileservice,s3,local}/`
+### T005 — Durable metastore + blobstore (R7) — `metastore/{rabbitmq,postgres}/`, `blobstore/{fileservice}/`
 - [X] **T005.1** [W2] **rabbitmq metastore** (Alkemio default) — `port.MetadataStore` over `amqp091@v1.12.0` NestJS-style request/reply RPC (`{pattern,data,id}` + `correlationId`/`replyTo`). **OPEN-3 resolved → NEW UNIFIED contract** `collaboration-save`/`-fetch`/`-delete` (+ `-info`/`-contribution`), index-only payload `{id, contentType, version, contentPointer, blobStore, authorizationPolicyId, ownerRef}`; `info`→`{read,update,maxCollaborators,isMultiUser?}` and fire-and-forget `contribution` carried forward. Contract types in `contract.go`; documented in `contracts/unified-metadata-rmq.md` (the `server`-consumer hand-off). Unit-tested against the contract shape; live broker via build-tagged integration test.
 - [X] **T005.2** [P] [W2] **postgres metastore** (standalone) — `migrations/` (golang-migrate@v4.19.1, embedded) for `collaboration_metadata` (+ `authorization_policy_id`); explicit column SQL; pgx/v5@v5.10.0 adapter (`Load`/`Save` upsert-and-bump-version/`Delete`). Unit-tested via a fake querier; real Postgres via build-tagged integration test.
 - [X] **T005.3** [P] [W2] **fileservice blobstore** — over file-service's existing `/internal/file` API (OPEN-2): `Put` = multipart `POST` (returned UUID = content pointer; deletes the superseded snapshot), `Get` = `GET /{id}/content`, `Delete` = `DELETE /{id}`. Fixed `storageBucketId`+`authorizationId` per deployment; `MAX_UPLOAD_SIZE` ceiling. Tests against a faithful stub file-service.
-- [X] **T005.4** [P] [W2] **s3 blobstore** (standalone) — `port.BlobStore` over aws-sdk-go-v2 (s3@v1.104.0); content pointer = object key (optional prefix). Unit-tested via a fake S3 API; minio/localstack via build-tagged integration test.
 - [X] **T005.5** [P] [W2] **local blobstore** (standalone) — snapshot under a configured root; content pointer = relative path; atomic write (temp + fsync + rename); traversal-rejecting. Tests against a temp dir.
 - [X] **T005.6** [W2] `cmd/server` selects metastore on `METADATA_STORE` (`inmemory` zero-dep default / `rabbitmq` / `postgres`) and blobstore on `BLOB_STORE`; the chosen `BlobStoreKind` is persisted per metadata row and rehydration reads it back, so a doc loads from the right backend regardless of running config.
 
@@ -126,7 +125,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 > the SAME wiring production uses (no duplicate assembly, anti-pattern 3). New
 > `test/e2e/` suite (build tag `e2e`) + a `test/e2e/jsinterop` Node harness
 > (real `yjs` + `y-protocols/sync` + `/awareness` + `ws`). Integration suites
-> (redis/postgres/rabbitmq/s3) + e2e wired into CI (`.github/workflows/ci-integration.yml`
+> (redis/postgres/rabbitmq) + e2e wired into CI (`.github/workflows/ci-integration.yml`
 > with backend services) and the **≥95% combined coverage gate** enforced via
 > `.scripts/coverage-gate.sh` (unit + integration + e2e merged; **95.8%**). Gates
 > green: `go test -race ./...` (unit) + the integration/e2e suites with backends

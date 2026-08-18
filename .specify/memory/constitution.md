@@ -36,7 +36,7 @@ Sync Impact Report
     scopes `open` to in-process tests. §V wording likewise rescoped.
   - Consequential: `001` FR-017 (standalone create/delete HTTP API) and FR-020
     (standalone as first-class) are superseded; the `postgres` metadata store and
-    the `local`/`s3` blob adapters lose their only consumer.
+    the non-file-service content adapters lose their only consumer.
   - MIGRATION PLAN (affected code):
     * NO DATA MIGRATION. Nothing is deployed and no production data exists, so
       this is deletion only — there is no stored state to convert or preserve.
@@ -50,8 +50,8 @@ Sync Impact Report
       migrations, pool, and sqlc output; drop `pgx`, `sqlc`, and `golang-migrate`
       from the build; drop the CI Postgres service. This is the service's ONLY
       database code, so afterwards it opens no database connection at all.
-    * REMOVE — `internal/adapter/outbound/blobstore/local/` and `.../s3/`, with
-      their config validation and env documentation.
+    * REMOVE — every content adapter other than `file-service` and the in-process
+      store, with their config validation and env documentation.
     * REMOVE — the standalone create/delete REST API (`001` FR-017). It is the
       no-bus lifecycle equivalent and is already conditionally mounted; it shares
       the Manager path with the RabbitMQ lifecycle consumer, so only the HTTP
@@ -178,8 +178,10 @@ concerns, **that contract IS the port**. The service MUST NOT define a
 parallel bespoke port for the same concern.
 
 - Durable document content MUST go through the core's
-  `persistence.Store` contract (backed by `file-service` / `s3` /
-  `local` / `inline`).
+  `persistence.CheckpointStore` contract. There are exactly TWO backends:
+  `file-service` for production, and the in-process store for the test suite
+  and local development. The in-process store is not durable across a restart
+  and MUST never be presented as a deployment option.
 - Cross-pod fan-out MUST go through the core's `hub.Hub` contract
   (shipped in-process default single-pod; `redis` for multi-pod, R4).
 - In-process document identity, acquisition, eviction, and
@@ -491,7 +493,7 @@ without a constitution amendment:
 | Fan-out           | `hub.Hub`: shipped in-process (default), Redis (multi-pod) |
 | Metadata store    | `MetadataStore`: RabbitMQ→server (the Alkemio system of record) |
 | Document registry | `memory.Registry` (shipped in-process implementation) |
-| Durable content   | `persistence.Store`: inline (default), file-service / S3 / local |
+| Durable content   | `persistence.CheckpointStore`: file-service (deployed), in-process (tests/dev) |
 | DB driver (PG)    | pgx v5                                              |
 | Query generation  | sqlc                                                |
 | Migrations        | golang-migrate                                      |

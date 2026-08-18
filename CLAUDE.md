@@ -30,7 +30,7 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
 - **Metrics**: Prometheus (`/metrics`)
 - **Architecture**: Hexagonal (ports and adapters)
 - **Persistence (pluggable)**: metadata store (RabbitMQ→server / Postgres),
-  blob store (inline / file-service / s3 / local) — pgx v5 + sqlc + golang-migrate
+  content store (in-process / file-service) — pgx v5 + sqlc + golang-migrate
   for the Postgres path
 - **Auth (pluggable)**: `open` (standalone) / `authzeval`
   (authorization-evaluation-service, h2c HTTP/2 or NATS)
@@ -49,7 +49,7 @@ ports. Adapters implement them:
 **Outbound** (`internal/adapter/outbound/`) — one subpackage per adapter:
 - `fanout/{inmemory,redis}` — `ClusterBroadcaster` (cross-pod fan-out, R4)
 - `metastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
-- `blobstore/{inline,fileservice,s3,local}` — `BlobStore` (Y.Doc v2 snapshot)
+- `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
 
 ### Ports (cross-repo contracts)
@@ -70,7 +70,7 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 - `PORT` (default 4006)
 - `FANOUT_MODE` — `inmemory` | `redis`
 - `METADATA_STORE` — `rabbitmq` | `postgres`
-- `BLOB_STORE` — `inline` | `file-service` | `s3` | `local`
+- `BLOB_STORE` — `inline` | `file-service`
 - `AUTH_MODE` — `open` | `authzeval`
 
 ## Development Workflow

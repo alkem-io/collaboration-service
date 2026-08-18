@@ -5,7 +5,7 @@
 # complementary lanes:
 #   - unit         (default build) — domain + adapter logic with in-process fakes
 #   - integration  (-tags integration) — adapter live paths against real backends
-#                  (redis/postgres/rabbitmq/s3) + the app.New durable wiring
+#                  (redis/postgres/rabbitmq) + the app.New durable wiring
 #   - e2e          (-tags e2e) — the full service through app.New over real
 #                  WebSockets, incl. the JS-client y-protocols interop harness
 #

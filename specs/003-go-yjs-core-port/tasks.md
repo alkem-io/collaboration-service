@@ -261,7 +261,7 @@ core is swapped, browsers converge, and nothing else has changed.
 
 Authorised by constitution v3.0.0 §III but tracked separately, so a foundational port
 does not also carry a multi-adapter deletion: removing the `postgres` metadata adapter
-(with `pgx`/`sqlc`/`golang-migrate` and the CI Postgres service), the `local`/`s3` blob
+(with `pgx`/`sqlc`/`golang-migrate` and the CI Postgres service), the non-file-service content
 adapters, and the standalone create/delete HTTP API.
 
 ---

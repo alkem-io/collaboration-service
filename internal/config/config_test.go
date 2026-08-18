@@ -290,30 +290,31 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	}
 }
 
-// TestRemovedBlobStoreValuesFailStartupNamingTheReplacement is FR-022d.
+// TestUnsupportedBlobStoreValuesFailStartup is FR-022d.
 //
-// The s3 and local adapters were removed with the BlobStore port, but the
-// selector kept accepting their names while the checkpoint builder answered
-// anything it did not recognise with the in-process store. An operator running
-// BLOB_STORE=s3 would come up healthy, serve normally, and lose every document
-// on restart. A removed key must fail startup, and the error must name what to
-// use instead — a bare "invalid value" leaves the operator guessing at the exact
-// moment they most need the answer.
+// There are exactly two persistence paths: file-service for production, and the
+// in-process store for the test suite and local development. Anything else must
+// FAIL startup, because buildCheckpoint answers a value it does not recognise
+// with the in-process store — so an unsupported selector brings the service up
+// healthy, serving normally, and losing every document on the next restart.
 //
-// Non-vacuity: restore either value to parseBlobStore's accepted set and this
-// fails on the missing error; drop the replacement names from the message and it
-// fails on the substring checks.
-func TestRemovedBlobStoreValuesFailStartupNamingTheReplacement(t *testing.T) {
-	for _, removed := range []string{"s3", "local"} {
-		t.Run(removed, func(t *testing.T) {
-			t.Setenv("BLOB_STORE", removed)
+// The error must also name the supported values. A bare "invalid value" leaves
+// the operator guessing at the exact moment they most need the answer.
+//
+// Non-vacuity: widen parseBlobStore's accepted set and this fails on the missing
+// error; drop the supported names from the message and it fails on the substring
+// checks.
+func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
+	for _, unsupported := range []string{"gdrive", "azure-blob", "memory"} {
+		t.Run(unsupported, func(t *testing.T) {
+			t.Setenv("BLOB_STORE", unsupported)
 			_, err := Load()
 			if err == nil {
-				t.Fatalf("BLOB_STORE=%s must fail startup: it silently falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", removed)
+				t.Fatalf("BLOB_STORE=%s must fail startup: an unrecognised selector falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", unsupported)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, "file-service") || !strings.Contains(msg, "inline") {
-				t.Fatalf("the error must name the replacement values (file-service / inline), got: %s", msg)
+				t.Fatalf("the error must name the supported values (file-service / inline), got: %s", msg)
 			}
 		})
 	}

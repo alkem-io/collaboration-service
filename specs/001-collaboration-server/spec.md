@@ -28,7 +28,7 @@ server-relevant resolutions this spec builds on:
 - **One protocol, both content types** — raw WebSocket carrying y-protocols sync + awareness; whiteboard ephemerals (cursor/emoji/countdown) ride awareness + a small ephemeral message type (epic FR-019).
 - **Dual mode by design** — single-pod zero-dep default; multi-pod fan-out is an optional `redis` adapter behind a port (epic FR-020).
 - **Server-trusted plaintext** — the server decodes and holds the authoritative `Y.Doc` and persists it; transport is TLS in flight; no server-blind/e2e requirement (epic FR-021).
-- **Single id namespace, content-type in metadata; metadata/blob split** — small queryable index (id, content-type, version, content pointer, timestamps) separate from the encoded snapshot; blob store independently pluggable, inline by default, optional file-service/S3/local offload (epic FR-022).
+- **Single id namespace, content-type in metadata; metadata/blob split** — small queryable index (id, content-type, version, content pointer, timestamps) separate from the encoded snapshot; content store independently pluggable, in-process by default, file-service offload for deployment (epic FR-022).
 - **Full `Y.Doc` snapshot (v2), debounced/throttled** — fits the existing `save`/`fetch` contract; not an append-only log (epic R7, FR-010).
 - **Owner-driven + lazy materialization** — the caller owns identity; the room is materialized on first connect and purged on owner-delete cascade; no orphans (epic FR-023).
 - **Configurable limits** — max doc size, max connections per room (existing max-collaborators), per-connection update rate; reject/disconnect on breach (epic FR-024).
@@ -276,7 +276,7 @@ tasks in `tasks.md`. **[Wave N]** marks the wave that delivers it.
 - **FR-009** [Wave 1 ✅]: The server MUST define its outbound dependencies as ports — `ClusterBroadcaster`, `MetadataStore`, `BlobStore`, `Auth`, `AuthZ` — plus the additive `service.Metrics` and `service.Conn` ports, with zero-dep default adapters (`inmemory`, `inline`, `open`) wired by config (epic FR-019/020/021/022; `port/ports.go`, `service/{doc,manager,room}.go`).
 - **FR-010** [Wave 2]: The server MUST provide a **`redis`** `ClusterBroadcaster` that publishes updates on `doc:{id}` and ephemeral/awareness on `awareness:{id}`, and subscribes to deliver peer-pod payloads to local members — selected by `FANOUT_MODE=redis`, with `inmemory` the default (epic FR-020/R4; T004).
 - **FR-011** [Wave 2]: The server MUST provide **durable MetadataStore adapters** — `rabbitmq` (the Alkemio `server` save/fetch dialect extended with `content_pointer`/`blob_store`) and `postgres` (sqlc/pgx, golang-migrate) for standalone — selected by `METADATA_STORE` (epic FR-022/R7; T005; OPEN-3).
-- **FR-012** [Wave 2]: The server MUST provide **durable BlobStore adapters** — `file-service` (offload via the existing file-service API), `s3`, and `local` — alongside the `inline` default, selected by `BLOB_STORE`; the content pointer shape is the adapter's concern (epic FR-022/R7; T005; OPEN-2).
+- **FR-012** [Wave 2]: The server MUST provide a **durable content adapter** — `file-service` (offload via the existing file-service API) — alongside the `inline` default, selected by `BLOB_STORE`; the content pointer shape is the adapter's concern (epic FR-022/R7; T005; OPEN-2).
 - **FR-013** [Wave 2 ✅ → split in Wave 5]: The server MUST provide an **`authzeval`** Auth+AuthZ adapter — handshake **header-trusting** authN (option (a), gateway-terminated: `model.Identity{ActorID}` from the gateway-stamped header) and per-document authZ via the authorization-evaluation-service (h2c HTTP/2 `POST /internal/auth/evaluate`, or NATS `auth.evaluate`), guarded by a sony/gobreaker circuit breaker and **failing closed** — alongside the `open` default. **[Wave 5]** the header-trusting AuthN half is promoted to a named **`header`** AuthN mode and the AuthZ half is selected independently of AuthN (`AUTHZ_MODE`); see FR-021–FR-023 (epic FR-021/R13; T006; OPEN-1).
 - **FR-014** [Wave 3]: The server MUST manage **presence/collaborator mode** — viewer vs. collaborator, inactivity downgrade — and emit a **north-star contribution metric** (per-window contributing actors) equivalent to today's, including **server-forced awareness eviction** of a departed connection (epic FR-007/FR-014; T013; OPEN-4).
 - **FR-015** [Wave 3 ✅ → refined in Wave 5]: The server MUST enforce **authN at the handshake** (401 on failure, never anonymous-downgrade except `open`/`oidc`-anonymous-fall-through modes) and **per-document authZ** via the `AuthZ` port (re-evaluated on `document.access_changed`), and enforce **configurable limits** — max doc size, max connections per room, per-connection update rate — rejecting/disconnecting on breach with a control message. **[Wave 5]** the "401 on failure" rule is refined per AuthN mode: `header` 401s on a missing/empty header (gateway didn't run); `oidc` resolves a missing credential to the anonymous sentinel and **only** 401s a *presented-but-invalid* credential (bad signature / expired / tombstoned), mirroring the gateway's forward-auth semantics (epic FR-021/FR-024; T014; FR-021–FR-023; OPEN-7).
@@ -328,7 +328,7 @@ Server-level, directly testable in this repo. Each traces to an epic SC.
 - **CRDT core** — the forked `y-crdt` (vendored via `replace skyterra/y-crdt => antst/y-crdt@…`) is the single source of CRDT behavior; the server never reimplements CRDT logic (constitution §IV, anti-pattern 12). Live wire = y-protocols **v1**; durable snapshot = **v2** (`EncodeStateAsUpdateV2`); v1 remains readable. Trusting the fork in production depends on **WS-A's cross-impl fuzz gate** being green (epic FR-011/SC-006) — a *workspace* gate, not a server task.
 - **Frozen cross-repo contracts** — `ws-protocol.md`, `persistence-ports.md`, `lifecycle-events.md`, and the epic `data-model.md` are authoritative; this spec conforms to them and does not redefine them. The OPENs below are *implementation-detail* questions inside those contracts, not changes to them.
 - **Wave-1 additive ports** — `service.Metrics` and `service.Conn` extend the port surface without breaking the epic's five; the epic's "ports held" finding is recorded in `tasks/collaboration-service.md`.
-- **Out of scope (server)** — the migration job and big-bang cutover (WS-E, owned by `server`/infra); the CRDT core internals and fuzz harness (WS-A); the client bindings (WS-B/WS-D); cross-session version history (FR-025 forward-compat only). Standalone S3/local blob and Postgres metastore exist so the service is reusable outside Alkemio, not because Alkemio needs them.
+- **Out of scope (server)** — the migration job and big-bang cutover (WS-E, owned by `server`/infra); the CRDT core internals and fuzz harness (WS-A); the client bindings (WS-B/WS-D); cross-session version history (FR-025 forward-compat only). The standalone Postgres metastore exists so the service is reusable outside Alkemio, not because Alkemio needs it.
 
 ## Clarifications → OPEN-block grounding (ALL RESOLVED — retained as rationale)
 
@@ -378,7 +378,7 @@ collab service from duplicating Alkemio's authorization model (DRY, constitution
 **Found in code:** file-service exposes `POST /internal/file` (multipart),
 `GET /internal/file/{id}/content`, `DELETE /internal/file/{id}` — **no auth on
 `/internal/*`** (in-cluster trust). Blobs are content-addressed (SHA3-256), stored
-on local disk (no S3 yet), default max **32 MiB** (ceiling 1 GiB). Put returns a
+on local disk, default max **32 MiB** (ceiling 1 GiB). Put returns a
 document UUID + `externalID`. This **fully covers** Put/Get/Delete of a snapshot
 blob; no expansion is needed for core persistence.
 
@@ -520,7 +520,7 @@ params; native/M2M clients can set `Authorization`. **DECIDED (antst, 2026-06-20
 | Wave | Scope | Tasks | Status |
 |---|---|---|---|
 | 1 | Live-sync server: room lifecycle, y-protocols sync+awareness+ephemeral, debounced v2 persistence, US5 reconnect, both conventions, ports + zero-dep adapters | T001–T003, T007–T012 | **DONE** (commit `57b79db`, PR #1) |
-| 2 | Durable adapters: redis fan-out; rabbitmq+postgres metastore; file-service+s3+local blob; authzeval auth | T004–T006 | Forward |
+| 2 | Durable adapters: redis fan-out; rabbitmq+postgres metastore; file-service blob; authzeval auth | T004–T006 | Forward |
 | 3 | Presence/collaborator-mode/inactivity + awareness eviction + contribution metric; authN/authZ + limits; lifecycle delete-cascade; standalone HTTP API | T013–T016 | Forward |
 | 4 | Single-pod + two-pod e2e; ≥95% coverage gate; openapi clean | T017 | Forward |
 | 5 | **Dual-adapter handshake AuthN (option (c)):** split AuthN/AuthZ mode selection; `header` (rename of gateway-terminated) + new `oidc` direct-validation adapter (BFF cookie session + Hydra RS256 bearer) + `open`; config + wiring | T018 | **Forward (spec/design only this pass)** |

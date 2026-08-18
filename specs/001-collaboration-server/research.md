@@ -17,7 +17,7 @@ server-only choices the epic deferred.
 - **Alternatives**: socket.io redis-adapter (ties to socket.io, rejected by R3); per-doc affinity routing (simpler ops, but fan-out generalizes better).
 
 ### R7 — Persistence: metadata/blob split, pluggable blob store, debounced v2
-- **Decision**: two ports — `MetadataStore` (the small queryable index, default via the `server` RabbitMQ save/fetch; `postgres` standalone) and `BlobStore` (the full v2 `Y.Doc` snapshot; `inline` default, optional `file-service`/`s3`/`local`). Persist **debounced/throttled** (~500 ms default).
+- **Decision**: two ports — `MetadataStore` (the small queryable index, default via the `server` RabbitMQ save/fetch; `postgres` standalone) and the content store (the full v2 `Y.Doc` snapshot; in-process default, `file-service` for deployment). Persist **debounced/throttled** (~500 ms default).
 - **Rationale**: keeps the relational DB lean for large snapshots; matches today's save cadence; standalone-friendly; fits the existing `save`/`fetch` contract.
 - **Server realization**: `Room.persist` encodes `EncodeStateAsUpdateV2(doc, nil)`, calls `Blob.Put(pointer, snapshot)` then `Metadata.Save(meta)`, emits `saved`/`save-error`, and bumps version. The inline pointer == document id (`data-model.md`). Debounce via the run-loop `saveTimer`; a final save on idle/last-leave (`TestIdleReleasePersistsFinalSnapshot`). Durable adapters are T005 (Wave 2).
 - **Alternatives**: append-only update log + compaction — rejected (heavier port, bigger change to save/fetch; not needed at v1).
@@ -80,7 +80,7 @@ Read directly from the sibling repos to ground the Wave-2/3 contract questions
 
 ### file-service (OPEN-2) — **existing `/internal` API covers Put/Get/Delete**
 - chi v5 routes (`internal/adapter/inbound/http/router.go`): `POST /internal/file` (multipart), `GET /internal/file/{id}/meta`, `GET /internal/file/{id}/content`, `PUT /internal/file/{id}/content`, `DELETE /internal/file/{id}`, `PATCH /internal/file/{id}`, `POST /internal/file/copy`. **No auth on `/internal/*`** (in-cluster trust).
-- Upload is multipart (`file`, `displayName`, `storageBucketId`, `authorizationId`, …); returns `{id (UUID), externalID (SHA3-256), mimeType, size, reused}`. Content-addressed dedup; local-disk storage (no S3 yet); default max **32 MiB** (ceiling 1 GiB).
+- Upload is multipart (`file`, `displayName`, `storageBucketId`, `authorizationId`, …); returns `{id (UUID), externalID (SHA3-256), mimeType, size, reused}`. Content-addressed dedup; local-disk storage; default max **32 MiB** (ceiling 1 GiB).
 - **Verdict:** the existing API fully supports snapshot Put/Get/Delete. The "pre-authorized expansion" is only relevant to a future *public* snapshot export, not to v1 server persistence. → OPEN-2 (confirm bucket-id convention + size ceiling; no expansion for v1).
 
 ### collaborative-document-service + whiteboard-collaboration-service (OPEN-3) — **two legacy dialects**

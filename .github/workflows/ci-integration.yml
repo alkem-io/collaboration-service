@@ -1,6 +1,6 @@
 name: CI — Integration & Coverage Gate
 
-# Brings the build-tagged integration suites (redis / postgres / rabbitmq / s3)
+# Brings the build-tagged integration suites (redis / postgres / rabbitmq)
 # and the e2e suite (incl. the real yjs + y-protocols JS-client interop harness)
 # into CI against live backends, then enforces the ≥95% combined coverage gate
 # (T017.5, SC-008/SC-011). The fast lint · race · build lane stays in ci-test.yml
@@ -40,23 +40,10 @@ jobs:
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 10s --health-timeout 5s --health-retries 12
 
-      # NOTE: MinIO is NOT a `services:` container. The official minio/minio image
-      # requires an explicit `server /data` command, which a GitHub Actions service
-      # block cannot set (services only accept image/env/ports/options). It is
-      # instead started via `docker run` in the "Start MinIO" step below, pinned by
-      # digest. (bitnami/minio — which auto-ran the server and auto-provisioned
-      # buckets via MINIO_DEFAULT_BUCKETS — was removed from Docker Hub's free
-      # catalog, so bitnami/minio:latest now 404s.)
-
     env:
       # Integration-suite backend wiring (the build-tagged tests skip when unset).
       POSTGRES_TEST_DSN: postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
       RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
-      S3_TEST_ENDPOINT: http://localhost:9000
-      S3_TEST_BUCKET: collab-test
-      S3_TEST_REGION: us-east-1
-      S3_TEST_ACCESS_KEY: minioadmin
-      S3_TEST_SECRET_KEY: minioadmin
 
     steps:
       - name: Checkout
@@ -77,44 +64,6 @@ jobs:
       - name: Install JS-interop harness deps
         working-directory: test/e2e/jsinterop
         run: npm ci
-
-      - name: Start MinIO
-        # The official minio/minio image needs an explicit `server` command (which a
-        # services: block cannot provide), so run it here, pinned by digest:
-        # minio/minio:RELEASE.2025-06-13T11-33-47Z. Then poll health and create the
-        # S3_TEST_BUCKET the s3 integration test expects to already exist (the
-        # official image, unlike bitnami's, does not auto-provision buckets).
-        env:
-          MINIO_IMAGE: minio/minio@sha256:064117214caceaa8d8a90ef7caa58f2b2aeb316b5156afe9ee8da5b4d83e12c8
-          MC_IMAGE: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-        run: |
-          set -euo pipefail
-          docker run -d --name minio \
-            -p 9000:9000 -p 9001:9001 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            "$MINIO_IMAGE" server /data --console-address ":9001"
-
-          echo "Waiting for MinIO to become ready..."
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:9000/minio/health/live; then
-              echo "MinIO ready"; break
-            fi
-            if [ "$i" = "30" ]; then
-              echo "MinIO did not become ready in time" >&2
-              docker logs minio || true
-              exit 1
-            fi
-            sleep 1
-          done
-
-          # Create the test bucket via the mc client (host networking so it reaches
-          # the published port). Idempotent: --ignore-existing.
-          docker run --rm --network host --entrypoint sh "$MC_IMAGE" -c '
-            set -e
-            mc alias set local http://localhost:9000 minioadmin minioadmin
-            mc mb --ignore-existing local/collab-test
-          '
 
       - name: Integration + e2e + coverage gate (≥95%)
         run: ./.scripts/coverage-gate.sh 95.0

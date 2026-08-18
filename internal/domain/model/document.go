@@ -37,13 +37,11 @@ const (
 	// the content pointer is a file-service object id.
 	BlobStoreFileService BlobStoreKind = "file-service"
 
-	// There is deliberately no s3 or local kind. Both existed to serve the
-	// standalone deployment that constitution v3.0.0 withdrew, their adapters were
-	// removed with the BlobStore port, and no code can read a blob from either.
-	// Keeping them as accepted wire values would mean taking a metadata row that
-	// says "this document's content is in S3", accepting it, and then reading from
-	// whichever store this process happens to be configured with — the wrong
-	// backend, silently. Rejecting the row is the truthful answer.
+	// These two are the ONLY kinds. A metadata row naming any other backend is
+	// rejected at the adapter boundary rather than accepted: this service could
+	// only then read it through whichever store the process happens to be
+	// configured with, which is the wrong backend, silently, on the path where
+	// being wrong serves or overwrites the wrong document content.
 )
 
 // DocumentID is the single id namespace shared by memos and whiteboards.
@@ -61,7 +59,7 @@ type Metadata struct {
 	// version timeline (FR-025).
 	Version int
 	// ContentPointer locates the snapshot inside the blob store (inline row
-	// key / file-service object id / S3 key).
+	// key / file-service object id).
 	ContentPointer string
 	// BlobStore names the adapter that holds the blob for ContentPointer.
 	BlobStore BlobStoreKind

@@ -27,8 +27,8 @@ durable adapters, presence/auth/limits/lifecycle/standalone-API, and the e2e +
 ## Technical Context
 
 **Language/Version**: Go 1.26 (constitution Technology Stack)
-**Primary Dependencies**: `coder/websocket` (WS), `go-chi/chi/v5` (HTTP), `go.uber.org/zap` (structured logging), `prometheus/client_golang` (`/metrics`), the forked **`y-crdt`** (`replace skyterra/y-crdt => antst/y-crdt@…` — CRDT core + `protocol` subpackage) · *Wave 2+*: `redis/go-redis`, `rabbitmq/amqp091-go`, `jackc/pgx/v5` + `sqlc` + `golang-migrate`, `golang.org/x/net/http2` (h2c), `nats-io/nats.go` (auth fallback), `sony/gobreaker/v2` (circuit breaker), an S3 SDK
-**Storage**: main DB (metadata/index, via `server` RabbitMQ) + pluggable blob store (inline / file-service / S3 / local). Standalone: Postgres + local/S3.
+**Primary Dependencies**: `coder/websocket` (WS), `go-chi/chi/v5` (HTTP), `go.uber.org/zap` (structured logging), `prometheus/client_golang` (`/metrics`), the forked **`y-crdt`** (`replace skyterra/y-crdt => antst/y-crdt@…` — CRDT core + `protocol` subpackage) · *Wave 2+*: `redis/go-redis`, `rabbitmq/amqp091-go`, `jackc/pgx/v5` + `sqlc` + `golang-migrate`, `golang.org/x/net/http2` (h2c), `nats-io/nats.go` (auth fallback), `sony/gobreaker/v2` (circuit breaker)
+**Storage**: main DB (metadata/index, via `server` RabbitMQ) + a pluggable content store (in-process for tests/dev, file-service for deployment).
 **Testing**: `go test -race ./...`; in-memory port fakes for domain unit tests; the shared e2e harness (single-pod + two-pod) for cross-cutting behavior (Wave 4)
 **Target Platform**: Linux server, single static binary (multi-arch container)
 **Project Type**: Web service — hexagonal (ports/adapters)
@@ -83,7 +83,7 @@ are consistent with §I (keep the domain free of Prometheus and the WS type).
         │ ClusterBroadcaster  MetadataStore  BlobStore   Auth        AuthZ        │
         │ ├ inmemory (def)    ├ rabbitmq(def)├ inline(def)├ open(def) ├ open(def) │
         │ └ redis (T004)      ├ postgres     ├ file-service          └ authzeval  │
-        │                     (T005)         ├ s3 / local (T005)       (T006)     │
+        │                     (T005)         │                         (T006)     │
         └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -93,7 +93,7 @@ are consistent with §I (keep the domain free of Prometheus and the WS type).
 |---|---|---|---|---|
 | `ClusterBroadcaster` | `port/ports.go` | `inmemory` (no-op) | `redis` (`doc:`/`awareness:`) | T004 (W2) |
 | `MetadataStore` | `port/ports.go` | `inmemory` | `rabbitmq` (server) / `postgres` | T005 (W2) |
-| `BlobStore` | `port/ports.go` | `inline` | `file-service` / `s3` / `local` | T005 (W2) |
+| `BlobStore` | `port/ports.go` | `inline` | `file-service` | T005 (W2) |
 | `Auth` (handshake authN) | `port/ports.go` | `open` (anon) | `header` (gateway-stamped, def Alkemio) / `oidc` (direct: BFF cookie + Hydra bearer) | T006 (W2 ✅ `header`) / **T018 (W5 `oidc`)** |
 | `AuthZ` (per-doc) | `port/ports.go` | `open` (allow) | `authzeval` (auth-eval-svc, fail-closed) | T006 (W2); selected by `AUTHZ_MODE` independently of AuthN (W5) |
 | `service.Metrics` *(W1 additive)* | `service/manager.go` | `NopMetrics` | Prometheus bridge (`http/metrics.go`) | T002 (W1 ✅) |
@@ -111,7 +111,7 @@ parallelize cleanly.
 `Load()` reads env and validates each enum, failing fast (§XV — no silent
 half-config): `PORT` (4006), `FANOUT_MODE` (`inmemory`|`redis`),
 `METADATA_STORE` (`rabbitmq`|`postgres`), `BLOB_STORE`
-(`inline`|`file-service`|`s3`|`local`), `AUTH_MODE` (`header`|`oidc`|`open`),
+(`inline`|`file-service`), `AUTH_MODE` (`header`|`oidc`|`open`),
 `AUTHZ_MODE` (`authzeval`|`open`). `cmd/server` maps each selection to a concrete
 adapter and constructs `service.Deps`; the core consumes only interfaces. Adding a
 backend is a new adapter package + one switch arm — no domain change.
@@ -129,7 +129,7 @@ backend is a new adapter package + one switch arm — no domain change.
 
 ### Deployment modes
 
-- **Standalone (zero-dep):** `open` + `inmemory` + `inline` (+ `postgres`/`local`/`s3` optional). Single static binary, no bus/Redis/auth service. The reusable self-contained Yjs server (FR-020/SC-012).
+- **Standalone (zero-dep):** `open` + `inmemory` + `inline` (+ `postgres` optional). Single static binary, no bus/Redis/auth service. The reusable self-contained Yjs server (FR-020/SC-012).
 - **Alkemio:** `AUTH_MODE=header` (gateway-terminated, default) **or** `oidc`
   (direct validation, Wave 5) + `AUTHZ_MODE=authzeval` + `redis` (multi-pod) or
   `inmemory` (single-pod) + `rabbitmq` metadata + `inline`/`file-service` blob.
@@ -224,7 +224,7 @@ is a config flip — **no code change** (SC-007/SC-011).
 ## Rollout in waves
 
 - **Wave 1 — live-sync server (DONE).** T001–T003 (hexagonal skeleton + ports + zero-dep adapters), T007–T012 (room lifecycle, WS y-protocols sync+awareness, ephemeral channel, both conventions, debounced v2 persistence, US5 reconnect). TDD; gates green; PR #1 (`57b79db`). Headline proofs pass: two-client convergence for *both* content types, persistence round-trip, reconnect-no-lost-edits.
-- **Wave 2 — durable adapters.** T004 `redis` fan-out; T005 `rabbitmq`+`postgres` metastore and `file-service`+`s3`+`local` blob; T006 `authzeval` auth. Each plugs into the held ports; parallelizable. Blocked-by OPEN-1/2/3 for contract detail.
+- **Wave 2 — durable adapters.** T004 `redis` fan-out; T005 `rabbitmq`+`postgres` metastore and `file-service` blob; T006 `authzeval` auth. Each plugs into the held ports; parallelizable. Blocked-by OPEN-1/2/3 for contract detail.
 - **Wave 3 — presence/limits/lifecycle/standalone-API.** T013 presence + collaborator mode + inactivity downgrade + server-forced awareness eviction + contribution metric; T014 authN-at-handshake + per-doc authZ + configurable limits; T015 `document.deleted` cascade consumer; T016 standalone create/delete HTTP API. Shaped by OPEN-4.
 - **Wave 4 — e2e + gate.** T017 single-pod + two-pod e2e (convergence, both content types, persistence, presence, cross-pod fan-out), ≥95% coverage gate, `make openapi` clean.
 - **Wave 5 — dual-adapter handshake AuthN (option (c)).** T018: split AuthN/AuthZ
@@ -272,7 +272,7 @@ internal/adapter/
 └── outbound/
     ├── fanout/{inmemory/broadcaster.go, redis/doc.go→impl T004}
     ├── metastore/{inmemory/store.go, rabbitmq/doc.go→impl T005, postgres/doc.go→impl T005}
-    ├── blobstore/{inline/store.go, fileservice/doc.go→impl T005, s3/doc.go→impl T005, local/doc.go→impl T005}
+    ├── blobstore/{inline/store.go, fileservice/doc.go→impl T005}
     └── auth/{open/auth.go, authzeval/auth.go (AuthZ; +header-AuthN extracted W5), header/auth.go→impl T018, oidc/{auth.go,session_redis.go,hydra_jwks.go}→impl T018}
 # Wave 2+ additions: db/migrations/ (postgres), internal/adapter/inbound/lifecycle/ (T015),
 # standalone API handlers on http/ (T016), test/e2e/ harness (T017).

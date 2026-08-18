@@ -86,7 +86,7 @@ func TestNewFailsOnBroadcasterError(t *testing.T) {
 // fails fast when its base URL is missing, rather than constructing a store that
 // cannot reach anything.
 //
-// Restructured from the old buildBlob tests (FR-018a): the s3 and local branches
+// Restructured from the old buildBlob tests (FR-018a): the removed branches
 // are gone. They existed to serve the standalone deployment that constitution
 // v3.0.0 §III withdrew, and there is no persistence implementation for them —
 // a selection config.Load has already accepted resolves to a usable store.
@@ -101,14 +101,16 @@ func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
 // in-process store, which backs the test suite, the local development loop and
 // the zero-dependency smoke test (§III).
 //
-// This deliberately no longer sweeps the retired `s3` and `local` values. It used
-// to, on the reasoning that "everything that is not file-service resolves to the
-// in-process store" — which described the behavior accurately and pinned it as if
-// it were desirable. It was not: the same fallback is what let BLOB_STORE=s3 come
-// up healthy on a store that loses everything at restart. The gate now lives in
-// config.Load (TestRemovedBlobStoreValuesFailStartupNamingTheReplacement), so
-// those values cannot reach this function at all, and asserting they still land
-// somewhere plausible would only re-legitimise the hole.
+// There are exactly two persistence paths: file-service for production, and the
+// in-process store for the test suite and local development. This test used to
+// sweep several removed selector values as well, on the reasoning that
+// "everything that is not file-service resolves to the in-process store" — which
+// described the behaviour accurately and pinned it as if it were desirable. It was
+// not: that same fallback is what let an unrecognised selector come up healthy on
+// a store that loses everything at restart. The gate now lives in config.Load
+// (TestUnsupportedBlobStoreValuesFailStartup), so nothing else reaches this
+// function, and asserting that it lands somewhere plausible would only
+// re-legitimise the hole.
 func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
 	store, err := buildCheckpoint(&config.Config{BlobStore: config.BlobStoreInline}, metainmem.New())
 	if err != nil {

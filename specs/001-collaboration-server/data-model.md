@@ -47,8 +47,8 @@ metastore; **never** holds the blob bytes.
 | `ID` | `DocumentID` (string) | single id namespace (memo + whiteboard) |
 | `ContentType` | `ContentType` (`memo`\|`whiteboard`) | drives the convention/binding; not baked into id |
 | `Version` | int | bumped per persisted snapshot; room for a future version timeline (FR-025) |
-| `ContentPointer` | string | locator into the blob store (inline row key / file-service object id / S3 key) |
-| `BlobStore` | `BlobStoreKind` (`inline`\|`file-service`\|`s3`\|`local`) | which adapter holds the blob — persisted so a doc rehydrates from the right backend regardless of running config |
+| `ContentPointer` | string | locator into the content store (in-process row key / file-service object id) |
+| `BlobStore` | `BlobStoreKind` (`inline`\|`file-service`) | which adapter holds the content — persisted so a doc rehydrates from the right backend regardless of running config |
 | `OwnerRef` | string | parent Alkemio entity (lifecycle owner, FR-023); the delete cascade keys off it |
 | `CreatedAt`/`UpdatedAt` | time.Time | |
 

@@ -68,7 +68,7 @@ export AUTH_SERVICE_URL=http://authorization-evaluation-service:6060   # h2c HTT
 # or NATS fallback: export NATS_URL=nats://nats:4222
 
 export METADATA_STORE=rabbitmq        # the server save/fetch bus (OPEN-3)
-export BLOB_STORE=inline              # or file-service (OPEN-2) / s3
+export BLOB_STORE=inline              # or file-service (OPEN-2)
 
 export FANOUT_MODE=redis              # multi-pod; inmemory for single-pod
 export REDIS_URL=redis://redis:6379
@@ -120,14 +120,13 @@ go test -tags e2e -race ./test/e2e/...
 export POSTGRES_TEST_DSN=postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
 export RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
 export S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_BUCKET=collab-test \
-       S3_TEST_REGION=us-east-1 S3_TEST_ACCESS_KEY=minioadmin S3_TEST_SECRET_KEY=minioadmin
 go test -tags integration -race ./...
 
 # The ≥95% combined coverage gate (unit + integration + e2e, merged), as CI runs it:
 ./.scripts/coverage-gate.sh 95.0      # currently 95.8%
 ```
 
-CI wires this in `.github/workflows/ci-integration.yml` (postgres/rabbitmq/minio
+CI wires this in `.github/workflows/ci-integration.yml` (postgres/rabbitmq
 service containers + the Node interop harness), alongside the central lint·race·
 build lane in `ci-test.yml`.
 
