@@ -29,6 +29,12 @@ var errShuttingDown = errors.New("collaboration manager is shutting down")
 // collaborators are unaffected.
 var ErrRoomFull = errors.New("collaboration room is full")
 
+// ErrDocumentPurging is returned from Join while an owner-delete cascade is in
+// flight for the document. It is a refusal, not a failure: the document is being
+// deleted, and admitting a connection mid-cascade is how deleted content comes
+// back (see Manager.Purge).
+var ErrDocumentPurging = errors.New("collaboration document is being deleted")
+
 // ErrForbidden is returned from Join when per-document authorization denies the
 // connecting actor read access (a clean deny, not an error — the connection is
 // refused, distinct from a fail-closed authZ transport error).
@@ -102,6 +108,12 @@ type Manager struct {
 	// no room is materialized after the shutdown drain snapshot (002 FR-001).
 	closed bool
 
+	// purging is the owner-delete tombstone set: while a document's id is present,
+	// acquire refuses to materialize a room for it. Refcounted rather than a bare
+	// set so two concurrent Purges of one document cannot have the first to finish
+	// lift the tombstone out from under the second.
+	purging map[model.DocumentID]int
+
 	// sf collapses concurrent first-connects for the same document onto ONE
 	// materialization, so newRoom runs OFF mu (002 FR-010 — no lock across I/O).
 	sf singleflight.Group
@@ -142,6 +154,7 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 		metrics:  metrics,
 		logger:   logger,
 		rooms:    make(map[model.DocumentID]*Room),
+		purging:  make(map[model.DocumentID]int),
 	}
 }
 
@@ -224,6 +237,16 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 // its own run loop so the Y.Doc's single-writer invariant holds; when no room is
 // live the Manager purges directly.
 func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
+	// ORDER IS LOAD-BEARING: refuse new acquisitions, THEN tear the room down,
+	// THEN delete. Without the first step the cascade has a resurrection window —
+	// a Join landing between the content delete and the index delete materializes
+	// a fresh room, finds no checkpoint, seeds an empty document, and its first
+	// flush writes content and an index row back for a document the owner deleted.
+	// The tombstone closes that window by making the racing Join fail
+	// (ErrDocumentPurging) instead of materializing.
+	m.beginPurge(id)
+	defer m.endPurge(id)
+
 	m.mu.Lock()
 	room, live := m.rooms[id]
 	m.mu.Unlock()
@@ -246,6 +269,28 @@ func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
 		// durable purge so no orphan is left.
 	}
 	return m.purgeDurable(ctx, id)
+}
+
+// beginPurge raises the owner-delete tombstone for id, so acquire refuses to
+// materialize a room for it until the cascade finishes.
+func (m *Manager) beginPurge(id model.DocumentID) {
+	m.mu.Lock()
+	m.purging[id]++
+	m.mu.Unlock()
+}
+
+// endPurge lowers the tombstone raised by beginPurge. The tombstone is scoped to
+// the cascade, not permanent: once the document is gone, a later connect is an
+// ordinary open of a non-existent document, which authorization decides — not
+// something this map should be adjudicating forever.
+func (m *Manager) endPurge(id model.DocumentID) {
+	m.mu.Lock()
+	if m.purging[id] <= 1 {
+		delete(m.purging, id)
+	} else {
+		m.purging[id]--
+	}
+	m.mu.Unlock()
 }
 
 // purgeDurable deletes the metadata row and the snapshot blob for a document with
@@ -297,6 +342,13 @@ func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
 // loop.
 func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content model.ContentType) (*Room, error) {
 	m.mu.Lock()
+	// The tombstone is checked BEFORE the registry hit, not after: a room that is
+	// already draining under a cascade must not be handed out either, or the
+	// caller's retry loop just races the cascade again on a fresh room.
+	if _, purging := m.purging[id]; purging {
+		m.mu.Unlock()
+		return nil, ErrDocumentPurging
+	}
 	if room, ok := m.rooms[id]; ok {
 		m.mu.Unlock()
 		return room, nil
@@ -315,8 +367,13 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	// Materialization and the run loop outlive the connecting request, so they must
 	// not inherit its cancellation (context.WithoutCancel).
 	v, err, _ := m.sf.Do(string(id), func() (interface{}, error) {
-		// Re-check under the lock — another singleflight winner may have inserted.
+		// Re-check under the lock — another singleflight winner may have inserted,
+		// or a Purge may have raised the tombstone since the fast path above.
 		m.mu.Lock()
+		if _, purging := m.purging[id]; purging {
+			m.mu.Unlock()
+			return nil, ErrDocumentPurging
+		}
 		if room, ok := m.rooms[id]; ok {
 			m.mu.Unlock()
 			return room, nil
@@ -335,6 +392,15 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 		room.onReleased = func() { m.remove(id, room) }
 
 		m.mu.Lock()
+		if _, purging := m.purging[id]; purging {
+			// A cascade began while this room was materializing OFF the lock. It has
+			// already loaded (or seeded) the document; registering it now would put a
+			// live room on a document being deleted, and its first flush would write
+			// the content back. Tear the fresh, never-served room down instead.
+			m.mu.Unlock()
+			room.teardown(nil)
+			return nil, ErrDocumentPurging
+		}
 		if m.closed {
 			// A shutdown began during materialization: don't register a room the
 			// drain snapshot already missed (it would never be drained). Tear the
