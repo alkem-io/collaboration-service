@@ -152,9 +152,9 @@ by this repo's tests.
 
 - [X] T045 [P] [US4] Wire `conformance.Persistence` against both store implementations (SC-006)
 - [X] T046 [US4] Wire `conformance.PersistenceFencing` against a **fenced** instance, though no deployment enables fencing (FR-008a, SC-017)
-- [ ] T047 [P] [US4] Wire `conformance.Memory` against the registry usage (SC-006)
+- [X] T047 [P] [US4] Wire `conformance.Memory` against the registry usage (SC-006)
 - [ ] T048 [US4] Record which suites apply and **why each non-applicable suite is not run** — notably compaction, since the store implements no `Compactor` (FR-008b)
-- [ ] T049 [P] [US4] Assert in `internal/app/app.go` that the core's shipped single-process defaults are used **as shipped** in the in-process path, with no bespoke reimplementation (§X, §XI)
+- [X] T049 [P] [US4] Assert in `internal/app/app.go` that the core's shipped single-process defaults are used **as shipped** in the in-process path, with no bespoke reimplementation (§X, §XI)
 
 **Checkpoint**: all applicable conformance suites green in CI; non-applicable ones documented as decisions.
 
