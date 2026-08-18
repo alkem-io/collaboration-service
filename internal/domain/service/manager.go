@@ -123,7 +123,12 @@ type Manager struct {
 	// invalidation (§II — the core's contract IS the port). It is shared across
 	// every room so two rooms can never hold two live copies of one document, and
 	// so Invalidate reaches whichever room currently serves it.
-	registry *memory.InProcessRegistry
+	//
+	// Held as the CONTRACT, not the shipped implementation. §II says the contract
+	// is the port, and the concrete type bought nothing: nothing here calls a
+	// method outside the interface, while pinning it made the failure paths that
+	// run during shutdown untestable.
+	registry memory.Registry
 }
 
 // NewManager constructs a room manager over the wired dependencies. A zero
