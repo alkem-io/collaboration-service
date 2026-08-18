@@ -98,8 +98,8 @@ completed flush.
 
 ### Implementation for User Story 2
 
-- [ ] T025 [US2] Implement the checkpoint-only `persistence.Store` over file-service in `internal/adapter/outbound/persistence/fileservice/` — `Appender` + `Loader` + `FenceMode`, deliberately no `Compactor` (D1, contracts/persistence-store.md)
-- [ ] T026 [US2] Make the store in `internal/adapter/outbound/persistence/fileservice/` constructible in **both** fence modes, threading the epoch through the write path though it is always zero in deployment (FR-008a, D6)
+- [X] T025 [US2] Implement the checkpoint-only `persistence.Store` over file-service in `internal/adapter/outbound/persistence/fileservice/` — `Appender` + `Loader` + `FenceMode`, deliberately no `Compactor` (D1, contracts/persistence-store.md)
+- [X] T026 [US2] Make the store in `internal/adapter/outbound/persistence/fileservice/` constructible in **both** fence modes, threading the epoch through the write path though it is always zero in deployment (FR-008a, D6)
 - [X] T027 [P] [US2] Implement the in-process `persistence.Store` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
 - [ ] T028 [US2] Implement flush batching **above** the store in a new `internal/domain/service/flush.go`: merge a window, call `Append` once, so `Append` never overstates durability (D2, FR-007a)
 - [ ] T029 [US2] Make the flush interval operator-configurable in `internal/config/config.go` with a documented default, armed only when the document changed; shutdown flush unconditional (FR-010)

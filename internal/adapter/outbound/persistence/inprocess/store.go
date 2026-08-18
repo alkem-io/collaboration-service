@@ -1,56 +1,57 @@
-// Package inprocess is an in-memory persistence.Store: the durable-history
-// contract implemented over process memory.
+// Package inprocess is an in-memory persistence.CheckpointStore: one current
+// document state per id, replaced on every save.
 //
 // It backs the in-process path — the test suite, the local development loop
 // (real editors, no Alkemio infrastructure), and the documented zero-dependency
 // smoke test (constitution §III). It carries NO durability guarantee across a
 // restart and must never be presented as a deployment option.
 //
-// It is a GENUINE append log with compaction, not a latest-value cache. That is
-// not a stylistic choice: conformance.Persistence appends opaque byte records
-// ("first", "second") and requires them back verbatim, in order, through a
-// paginated recovery view whose Through is fixed by the first page. A store
-// that kept only the newest whole-document blob cannot satisfy that — there is
-// nothing to merge when records are not CRDT updates. See research.md D1a.
+// It deliberately mirrors the SHAPE of the file-service store rather than being
+// a convenient in-memory log: one blob per document, no envelope, no stored
+// state vector, derived on read. If the fixture had a different shape from
+// production, every test would be exercising a persistence model the deployed
+// service does not use.
 package inprocess
 
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
+	"github.com/antst/go-yjs/crdt"
 )
 
-// Store is an in-memory CompactingStore. It is safe for concurrent use.
+// Store keeps one current state per document. It is safe for concurrent use.
 type Store struct {
-	mu   sync.Mutex
-	docs map[backend.DocumentID]*docLog
-	mode persistence.FenceMode
+	mu        sync.Mutex
+	blobs     map[backend.DocumentID][]byte
+	revisions map[backend.DocumentID]persistence.Revision
+	revision  persistence.Revision
+	mode      persistence.FenceMode
+	// fences records the highest epoch accepted per document. Only a fenced
+	// store consults it; an unfenced one never populates it.
+	fences map[backend.DocumentID]backend.Fence
 }
 
-// docLog is one document's durable history: an optional checkpoint covering
-// everything through its revision, plus the records appended after it.
-type docLog struct {
-	checkpoint *persistence.Checkpoint
-	records    []persistence.Record
-	nextRev    persistence.Revision
-	// lastFence is the highest epoch accepted so far; a fenced store rejects any
-	// write bearing an older one (stale-owner rejection).
-	lastFence backend.Fence
-}
+// New constructs an empty unfenced store — the ordinary non-clustered mode, and
+// the one the file-service store also reports (research.md D6a).
+func New() *Store { return newStore(persistence.Unfenced) }
 
-// New constructs an empty unfenced store — the ordinary non-clustered mode.
-func New() *Store { return &Store{docs: map[backend.DocumentID]*docLog{}, mode: persistence.Unfenced} }
+// NewFenced constructs a store requiring a fence on every save. It exists so the
+// fenced path is exercised by conformance (FR-008a); no deployment uses it, and
+// the file-service store cannot support it — a file row has nowhere to persist
+// the epoch.
+func NewFenced() *Store { return newStore(persistence.Fenced) }
 
-// NewFenced constructs an empty store that requires a fence on every mutation.
-// Deployments run unfenced today; this exists so the fenced path is exercised by
-// conformance while it is still cheap to correct (FR-008a).
-func NewFenced() *Store {
-	return &Store{docs: map[backend.DocumentID]*docLog{}, mode: persistence.Fenced}
+func newStore(mode persistence.FenceMode) *Store {
+	return &Store{
+		blobs:     map[backend.DocumentID][]byte{},
+		revisions: map[backend.DocumentID]persistence.Revision{},
+		fences:    map[backend.DocumentID]backend.Fence{},
+		mode:      mode,
+	}
 }
 
 // FenceMode reports the fixed mutation-authority mode. It is a property of the
@@ -58,8 +59,8 @@ func NewFenced() *Store {
 // stale-owner protection.
 func (s *Store) FenceMode() persistence.FenceMode { return s.mode }
 
-// checkFence validates a write's epoch against the store's mode. Callers hold s.mu.
-func (s *Store) checkFence(log *docLog, fence backend.Fence) error {
+// checkFence validates a save's epoch against the store's mode. Callers hold mu.
+func (s *Store) checkFence(id backend.DocumentID, fence backend.Fence) error {
 	switch s.mode {
 	case persistence.Unfenced:
 		if fence != 0 {
@@ -69,195 +70,63 @@ func (s *Store) checkFence(log *docLog, fence backend.Fence) error {
 		if fence == 0 {
 			return persistence.ErrFenceRequired
 		}
-		if log != nil && fence < log.lastFence {
+		if fence < s.fences[id] {
 			return persistence.ErrStaleFence
 		}
 	}
 	return nil
 }
 
-// Append durably records one transaction update and returns its revision.
+// SaveCheckpoint replaces the document's durable state.
 //
-// Returning nil means the bytes are durable: there is no internal buffering, so
-// Append never reports a durability it does not have (FR-007a). Update is
-// borrowed only for the call, so it is copied before being retained.
-func (s *Store) Append(ctx context.Context, req persistence.AppendRequest) (persistence.Revision, error) {
+// Returning nil means the state is durable — there is no buffering, so it never
+// reports a durability it does not have. Update is borrowed only for the call
+// and is copied before being retained. StateVector is required by the contract
+// but deliberately NOT stored: this medium has nowhere to put it, and the
+// contract permits deriving it on read.
+func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpointRequest) (persistence.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log := s.docs[req.DocumentID]
-	if err := s.checkFence(log, req.Fence); err != nil {
+	if err := s.checkFence(req.DocumentID, req.Fence); err != nil {
 		return 0, err
 	}
-	if log == nil {
-		log = &docLog{nextRev: 1}
-		s.docs[req.DocumentID] = log
+	if req.Fence > s.fences[req.DocumentID] {
+		s.fences[req.DocumentID] = req.Fence
 	}
-	if req.Fence > log.lastFence {
-		log.lastFence = req.Fence
-	}
-	rev := log.nextRev
-	log.nextRev++
-	log.records = append(log.records, persistence.Record{
-		Revision: rev,
-		Update:   append([]byte(nil), req.Update...),
-	})
-	return rev, nil
+	s.revision++
+	s.blobs[req.DocumentID] = append([]byte(nil), req.Update...)
+	s.revisions[req.DocumentID] = s.revision
+	return s.revision, nil
 }
 
-// Load returns one page of a self-consistent recovery view.
-//
-// Through is fixed by the first page and carried in the continuation token, so a
-// paged read never observes appends that landed mid-walk — while a fresh Load
-// sees them. An empty Next is the ONLY signal that the view is complete.
-func (s *Store) Load(ctx context.Context, id backend.DocumentID, opts persistence.LoadOptions) (persistence.Page, error) {
+// LoadCheckpoint returns the document's current state, deriving the state vector
+// from the stored bytes. Both returned slices are caller-owned.
+func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (persistence.Checkpoint, error) {
 	if err := ctx.Err(); err != nil {
-		return persistence.Page{}, err
+		return persistence.Checkpoint{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log, ok := s.docs[id]
+	blob, ok := s.blobs[id]
 	if !ok {
-		return persistence.Page{}, persistence.ErrNotFound
+		return persistence.Checkpoint{}, persistence.ErrNotFound
 	}
-
-	first := opts.PageToken == ""
-	through, start, err := s.resolveCursor(log, opts.PageToken)
+	vector, err := crdt.EncodeStateVectorFromUpdate(blob)
 	if err != nil {
-		return persistence.Page{}, err
+		// Bytes that will not parse cannot form the state a successful load
+		// promises, which is precisely ErrCorrupt.
+		return persistence.Checkpoint{}, fmt.Errorf("%w: %w", persistence.ErrCorrupt, err)
 	}
-
-	// Only records within the fixed view, from the cursor onward.
-	var visible []persistence.Record
-	for _, rec := range log.records {
-		if rec.Revision > through {
-			break
-		}
-		if rec.Revision >= start {
-			visible = append(visible, rec)
-		}
-	}
-
-	limit := opts.Limit
-	next := persistence.PageToken("")
-	if limit > 0 && len(visible) > limit {
-		// The next page resumes at the first record we are not returning.
-		next = encodeToken(through, visible[limit].Revision)
-		visible = visible[:limit]
-	}
-
-	page := persistence.Page{Through: through, Next: next}
-	// Checkpoint is normally present only on the first page.
-	if first && log.checkpoint != nil {
-		page.Checkpoint = &persistence.Checkpoint{
-			Revision:    log.checkpoint.Revision,
-			Update:      append([]byte(nil), log.checkpoint.Update...),
-			StateVector: append([]byte(nil), log.checkpoint.StateVector...),
-		}
-	}
-	// Both byte slices returned by Load are caller-owned, so copy every record:
-	// a caller mutating a returned Update must not reach durable state.
-	page.Updates = make([]persistence.Record, 0, len(visible))
-	for _, rec := range visible {
-		page.Updates = append(page.Updates, persistence.Record{
-			Revision: rec.Revision,
-			Update:   append([]byte(nil), rec.Update...),
-		})
-	}
-	return page, nil
+	return persistence.Checkpoint{
+		Revision:    s.revisions[id],
+		Update:      append([]byte(nil), blob...),
+		StateVector: vector,
+	}, nil
 }
 
-// resolveCursor returns the fixed view bound and the first revision to include.
-// Callers hold s.mu.
-func (s *Store) resolveCursor(log *docLog, token persistence.PageToken) (through, start persistence.Revision, err error) {
-	if token == "" {
-		// A fresh view: bound it at the newest revision currently durable.
-		through = log.nextRev - 1
-		if log.checkpoint != nil && log.checkpoint.Revision > through {
-			through = log.checkpoint.Revision
-		}
-		return through, 0, nil
-	}
-	return decodeToken(token)
-}
-
-// Compact atomically installs a checkpoint covering everything through Basis and
-// removes only the records at or before it.
-//
-// It is a compare-and-swap against Basis: records appended AFTER the basis must
-// survive, because a compaction racing an append must never swallow that append.
-func (s *Store) Compact(ctx context.Context, req persistence.CompactRequest) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	log, ok := s.docs[req.DocumentID]
-	if !ok {
-		return persistence.ErrNotFound
-	}
-	if err := s.checkFence(log, req.Fence); err != nil {
-		return err
-	}
-	// The basis must name a revision this store actually holds, and must not move
-	// backwards past an existing checkpoint.
-	if req.Basis >= log.nextRev {
-		return fmt.Errorf("%w: basis %d is beyond the newest revision %d", persistence.ErrConflict, req.Basis, log.nextRev-1)
-	}
-	if log.checkpoint != nil && req.Basis < log.checkpoint.Revision {
-		return fmt.Errorf("%w: basis %d precedes the installed checkpoint %d", persistence.ErrConflict, req.Basis, log.checkpoint.Revision)
-	}
-	if req.Fence > log.lastFence {
-		log.lastFence = req.Fence
-	}
-
-	// CheckpointUpdate and StateVector are borrowed only for the call.
-	log.checkpoint = &persistence.Checkpoint{
-		Revision:    req.Basis,
-		Update:      append([]byte(nil), req.CheckpointUpdate...),
-		StateVector: append([]byte(nil), req.StateVector...),
-	}
-	kept := log.records[:0:0]
-	for _, rec := range log.records {
-		if rec.Revision > req.Basis {
-			kept = append(kept, rec)
-		}
-	}
-	log.records = kept
-	return nil
-}
-
-// --- page tokens -------------------------------------------------------------
-//
-// A token carries the fixed view bound and the resume point. Its contents are
-// private to this implementation; callers only round-trip it.
-
-func encodeToken(through, start persistence.Revision) persistence.PageToken {
-	return persistence.PageToken(strconv.FormatUint(uint64(through), 10) + ":" + strconv.FormatUint(uint64(start), 10))
-}
-
-func decodeToken(token persistence.PageToken) (through, start persistence.Revision, err error) {
-	parts := strings.SplitN(string(token), ":", 2)
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("%w: malformed page token", persistence.ErrCorrupt)
-	}
-	t, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("%w: malformed page token bound", persistence.ErrCorrupt)
-	}
-	sv, err := strconv.ParseUint(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("%w: malformed page token cursor", persistence.ErrCorrupt)
-	}
-	return persistence.Revision(t), persistence.Revision(sv), nil
-}
-
-var (
-	_ persistence.Store           = (*Store)(nil)
-	_ persistence.CompactingStore = (*Store)(nil)
-)
+var _ persistence.CheckpointStore = (*Store)(nil)
