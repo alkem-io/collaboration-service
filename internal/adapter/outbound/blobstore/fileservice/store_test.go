@@ -33,6 +33,38 @@ type stubFileService struct {
 	lastReused     bool
 	lastAuthSent   bool // whether an authorizationId field was present at all
 	lastAuthNonEmp bool // whether that field carried a non-empty value
+
+	// creates/rewrites count how the adapter reached the store, so a test can
+	// assert it REWRITES a stable file rather than creating a new one per save.
+	creates  int
+	rewrites int
+}
+
+// replace models PUT /internal/file/{id}/content ("store-and-link"): the file id
+// is a stable identifier, so the content is swapped behind it and the id is
+// unchanged. 404 when the file does not exist; 409 when the new content's hash
+// already belongs to ANOTHER file in the bucket (content dedup).
+func (s *stubFileService) replace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	body, _ := io.ReadAll(r.Body)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.byID[id]; !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	hash := hashOf(body)
+	if owner, ok := s.byHash[hash]; ok && owner != id {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	delete(s.byHash, hashOf(s.byID[id]))
+	s.byID[id] = body
+	s.byHash[hash] = id
+	s.rewrites++
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, createResponse{ID: id, ExternalID: hash, Size: int64(len(body))})
 }
 
 func newStub() *stubFileService {
@@ -48,6 +80,7 @@ func (s *stubFileService) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /internal/file", s.create)
 	mux.HandleFunc("GET /internal/file/{id}/content", s.content)
+	mux.HandleFunc("PUT /internal/file/{id}/content", s.replace)
 	mux.HandleFunc("DELETE /internal/file/{id}", s.delete)
 	return mux
 }
@@ -100,6 +133,7 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, createResponse{ID: existing, ExternalID: ext, Size: int64(len(fileBytes)), Reused: true})
 		return
 	}
+	s.creates++
 	s.nextID++
 	id := idFromInt(s.nextID)
 	s.byID[id] = append([]byte(nil), fileBytes...)
@@ -229,12 +263,15 @@ func TestPutUsesPerDocumentBucket(t *testing.T) {
 	}
 }
 
-func TestPutDoesNotDeletePreviousSnapshot(t *testing.T) {
-	// 002 FR-002 (delete-after-commit): on re-save the adapter uploads a NEW object
-	// (new UUID) but must NOT delete the previous one — deleting before the caller
-	// commits the new pointer would strand the metadata row on a missing blob if that
-	// commit then failed. The caller (room.persist) deletes the superseded pointer
-	// only AFTER the metadata commit succeeds.
+// TestPutNeverLeavesTheRowStranded is the restructured 002 FR-002 guard.
+//
+// The original asserted that re-saving produced a NEW pointer and that the OLD
+// object survived, so a failed metadata commit could still fall back to it. That
+// premise is gone: a file id is a stable identifier, so re-saving REWRITES the
+// same file and the pointer never changes. The property it was defending —
+// the metadata row is never left pointing at nothing — is now structural rather
+// than something Put has to be careful about, and this asserts exactly that.
+func TestPutNeverLeavesTheRowStranded(t *testing.T) {
 	store, stub := newTestStore(t)
 	ctx := context.Background()
 
@@ -246,27 +283,53 @@ func TestPutDoesNotDeletePreviousSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put v2: %v", err)
 	}
-	if p1 == p2 {
-		t.Error("expected a new pointer for new content")
+	if p1 != p2 {
+		t.Fatalf("pointer changed on re-save (%q -> %q); a stable id is what removes the stranding window", p1, p2)
 	}
 
-	// The OLD object must STILL exist: a failed commit of p2 would then leave the row
-	// safely pointing at the still-present p1, never stranded.
+	// The pointer the row holds resolves to live content at every moment: there is
+	// no interval in which it names a deleted object.
 	stub.mu.Lock()
-	_, oldExists := stub.byID[p1]
+	_, exists := stub.byID[p1]
 	stub.mu.Unlock()
-	if !oldExists {
-		t.Error("Put deleted the previous snapshot — delete-before-commit can strand the metadata row (002 FR-002)")
+	if !exists {
+		t.Error("the pointer stored in the metadata row does not resolve — the row is stranded (002 FR-002)")
 	}
-	if got, err := store.Get(ctx, p1); err != nil || string(got) != "v1" {
-		t.Errorf("previous snapshot no longer retrievable: got %q err %v", got, err)
-	}
-	got, err := store.Get(ctx, p2)
+	got, err := store.Get(ctx, p1)
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("Get after re-save: %v", err)
 	}
 	if string(got) != "v2-different" {
-		t.Errorf("Get after overwrite = %q, want v2-different", got)
+		t.Fatalf("Get = %q, want the rewritten content", got)
+	}
+}
+
+// TestRewriteServerErrorDoesNotForkTheDocument pins a hazard the fallback
+// introduces: only a 404 (no such file) may fall back to creating a file. A
+// transient 500 on the rewrite must SURFACE, because creating a second file
+// would fork the document — the row keeps the old pointer while fresh content
+// lands somewhere it will never be read from.
+func TestRewriteServerErrorDoesNotForkTheDocument(t *testing.T) {
+	var creates int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			http.Error(w, "backend unavailable", http.StatusInternalServerError)
+		case http.MethodPost:
+			creates++
+			writeJSON(w, createResponse{ID: idFromInt(creates)})
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
+
+	if _, err := store.Put(context.Background(), "00000000-0000-0000-0000-000000000099", "", []byte("v2")); err == nil {
+		t.Fatal("a server error on rewrite must surface, not fall back to creating a second file")
+	}
+	if creates != 0 {
+		t.Fatalf("created %d files after a failed rewrite; that forks the document", creates)
 	}
 }
 
@@ -393,7 +456,8 @@ func TestUploadEmptyIDSurfaces(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
-	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
+	// No prior pointer: exercise the CREATE path directly, with no rewrite attempt.
+	if _, err := store.Put(context.Background(), "", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail when the server returns an empty id")
 	}
 }
@@ -404,7 +468,8 @@ func TestUploadBadJSONSurfaces(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
-	if _, err := store.Put(context.Background(), "doc", "", []byte("x")); err == nil {
+	// No prior pointer: exercise the CREATE path directly, with no rewrite attempt.
+	if _, err := store.Put(context.Background(), "", "", []byte("x")); err == nil {
 		t.Error("expected Put to fail on a malformed response body")
 	}
 }
@@ -441,39 +506,6 @@ func TestDeleteNon200Surfaces(t *testing.T) {
 	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
 	if err := store.Delete(context.Background(), "id"); err == nil {
 		t.Error("expected Delete to surface a 502")
-	}
-}
-
-// TestPutSucceedsWhenPreviousDeleteFails defends Put's best-effort cleanup
-// branch (store.go:102): the new snapshot upload succeeds, but deleting the
-// superseded one fails. The save MUST still succeed — the new snapshot is
-// already durable and recorded, and the orphan is reclaimable. A failed cleanup
-// must never fail the save.
-func TestPutSucceedsWhenPreviousDeleteFails(t *testing.T) {
-	var nextID int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			nextID++
-			writeJSON(w, createResponse{ID: idFromInt(nextID)})
-		case http.MethodDelete:
-			// The cleanup of the previous snapshot fails hard.
-			http.Error(w, "delete unavailable", http.StatusInternalServerError)
-		default:
-			http.Error(w, "unexpected", http.StatusBadRequest)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	store, _ := New(Config{BaseURL: srv.URL, StorageBucketID: "b", MaxUploadSize: 1 << 20})
-
-	// prevPointer differs from the assigned id, so Put will attempt (and fail)
-	// the cleanup delete — yet must still return the new pointer with no error.
-	got, err := store.Put(context.Background(), "00000000-0000-0000-0000-000000000099", "", []byte("v2"))
-	if err != nil {
-		t.Fatalf("Put must succeed despite a failed previous-snapshot cleanup: %v", err)
-	}
-	if got == "" {
-		t.Error("expected the new content pointer to be returned")
 	}
 }
 
@@ -545,5 +577,120 @@ func TestDeleteBadBaseURLFailsRequestBuild(t *testing.T) {
 	}
 	if err := store.Delete(context.Background(), "id"); err == nil {
 		t.Error("expected Delete to fail building a request to a malformed BaseURL")
+	}
+}
+
+// TestPutRewritesInPlaceKeepingAStablePointer is the regression test for the
+// create-new-every-save defect.
+//
+// A file id is a STABLE identifier — a filename, not a version. Saving a
+// document repeatedly must REWRITE its file (PUT /internal/file/{id}/content)
+// and return the SAME pointer, not create a new file each time and leave the
+// previous one to be reaped. The old behaviour churned a fresh id per flush,
+// which is what forced the pointer-update-and-delete dance in room.persist.
+//
+// Non-vacuity: restore the old Put (always POST /internal/file) and the pointer
+// changes between saves while creates climbs to 3, tripping both assertions.
+func TestPutRewritesInPlaceKeepingAStablePointer(t *testing.T) {
+	store, stub := newTestStore(t)
+	ctx := context.Background()
+
+	// First save: no file exists yet, so the adapter creates one.
+	first, err := store.Put(ctx, "doc-1", "bucket-1", []byte("snapshot-v1"))
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+
+	// Subsequent saves must reuse that id.
+	second, err := store.Put(ctx, first, "bucket-1", []byte("snapshot-v2"))
+	if err != nil {
+		t.Fatalf("second Put: %v", err)
+	}
+	third, err := store.Put(ctx, second, "bucket-1", []byte("snapshot-v3"))
+	if err != nil {
+		t.Fatalf("third Put: %v", err)
+	}
+
+	if second != first || third != first {
+		t.Fatalf("pointer churned across saves: %q then %q then %q; a file id is stable", first, second, third)
+	}
+
+	stub.mu.Lock()
+	creates, rewrites := stub.creates, stub.rewrites
+	stub.mu.Unlock()
+	if creates != 1 {
+		t.Fatalf("created %d files, want exactly 1; later saves must rewrite, not create", creates)
+	}
+	if rewrites != 2 {
+		t.Fatalf("rewrote %d times, want 2", rewrites)
+	}
+
+	// The latest content is what a reader gets back.
+	got, err := store.Get(ctx, first)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != "snapshot-v3" {
+		t.Fatalf("Get = %q, want the most recent snapshot", got)
+	}
+}
+
+// TestPutCreatesWhenTheFileIsGone covers the self-healing path: a pointer whose
+// file was removed out of band must not wedge saving forever. The rewrite 404s
+// and the adapter falls back to creating a fresh file.
+func TestPutCreatesWhenTheFileIsGone(t *testing.T) {
+	store, stub := newTestStore(t)
+	ctx := context.Background()
+
+	first, err := store.Put(ctx, "doc-1", "bucket-1", []byte("snapshot-v1"))
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	if err := store.Delete(ctx, first); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	again, err := store.Put(ctx, first, "bucket-1", []byte("snapshot-v2"))
+	if err != nil {
+		t.Fatalf("Put after the file vanished: %v", err)
+	}
+	if again == "" {
+		t.Fatal("expected a fresh pointer after the file was removed")
+	}
+	stub.mu.Lock()
+	creates := stub.creates
+	stub.mu.Unlock()
+	if creates != 2 {
+		t.Fatalf("created %d files, want 2 (initial + recreate after deletion)", creates)
+	}
+}
+
+// TestPutSurfacesDedupConflict pins the 409 path. file-service deduplicates on
+// content hash within a bucket (unique(externalID, storageBucketID)), so writing
+// bytes that already belong to ANOTHER file in the same bucket is refused. That
+// is a permanent condition for those bytes, not a transient fault, so it must
+// surface as an error rather than be retried as one.
+func TestPutSurfacesDedupConflict(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	// Two distinct files in the same bucket.
+	a, err := store.Put(ctx, "doc-a", "bucket-1", []byte("content-a"))
+	if err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+	b, err := store.Put(ctx, "doc-b", "bucket-1", []byte("content-b"))
+	if err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+	if a == b {
+		t.Fatal("expected two distinct files")
+	}
+
+	// Rewriting b with a's exact content collides on the content hash.
+	if _, err := store.Put(ctx, b, "bucket-1", []byte("content-a")); err == nil {
+		t.Fatal("a dedup conflict must surface as an error, not be silently accepted")
+	} else if !strings.Contains(err.Error(), "dedup conflict") {
+		t.Fatalf("error = %v, want it to name the dedup conflict so it is not retried as transient", err)
 	}
 }

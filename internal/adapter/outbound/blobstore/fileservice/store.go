@@ -2,9 +2,10 @@
 // encoded Y.Doc v2 snapshot is offloaded to the existing Alkemio file-service
 // via its internal API (OPEN-2 — no file-service expansion for v1):
 //
-//   - Put    → multipart POST /internal/file (the returned UUID is the content
-//     pointer); the previous snapshot's file is deleted so old versions do not
-//     accumulate (latest-only, R7).
+//   - Put    → REWRITE the document's existing file in place via
+//     PUT /internal/file/{id}/content ("store-and-link"), keeping the content
+//     pointer STABLE. Only when no file exists yet (first save) does it create
+//     one with multipart POST /internal/file and adopt the returned UUID.
 //   - Get    → GET /internal/file/{id}/content
 //   - Delete → DELETE /internal/file/{id}
 //
@@ -26,6 +27,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -104,29 +106,72 @@ func (s *Store) Put(ctx context.Context, prevPointer, bucketID string, data []by
 		return "", fmt.Errorf("snapshot %d bytes exceeds MAX_UPLOAD_SIZE %d", len(data), limit)
 	}
 
+	// A file id is a STABLE identifier — a filename, not a version. The normal
+	// path therefore REWRITES the document's existing file, leaving the content
+	// pointer unchanged; file-service swaps the underlying blob (and its
+	// content-hash externalID) behind that stable id, which is its business, not
+	// ours.
+	//
+	// prevPointer is the caller's current pointer, which on the FIRST save is the
+	// document id used as a hint rather than a real file id (see port.BlobStore).
+	// Rather than have the adapter guess which it is, try the rewrite and treat a
+	// 404 as "no file yet, create one". That also self-heals a pointer whose file
+	// was removed out of band.
+	if prevPointer != "" {
+		id, err := s.replace(ctx, prevPointer, data)
+		switch {
+		case err == nil:
+			return id, nil
+		case errors.Is(err, model.ErrNotFound):
+			// fall through to create
+		default:
+			return "", err
+		}
+	}
+
 	bucket := bucketID
 	if bucket == "" {
 		bucket = s.cfg.StorageBucketID
 	}
-
-	id, err := s.upload(ctx, bucket, data)
-	if err != nil {
-		return "", err
-	}
-
-	// The superseded snapshot is intentionally NOT deleted here. Deleting it before
-	// the caller commits the new pointer would strand the metadata row on a missing
-	// blob if that commit then failed (002 FR-002, delete-after-commit). The caller
-	// (room.persist) deletes the old pointer AFTER the commit succeeds. prevPointer is
-	// unused now, kept for the BlobStore contract.
-	_ = prevPointer
-	return id, nil
+	return s.upload(ctx, bucket, data)
 }
 
-// upload performs the multipart POST into bucket and returns the assigned
-// file-service UUID. authorizationId is deliberately omitted: file-service then
-// stores a NULL authz column, which UNIQUE(authorizationId) permits any number
-// of — so every snapshot persists.
+// replace rewrites an existing file's content in place, returning the unchanged
+// pointer. It reports model.ErrNotFound when no such file exists so Put can
+// create one instead.
+func (s *Store) replace(ctx context.Context, pointer string, data []byte) (string, error) {
+	// PathEscape the pointer (see Get): a path-significant byte must not
+	// re-target the write at a different file-service object.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer)+"/content", bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("file-service replace: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		return pointer, nil
+	case http.StatusNotFound:
+		return "", model.ErrNotFound
+	case http.StatusConflict:
+		// file-service deduplicates on content hash within a bucket
+		// (unique(externalID, storageBucketID)), so an identical snapshot already
+		// stored under a DIFFERENT file in this bucket is refused. This is a
+		// permanent condition for these bytes, not a transient fault, so it must
+		// not be retried as one.
+		return "", fmt.Errorf("file-service replace: content already stored under another file in this bucket (dedup conflict): %s", readErrBody(resp.Body))
+	default:
+		return "", fmt.Errorf("file-service replace: unexpected status %d: %s", resp.StatusCode, readErrBody(resp.Body))
+	}
+}
+
 func (s *Store) upload(ctx context.Context, bucket string, data []byte) (string, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)

@@ -339,8 +339,8 @@ func TestLimitsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Limits.MaxDocBytes != 32<<20 {
-		t.Errorf("MaxDocBytes = %d, want 32MiB", cfg.Limits.MaxDocBytes)
+	if cfg.Limits.MaxDocBytes != 30<<20 {
+		t.Errorf("MaxDocBytes = %d, want 30MiB", cfg.Limits.MaxDocBytes)
 	}
 	if cfg.Limits.MaxConnsPerRoom != 50 || cfg.Limits.UpdateRatePerSec != 50 {
 		t.Errorf("limit defaults = %+v", cfg.Limits)

@@ -346,7 +346,13 @@ func Load() (*Config, error) {
 // Default limit/presence values (epic R9, OPEN-4) — kept in sync with the domain
 // service.DefaultRoomConfig so config and core agree on the standalone defaults.
 const (
-	defaultMaxDocBytes               = 32 << 20 // 32 MiB
+	// MaxDocBytes is capped BELOW file-service's 32 MiB request-body limit on
+	// PUT /internal/file/{id}/content, not at it. A document sitting exactly on a
+	// 32 MiB budget would encode to slightly more than 32 MiB once v2 framing is
+	// added, so the snapshot would be refused by the transport after passing our
+	// own budget check — the document would be accepted and then permanently
+	// unsaveable. 30 MiB leaves headroom for framing.
+	defaultMaxDocBytes               = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom           = 50
 	defaultUpdateRatePerSec          = 50
 	defaultCollaboratorInactivitySec = 120
