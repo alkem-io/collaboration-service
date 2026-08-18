@@ -35,53 +35,92 @@ interval is the control; the envelope must be documented (SC-020).
 
 ---
 
-## D1a — CONFLICT FOUND IN IMPLEMENTATION: checkpoint-only cannot conform
+## D1a — RESOLVED UPSTREAM: the contract gained a checkpoint profile
 
-**Status**: D1's premise is **wrong**, discovered while implementing T025/T045.
-Recorded here rather than silently resolved, because it overturns a decision
-taken in clarification (Q1) and an assumption written into FR-008b.
+**Status**: raised during implementation, escalated to the `go-yjs` owners,
+**resolved by adding the missing profile upstream** (antst/go-yjs PR #8).
+Q1's original decision is vindicated; only the mechanism I first proposed was
+wrong.
 
-**What D1 assumed**: that a checkpoint-only store is "a legitimate point in the
-contract's design space" because `Compactor` is optional and a `Loader` may
-return a checkpoint covering all history — so `conformance.PersistenceCompaction`
-would simply not apply.
+**The problem found**: `conformance.Persistence` mandates a log-shaped backend.
+It appends the OPAQUE bytes `"first"` and `"second"` — not valid Yjs updates —
+and requires them back verbatim, in order, through a paginated view whose
+`Through` is fixed by the first page. There is no merge that folds opaque bytes
+into one covering state, so a single-current-state store cannot satisfy it, and
+`Compactor` does not help because the assertion runs before any compaction.
 
-**What the suite actually requires** (`backend/conformance/persistence.go`):
+**Why it could not be worked around locally**. Three options, all bad:
 
-- **Per-record fidelity.** It appends `[]byte("first")` then `[]byte("second")`
-  and asserts `history[0].Update == "first"`, `history[1].Update == "second"`.
-  Records are **opaque bytes**, not CRDT updates — so a checkpoint-only store
-  cannot merge them into one covering checkpoint. There is nothing to merge.
-- **Pagination with a fixed recovery view.** `Limit: 1` must return one record
-  plus a continuation token; the continuation must exclude appends that landed
-  after the first page, while a fresh load must include them.
-- **Caller-owned slices**, `ErrNotFound` for absent history, `ErrUnexpectedFence`
-  for a fenced write to an unfenced store, and context cancellation honoured.
+- *multi-file logs in file-service* — reintroduces the per-save file churn that
+  `fb32d05` removed, and abandons the stable-pointer model;
+- *a framed record envelope inside the blob* — **impossible**: the blob format is
+  a cross-repo contract. `server` also writes it (document create via
+  `markdownToYjsV2State` / `populateYDoc`, and the one-time T009 migration), so
+  an envelope would leave `server` writing bare snapshots this service could not
+  parse;
+- *skip the suite for the file-service store* — violates FR-008, and it is the
+  one implementation that actually runs in production.
 
-None of that is satisfiable by storing only the latest whole-document blob.
+**Resolution**: `backend/persistence` gained a `CheckpointStore` profile —
+`SaveCheckpoint` / `LoadCheckpoint` / `FenceMode`, same error sentinels, same
+caller-owned-slice discipline, same returning-nil-means-durable rule — plus a
+`conformance.CheckpointPersistence` suite that asserts what is meaningful for
+that shape (round-trip fidelity, monotonic revisions, alias-safety both
+directions, cancellation, `ErrNotFound`) and NOT per-record history or
+pagination.
 
-**The conflict**: FR-008/SC-006 require every implementation to pass its
-conformance suites; Q1/FR-008b specify a shape that cannot.
+**Consequences for this feature**:
 
-**Reconciliation adopted** (satisfies both, and preserves Q1's *intent*):
+1. **Q1 stands as written.** One whole-document blob per flush, one blob read on
+   load, no record sequence, no compaction. FR-008b's exemption of the compaction
+   suite is restored — it does not apply because the store is not a log.
+2. **The state vector is derived on read**, with `EncodeStateVectorFromUpdateV2`.
+   The contract explicitly sanctions ignoring the supplied bytes; what
+   `LoadCheckpoint` returns must be correct for the stored update, not identical
+   to what the caller passed. file-service has nowhere to put it —
+   `ContentMetadata` is a typed image-specific JSONB view, not a free-form bag.
+3. **The file-service store reports `Unfenced`, by design** — see D6a.
+4. **The in-process store needs converting.** It currently implements the log
+   profile (`CompactingStore`) and passes the log suites. Production will be
+   `CheckpointStore`, and the test/dev fixture must be the same shape or the two
+   paths diverge. Follow-up task, once the profile is pinned.
 
-Implement a **genuine append-log store WITH compaction** — `CompactingStore`,
-not the bare `Store` D1 described. Then:
+**Process note**: the spec's rule — a contract that does not fit this service's
+genuine needs SHOULD be changed in the core, and silent local divergence is
+prohibited — is what produced this outcome. Working around it locally would have
+left a permanent unvalidated seam in the one path that carries real documents.
 
-- `conformance.Persistence` and `conformance.PersistenceCompaction` both pass,
-  so FR-008/SC-006 hold and FR-008b's "compaction does not apply" is withdrawn.
-- The service's *usage* is unchanged from Q1's intent: a flush still writes one
-  whole-document update per window, and compaction installs it as the checkpoint
-  immediately. Steady state is therefore exactly what Q1 asked for — one
-  checkpoint, no trailing records, one blob read on load.
-- FR-012 (bounded recovery cost) is now satisfied *by compaction* rather than
-  by the absence of history, which is the stronger guarantee: without compaction
-  a conforming log would grow without bound.
+---
 
-**What the user should confirm**: this makes `Compactor` required rather than
-excluded. The alternative — keep checkpoint-only and skip `conformance.Persistence`
-— was rejected because it violates FR-008 and would leave the one contract with
-no shipped implementation entirely unvalidated.
+## D6a — Fencing is NOT reachable over file-service, and that is conforming
+
+**Decision**: the file-service `CheckpointStore` reports `Unfenced`. Stale-owner
+protection comes from the cluster lease, not from persistence.
+
+**Rationale**: a fence epoch is per-document state that must be persisted and
+compared on every write. file-service has nowhere to hold it — a file row carries
+`ExternalID`, `MimeType`, `Size`, `DisplayName`, `StorageBucketID`,
+`AuthorizationID`, `TagsetID`, `Version`, and a typed image-specific
+`ContentMetadata`. Holding the epoch in the Alkemio metadata index instead would
+work mechanically but is **explicitly not a substitute**: the contract is meant to
+be the FINAL stale-owner rejection precisely because a partitioned holder can stay
+alive, and a rejection that must first reach another service is not that backstop.
+
+**Consequence for FR-008a / SC-017**: "build the store fence-capable and prove the
+fenced path in CI" applies to the **in-process** store only. The file-service store
+cannot be fenced, so there is no fenced path to prove. This narrows a requirement
+rather than dropping it, and it is recorded rather than silently unmet.
+
+**Operational consequence carried upstream**: on lease loss a node must **shed its
+clients**, not merely decline to write. One that keeps serving reads and presence
+while silently failing to persist is split-brain the CRDT cannot resolve — the
+bytes converge, but presence, limits and authorization do not.
+
+**Hazard to guard in the implementation**: file-service deduplicates on content
+hash within a bucket (`unique(externalID, storageBucketID)`). Identical bytes to
+the SAME file succeed; identical bytes to a DIFFERENT file in the bucket 409. That
+coincidence can look like stale-owner protection during testing while providing
+none, so it must be commented where the 409 is handled.
 
 ## D2 — Flush batching lives **above** the `Store`
 

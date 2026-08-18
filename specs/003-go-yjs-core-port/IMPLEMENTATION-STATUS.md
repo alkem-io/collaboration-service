@@ -32,24 +32,28 @@ gone from the code and from the module graph. The full test suite — including 
 
 ## Two corrections to the spec, made during implementation
 
-### 1. Checkpoint-only cannot conform (research.md **D1a**) — a decision was overturned
+### 1. Checkpoint-only could not conform — **resolved upstream, Q1 stands**
 
-Clarification **Q1** chose a checkpoint-only `Store`, and **FR-008b** excused the
-compaction suite on the grounds that `Compactor` would not be implemented.
+`conformance.Persistence` mandates a log-shaped backend: it appends OPAQUE bytes
+(`"first"`, `"second"` — not valid Yjs updates) and demands them back verbatim,
+in order, paginated. No merge folds opaque bytes into a covering state, so a
+single-current-state store cannot pass it.
 
-That premise is wrong. `conformance.Persistence` appends **opaque byte records**
-(`"first"`, `"second"`) and requires them back verbatim and in order, through a
-paginated view whose `Through` is fixed by the first page. There is nothing to
-merge into a covering checkpoint when records are not CRDT updates.
+It could not be worked around locally, because the blob format is a **cross-repo
+contract** — `server` writes the same bare Yjs-V2 snapshot on create and in the
+T009 migration, so a record envelope was never available.
 
-**Resolved as**: a genuine append log **with** compaction (`CompactingStore`),
-used the way Q1 intended — one whole-document update per flush, compacted into
-the checkpoint immediately, so steady state is still one checkpoint and one read
-on load. FR-012 is now satisfied *by compaction*, which is stronger than Q1's "no
-history to replay".
+**Escalated to the `go-yjs` owners rather than worked around**, per the spec's own
+rule that a badly-fitting contract should be fixed in the core and silent local
+divergence is prohibited. Resolved by adding a `CheckpointStore` profile plus a
+`conformance.CheckpointPersistence` suite (antst/go-yjs PR #8).
 
-**This is the one thing worth a human review**, because it changes a decision
-that was explicitly taken.
+**Q1's decision therefore stands as written.** One whole-document blob per flush,
+one blob read on load. What changed is only that the contract now has a profile
+that fits it. Two consequences to carry: the state vector is derived on read
+(explicitly sanctioned), and the in-process store — currently a log with
+compaction — must be converted to the same profile so test/dev and production do
+not diverge.
 
 ### 2. `Invalidate` blocks until handles release
 
