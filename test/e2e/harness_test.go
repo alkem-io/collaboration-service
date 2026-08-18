@@ -203,7 +203,7 @@ func (c *wsClient) pump(ctx context.Context) {
 
 func (c *wsClient) dispatch(ctx context.Context, frame []byte) {
 	in := bytes.NewBuffer(append([]byte(nil), frame...))
-	msgType, payload, err := protocol.ReadMessage(in)
+	msgType, _, err := protocol.ReadMessage(in)
 	if err != nil {
 		return
 	}
@@ -217,18 +217,22 @@ func (c *wsClient) dispatch(ctx context.Context, frame []byte) {
 			_ = c.conn.Write(ctx, websocket.MessageBinary, reply.Bytes())
 		}
 	case protocol.MessageAwareness:
-		// Canonical y-protocols awareness framing: the payload is a
-		// length-prefixed body. Decode it before applying (a real yjs client does
+		// Canonical y-protocols awareness framing: the payload is a length-prefixed
+		// body, which must be unwrapped before applying (a real yjs client does
 		// readVarUint8Array → applyAwarenessUpdate).
-		dec := bytes.NewBuffer(payload)
-		v, derr := ycrdt.ReadVarUint8Array(dec)
+		//
+		// InspectMessage does that unwrapping as part of classifying the frame. The
+		// core no longer exports the varint primitives this used to call directly,
+		// and that is the right direction: a harness reimplementing the framing byte
+		// layout can drift from the server it is supposed to be checking, which is
+		// precisely the drift an interop harness exists to catch.
+		info, derr := protocol.InspectMessage(frame)
 		if derr != nil {
 			c.t.Errorf("awareness frame failed canonical decode: %v", derr)
 			return
 		}
-		body, _ := v.([]byte)
 		c.lock()
-		ycrdt.ApplyAwarenessUpdate(c.awareness, body, c.handler)
+		ycrdt.ApplyAwarenessUpdate(c.awareness, info.Body, c.handler)
 		c.unlock()
 	}
 }
@@ -274,10 +278,10 @@ func (c *wsClient) setAwareness(state ycrdt.Object) {
 	c.awareness.SetLocalState(state)
 	update := ycrdt.EncodeAwarenessUpdate(c.awareness, []ycrdt.Number{c.awareness.ClientID}, nil)
 	c.unlock()
-	out := new(bytes.Buffer)
-	ycrdt.WriteVarUint(out, uint64(protocol.MessageAwareness))
-	ycrdt.WriteVarUint8Array(out, update)
-	_ = c.conn.Write(context.Background(), websocket.MessageBinary, out.Bytes())
+	// Framed by the core rather than by hand, for the same reason the decode side
+	// is: the harness must not carry its own copy of the wire layout.
+	_ = c.conn.Write(context.Background(), websocket.MessageBinary,
+		protocol.EncodeAwarenessUpdateMessage(update))
 }
 
 // awarenessClientCount returns how many awareness client states this client

@@ -35,6 +35,12 @@ func newStubFileService() *stubFileService {
 func (s *stubFileService) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /internal/file", s.create)
+	// PUT is store-and-link: it REWRITES the content behind an existing file id.
+	// It is the verb every save after the first uses, because a document keeps one
+	// stable file for its lifetime. The stub predates that model and only had
+	// create + read, so the second save 405'd, the final snapshot never landed,
+	// and the reload read back the create-time bytes.
+	mux.HandleFunc("PUT /internal/file/{id}/content", s.rewrite)
 	mux.HandleFunc("GET /internal/file/{id}/content", s.content)
 	mux.HandleFunc("DELETE /internal/file/{id}", s.delete)
 	return mux
@@ -96,6 +102,30 @@ func (s *stubFileService) create(w http.ResponseWriter, r *http.Request) {
 	s.byID[id] = append([]byte(nil), fileBytes...)
 	s.puts++
 	writeJSON(w, fsCreateResponse{ID: id, ExternalID: "ext-" + id, Size: int64(len(fileBytes))})
+}
+
+// rewrite replaces the bytes behind an existing file id, mirroring file-service's
+// store-and-link PUT. A rewrite of an id that does not exist is a 404, which the
+// adapter treats as "the file is gone" — the one status it may recover from by
+// creating.
+func (s *stubFileService) rewrite(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	_, ok := s.byID[id]
+	if ok {
+		s.byID[id] = body
+	}
+	s.mu.Unlock()
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *stubFileService) content(w http.ResponseWriter, r *http.Request) {

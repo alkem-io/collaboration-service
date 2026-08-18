@@ -112,3 +112,45 @@ func TestRecordPreservesTheRestOfTheRow(t *testing.T) {
 		t.Fatalf("recording a pointer blanked other index fields: %+v", got)
 	}
 }
+
+// TestRecordCreatesTheRowWhenTheDocumentHasNoIndexEntryYet is the regression for
+// the first-save ordering.
+//
+// The room writes a document's index row only AFTER a checkpoint save succeeds,
+// but the file-service store records its pointer DURING that save. So on the
+// first save of a document that was never pre-registered there is no row yet.
+// Treating that as an error made the document permanently unsaveable: the save
+// failed after the bytes had already been uploaded, leaving them orphaned; every
+// retry created another file and failed identically; and the document could never
+// be loaded back, because nothing had recorded where its content went.
+//
+// The Alkemio deployment hides this — `server` pre-registers a row over the
+// lifecycle bus before the first connect, so a row always exists. Every path
+// without that pre-registration hits it on every document: the in-process path,
+// the e2e suite, the standalone REST create.
+//
+// Non-vacuity: make Record error on a missing row and this fails immediately.
+func TestRecordCreatesTheRowWhenTheDocumentHasNoIndexEntryYet(t *testing.T) {
+	const docID = "doc-never-registered"
+	meta := metainmem.New()
+	ctx := context.Background()
+
+	if _, err := meta.Load(ctx, docID); err == nil {
+		t.Fatal("precondition: the document must have no index row")
+	}
+
+	if err := New(meta).Record(ctx, backend.DocumentID(docID), "file-first"); err != nil {
+		t.Fatalf("Record on a document with no index row: %v — the bytes are already uploaded at this point, so failing here orphans them and the document can never be loaded back", err)
+	}
+
+	got, err := meta.Load(ctx, docID)
+	if err != nil {
+		t.Fatalf("Load after Record: %v", err)
+	}
+	if got.ID != docID {
+		t.Fatalf("ID = %q, want %q", got.ID, docID)
+	}
+	if got.ContentPointer != "file-first" {
+		t.Fatalf("ContentPointer = %q, want the recorded pointer", got.ContentPointer)
+	}
+}

@@ -51,15 +51,36 @@ func (r *Resolver) Pointer(ctx context.Context, id backend.DocumentID) (string, 
 
 // Record persists a newly created file pointer onto the document's index row.
 //
-// Read-modify-write on the row: the index carries content type, authorization
-// policy, owner and bucket alongside the pointer, and MetadataStore.Save takes a
-// whole row, so the other fields must be carried through rather than blanked. A
-// missing row is not synthesised — a pointer with no document to attach it to
-// would be unreachable, which is exactly the failure the caller must see.
+// Read-modify-write when a row exists: the index carries content type,
+// authorization policy, owner and bucket alongside the pointer, and
+// MetadataStore.Save takes a whole row, so the other fields must be carried
+// through rather than blanked.
+//
+// A MISSING row is created, carrying just the id and the pointer. An earlier
+// version treated that as an error, on the reasoning that a pointer with no
+// document to attach it to is unreachable. That reasoning had the ordering
+// backwards and made a whole class of document permanently unsaveable: the room
+// writes its index row only AFTER a checkpoint save succeeds, so on a document
+// that was never pre-registered the very first save found no row, failed here,
+// and left the bytes it had just uploaded orphaned. Every retry created another
+// file and failed the same way, and the document could never be loaded back
+// because nothing recorded where its content went.
+//
+// The Alkemio deployment hides this: `server` pre-registers a row over the
+// lifecycle bus before the first connect, so a row always exists. Any document
+// opened without that pre-registration — the in-process path, the e2e suite,
+// the standalone REST create — hits it every time.
+//
+// The room overwrites this minimal row with the full one moments later, in the
+// same persist that called us.
 func (r *Resolver) Record(ctx context.Context, id backend.DocumentID, pointer string) error {
 	docID := model.DocumentID(id)
 	meta, err := r.meta.Load(ctx, docID)
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, model.ErrNotFound):
+		meta = model.Metadata{}
+	default:
 		return fmt.Errorf("loading document index before recording pointer: %w", err)
 	}
 	meta.ID = docID
