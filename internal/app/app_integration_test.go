@@ -31,25 +31,32 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
-// TestNewPostgresLocalRoundTrip boots the full service through app.New with the
-// Postgres metadata store and local-disk blob store selected, then drives a real
-// WebSocket edit + persistence + reload round-trip — covering buildMetadata's
-// postgres branch, buildBlob's local branch, blobKindFor, and New's durable-path
-// happy path end to end.
-func TestNewPostgresLocalRoundTrip(t *testing.T) {
+// TestNewPostgresRoundTrip boots the full service through app.New with the
+// Postgres metadata store selected, then drives a real WebSocket edit +
+// persistence + reload round-trip — covering buildMetadata's postgres branch,
+// buildCheckpoint, blobKindFor, and New's happy path end to end.
+//
+// SCOPE, deliberately narrowed. This test used to select the local-disk blob
+// store and describe itself as proving the durable path. That adapter was removed
+// with the BlobStore port, so the selection now resolves to the IN-PROCESS
+// checkpoint store — which survives a reconnect within one process but not a
+// restart. Left as it was, the test would still pass and still read as a
+// durability proof, which is worse than not having it: the reload below only
+// re-materializes the room in the same process. Cross-restart durability belongs
+// to the file-service store and is covered in that adapter's own package.
+func TestNewPostgresRoundTrip(t *testing.T) {
 	dsn := os.Getenv("POSTGRES_TEST_DSN")
 	if dsn == "" {
 		t.Skip("POSTGRES_TEST_DSN not set")
 	}
 
 	cfg := &config.Config{
-		Port:          0,
-		Fanout:        config.FanoutInMemory,
-		MetaStore:     config.MetaStorePostgres,
-		BlobStore:     config.BlobStoreLocal,
-		AuthMode:      config.AuthModeOpen,
-		Postgres:      config.PostgresConfig{DSN: dsn},
-		LocalBlobRoot: t.TempDir(),
+		Port:      0,
+		Fanout:    config.FanoutInMemory,
+		MetaStore: config.MetaStorePostgres,
+		BlobStore: config.BlobStoreInline,
+		AuthMode:  config.AuthModeOpen,
+		Postgres:  config.PostgresConfig{DSN: dsn},
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -59,7 +66,7 @@ func TestNewPostgresLocalRoundTrip(t *testing.T) {
 
 	application, err := New(cfg, zap.NewNop())
 	if err != nil {
-		t.Fatalf("app.New (postgres/local): %v", err)
+		t.Fatalf("app.New (postgres): %v", err)
 	}
 	t.Cleanup(application.Close)
 
@@ -70,18 +77,19 @@ func TestNewPostgresLocalRoundTrip(t *testing.T) {
 	docID := "app-int-" + time.Now().Format("150405.000")
 	a := integDial(t, wsBase, docID)
 	time.Sleep(80 * time.Millisecond)
-	a.insert("postgres-local-durable ")
+	a.insert("postgres-roundtrip ")
 
-	// Let the debounce persist to local disk + the postgres index, then close so
-	// the room idle-releases (final snapshot).
+	// Let the debounce persist to the checkpoint store + the postgres index, then
+	// close so the room idle-releases (final snapshot).
 	time.Sleep(700 * time.Millisecond)
 	a.close()
 	time.Sleep(250 * time.Millisecond)
 
-	// A fresh client rehydrates from the postgres index + local blob.
+	// A fresh client re-materializes the room from the postgres index + the stored
+	// checkpoint.
 	b := integDial(t, wsBase, docID)
-	if !integEventually(func() bool { return strings.Contains(b.text(), "postgres-local-durable") }) {
-		t.Fatalf("reload from postgres/local did not converge: %q", b.text())
+	if !integEventually(func() bool { return strings.Contains(b.text(), "postgres-roundtrip") }) {
+		t.Fatalf("reload via the postgres index did not converge: %q", b.text())
 	}
 }
 

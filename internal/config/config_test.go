@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -289,18 +290,32 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	}
 }
 
-func TestS3RequiresBucketAndRegion(t *testing.T) {
-	t.Setenv("BLOB_STORE", "s3")
-	t.Setenv("S3_BUCKET", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("BLOB_STORE=s3 without bucket: expected error")
-	}
-}
-
-func TestLocalRequiresRoot(t *testing.T) {
-	t.Setenv("BLOB_STORE", "local")
-	if _, err := Load(); err == nil {
-		t.Fatal("BLOB_STORE=local without LOCAL_BLOB_ROOT: expected error")
+// TestRemovedBlobStoreValuesFailStartupNamingTheReplacement is FR-022d.
+//
+// The s3 and local adapters were removed with the BlobStore port, but the
+// selector kept accepting their names while the checkpoint builder answered
+// anything it did not recognise with the in-process store. An operator running
+// BLOB_STORE=s3 would come up healthy, serve normally, and lose every document
+// on restart. A removed key must fail startup, and the error must name what to
+// use instead — a bare "invalid value" leaves the operator guessing at the exact
+// moment they most need the answer.
+//
+// Non-vacuity: restore either value to parseBlobStore's accepted set and this
+// fails on the missing error; drop the replacement names from the message and it
+// fails on the substring checks.
+func TestRemovedBlobStoreValuesFailStartupNamingTheReplacement(t *testing.T) {
+	for _, removed := range []string{"s3", "local"} {
+		t.Run(removed, func(t *testing.T) {
+			t.Setenv("BLOB_STORE", removed)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("BLOB_STORE=%s must fail startup: it silently falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", removed)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "file-service") || !strings.Contains(msg, "inline") {
+				t.Fatalf("the error must name the replacement values (file-service / inline), got: %s", msg)
+			}
+		})
 	}
 }
 

@@ -50,10 +50,11 @@ const (
 	BlobStoreInline BlobStoreMode = "inline"
 	// BlobStoreFileService offloads the blob to file-service.
 	BlobStoreFileService BlobStoreMode = "file-service"
-	// BlobStoreS3 offloads the blob to S3 (standalone).
-	BlobStoreS3 BlobStoreMode = "s3"
-	// BlobStoreLocal keeps the blob on local disk (standalone).
-	BlobStoreLocal BlobStoreMode = "local"
+	// blobStoreS3 and blobStoreLocal are RETIRED selector values, kept unexported
+	// and only so parseBlobStore can reject them BY NAME with a message that says
+	// what to use instead. Their adapters were removed with the BlobStore port.
+	blobStoreS3    BlobStoreMode = "s3"
+	blobStoreLocal BlobStoreMode = "local"
 )
 
 // AuthMode selects the handshake-AuthN adapter (Wave 5: AuthN is named
@@ -121,10 +122,6 @@ type Config struct {
 	Postgres PostgresConfig
 	// FileService holds the file-service blob settings (BLOB_STORE=file-service).
 	FileService FileServiceConfig
-	// S3 holds the S3 blob settings (BLOB_STORE=s3).
-	S3 S3Config
-	// LocalBlobRoot is the local blob root directory (BLOB_STORE=local).
-	LocalBlobRoot string
 	// AuthZEval holds the authzeval settings (AUTHZ_MODE=authzeval).
 	AuthZEval AuthZEvalConfig
 	// OIDC holds the direct-validation settings (AUTH_MODE=oidc): the BFF
@@ -140,7 +137,8 @@ type Config struct {
 // disables that limit; a zero cadence disables that sweep.
 type LimitsConfig struct {
 	// MaxDocBytes rejects an update growing the encoded snapshot past this size
-	// (MAX_DOC_BYTES, default 32 MiB).
+	// (MAX_DOC_BYTES, default 30 MiB — deliberately below file-service's 32 MiB
+	// rewrite-body cap; see defaultMaxDocBytes).
 	MaxDocBytes int
 	// MaxConnsPerRoom caps concurrent connections per room (MAX_CONNS_PER_ROOM,
 	// default 50). This is the global fallback; per-document refinement from a
@@ -164,6 +162,15 @@ type LimitsConfig struct {
 	// is persisted (SAVE_DEBOUNCE_MILLIS, default 500ms; 0 disables the periodic
 	// debounce so a snapshot is persisted only on idle-release/close).
 	SaveDebounceMillis int
+	// FlushFailureThreshold is how many CONSECUTIVE failed flushes a document
+	// tolerates before durability escalation tears the room down and discards the
+	// unsaved edits (FLUSH_FAILURE_THRESHOLD, default 5; 0 uses the default).
+	//
+	// It is a tolerance for TRANSIENT backend faults, not a retry budget to be
+	// maximised: every additional attempt is another window in which edits keep
+	// accumulating with nowhere durable to go. Raising it trades a longer degraded
+	// window for fewer disconnects; lowering it does the reverse.
+	FlushFailureThreshold int
 }
 
 // RedisConfig configures the redis fan-out broadcaster.
@@ -208,17 +215,6 @@ type FileServiceConfig struct {
 	// carried per document on the collaboration-fetch metadata.
 	StorageBucketID string
 	MaxUploadSize   int64
-}
-
-// S3Config configures the S3 blob backend.
-type S3Config struct {
-	Bucket          string
-	Region          string
-	Endpoint        string
-	KeyPrefix       string
-	AccessKeyID     string
-	SecretAccessKey string
-	UsePathStyle    bool
 }
 
 // AuthConfig holds the handshake auth settings common to both auth modes.
@@ -359,6 +355,7 @@ const (
 	defaultContributionWindowSec     = 60
 	defaultIdleReleaseSec            = 30  // matches service.DefaultRoomConfig().IdleTimeout
 	defaultSaveDebounceMillis        = 500 // matches service.DefaultRoomConfig().SaveDebounce
+	defaultFlushFailureThreshold     = 5   // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold
 )
 
 // loadLimitsConfig reads the Wave-3 enforcement/presence tunables, applying the
@@ -379,6 +376,7 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		{"CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec, &lc.ContributionWindowSeconds},
 		{"IDLE_RELEASE_SECONDS", defaultIdleReleaseSec, &lc.IdleReleaseSeconds},
 		{"SAVE_DEBOUNCE_MILLIS", defaultSaveDebounceMillis, &lc.SaveDebounceMillis},
+		{"FLUSH_FAILURE_THRESHOLD", defaultFlushFailureThreshold, &lc.FlushFailureThreshold},
 	} {
 		v, err := getenvInt(f.key, f.def)
 		if err != nil {
@@ -395,6 +393,7 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		"CONTRIBUTION_WINDOW_SECONDS":     lc.ContributionWindowSeconds,
 		"IDLE_RELEASE_SECONDS":            lc.IdleReleaseSeconds,
 		"SAVE_DEBOUNCE_MILLIS":            lc.SaveDebounceMillis,
+		"FLUSH_FAILURE_THRESHOLD":         lc.FlushFailureThreshold,
 	} {
 		if v < 0 {
 			return LimitsConfig{}, fmt.Errorf("%s must be >= 0 (0 disables)", name)
@@ -456,56 +455,40 @@ func loadMetaStoreConfig(cfg *Config) error {
 }
 
 func loadBlobStoreConfig(cfg *Config) error {
-	switch cfg.BlobStore {
-	case BlobStoreFileService:
-		maxUpload, err := getenvInt64("MAX_UPLOAD_SIZE", 0)
-		if err != nil {
-			return err
-		}
-		// A negative cap is a configuration error, not a disable: the fileservice
-		// Put guard is `limit > 0`, so a negative MAX_UPLOAD_SIZE silently turns the
-		// upload cap OFF (uploads of any size pass) rather than rejecting oversize
-		// snapshots. Use 0 to mean "fall back to file-service's own ceiling" — reject
-		// anything below it, consistently with loadLimitsConfig (§XV: no silent
-		// safety-limit corruption).
-		if maxUpload < 0 {
-			return fmt.Errorf("MAX_UPLOAD_SIZE must be >= 0 (0 uses file-service's default ceiling)")
-		}
-		cfg.FileService = FileServiceConfig{
-			BaseURL:         os.Getenv("FILE_SERVICE_URL"),
-			StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
-			MaxUploadSize:   maxUpload,
-		}
-		// No authorizationId is configured: snapshots are internal blobs whose
-		// access is governed by the document's own authz and the (unauthenticated)
-		// internal API, not a per-file authorization_policy row. The file-service
-		// create is sent without an authorizationId so the row's authz column is
-		// NULL — file's UNIQUE(authorizationId) permits many NULLs, so every
-		// snapshot persists (a reused fixed id would admit only one row per
-		// bucket). FILE_SERVICE_STORAGE_BUCKET_ID is the FALLBACK bucket only; the
-		// normal path uploads into the document's own bucket (per-document, from
-		// the collaboration-fetch metadata).
-		if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
-			return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
-		}
-	case BlobStoreS3:
-		cfg.S3 = S3Config{
-			Bucket:          os.Getenv("S3_BUCKET"),
-			Region:          os.Getenv("S3_REGION"),
-			Endpoint:        os.Getenv("S3_ENDPOINT"),
-			KeyPrefix:       os.Getenv("S3_KEY_PREFIX"),
-			AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
-			SecretAccessKey: os.Getenv("S3_SECRET_ACCESS_KEY"),
-			UsePathStyle:    os.Getenv("S3_USE_PATH_STYLE") == "true",
-		}
-		if cfg.S3.Bucket == "" || (cfg.S3.Region == "" && cfg.S3.Endpoint == "") {
-			return fmt.Errorf("BLOB_STORE=s3 requires S3_BUCKET and S3_REGION (or S3_ENDPOINT)")
-		}
-	case BlobStoreLocal:
-		cfg.LocalBlobRoot = os.Getenv("LOCAL_BLOB_ROOT")
-		if cfg.LocalBlobRoot == "" {
-			return fmt.Errorf("BLOB_STORE=local requires LOCAL_BLOB_ROOT")
-		}
+	// Only file-service carries adapter settings: `inline` (the in-process store)
+	// has none, and the retired values were already rejected by parseBlobStore.
+	if cfg.BlobStore != BlobStoreFileService {
+		return nil
+	}
+	maxUpload, err := getenvInt64("MAX_UPLOAD_SIZE", 0)
+	if err != nil {
+		return err
+	}
+	// A negative cap is a configuration error, not a disable: the fileservice
+	// guard is `limit > 0`, so a negative MAX_UPLOAD_SIZE silently turns the upload
+	// cap OFF (uploads of any size pass) rather than rejecting oversize snapshots.
+	// Use 0 to mean "fall back to file-service's own ceiling" — reject anything
+	// below it, consistently with loadLimitsConfig (§XV: no silent safety-limit
+	// corruption).
+	if maxUpload < 0 {
+		return fmt.Errorf("MAX_UPLOAD_SIZE must be >= 0 (0 uses file-service's default ceiling)")
+	}
+	cfg.FileService = FileServiceConfig{
+		BaseURL:         os.Getenv("FILE_SERVICE_URL"),
+		StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
+		MaxUploadSize:   maxUpload,
+	}
+	// No authorizationId is configured: snapshots are internal blobs whose access
+	// is governed by the document's own authz and the (unauthenticated) internal
+	// API, not a per-file authorization_policy row. The file-service create is sent
+	// without an authorizationId so the row's authz column is NULL — file's
+	// UNIQUE(authorizationId) permits many NULLs, so every snapshot persists (a
+	// reused fixed id would admit only one row per bucket).
+	// FILE_SERVICE_STORAGE_BUCKET_ID is the FALLBACK bucket only; the normal path
+	// uploads into the document's own bucket (per-document, from the
+	// collaboration-fetch metadata).
+	if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
+		return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
 	}
 	return nil
 }
@@ -693,10 +676,19 @@ func parseMetaStore(v string) (MetaStoreMode, error) {
 
 func parseBlobStore(v string) (BlobStoreMode, error) {
 	switch BlobStoreMode(v) {
-	case BlobStoreInline, BlobStoreFileService, BlobStoreS3, BlobStoreLocal:
+	case BlobStoreInline, BlobStoreFileService:
 		return BlobStoreMode(v), nil
+	case blobStoreS3, blobStoreLocal:
+		// FAIL, do not fall back. These adapters were removed with the BlobStore
+		// port, but the selector kept accepting their names while buildCheckpoint
+		// answered anything it did not recognise with the IN-PROCESS store. An
+		// operator running BLOB_STORE=s3 would come up healthy, serve normally, and
+		// lose every document on the next restart — exactly the silent default
+		// FR-022d exists to forbid. The error names the replacement rather than the
+		// removal, so the fix travels with the message.
+		return "", fmt.Errorf("BLOB_STORE=%s is no longer supported (the %s adapter was removed): use BLOB_STORE=file-service for the durable store, or BLOB_STORE=inline for the non-durable in-process store used by tests and local development", v, v)
 	default:
-		return "", fmt.Errorf("BLOB_STORE must be one of inline, file-service, s3, local (got %q)", v)
+		return "", fmt.Errorf("BLOB_STORE must be one of inline, file-service (got %q)", v)
 	}
 }
 

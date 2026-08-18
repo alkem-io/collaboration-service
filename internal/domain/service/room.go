@@ -418,6 +418,13 @@ const (
 	// session, and the retry usually succeeds.
 	defaultFlushFailureThreshold = 5
 
+	// flushRetryMaxShift caps the exponent on the retry backoff, and
+	// maxFlushRetryBackoff caps the result. Together they keep a long outage from
+	// either hammering the backend or stretching the retry interval so far that
+	// escalation is unreachable in practice.
+	flushRetryMaxShift   = 5
+	maxFlushRetryBackoff = 30 * time.Second
+
 	defaultMaxDocBytes             = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom         = 50
 	defaultUpdateRatePerSec        = 50
@@ -762,6 +769,13 @@ func (r *Room) run() {
 
 		case <-saveTimer.C:
 			r.persistNow()
+			// A failed flush leaves the document dirty, and the save timer is armed
+			// only on the CLEAN→DIRTY transition — so without this the room would
+			// never try again: further edits find it already dirty, the threshold is
+			// never reached, and the durability state machine stalls in `undurable`
+			// with escalation unreachable. Re-arm on backoff so the retry the state
+			// machine promises actually happens.
+			r.armRetryTimer(saveTimer)
 
 		case <-idleTimer.C:
 			if r.releaseIfEmpty() {
@@ -1559,6 +1573,30 @@ func (r *Room) armSaveTimer(saveTimer *time.Timer) {
 	}
 	stopTimer(saveTimer)
 	saveTimer.Reset(r.cfg.SaveDebounce)
+}
+
+// armRetryTimer re-arms the save timer after a flush that left the document
+// dirty, so an undurable document keeps retrying instead of waiting for an edit
+// that may never come.
+//
+// The backoff is exponential in the consecutive-failure count and capped, so a
+// backend outage does not turn into a hot retry loop against a service that is
+// already struggling — but it stays bounded well under the escalation threshold's
+// worth of attempts, so escalation remains reachable in finite time.
+//
+// It is a no-op when the flush succeeded (nothing to retry) and when debouncing
+// is disabled (SaveDebounce <= 0 means persist only on release/close, and a retry
+// timer would quietly reintroduce the periodic save the operator turned off).
+func (r *Room) armRetryTimer(saveTimer *time.Timer) {
+	if !r.dirty || r.flushFailures == 0 || r.cfg.SaveDebounce <= 0 {
+		return
+	}
+	backoff := r.cfg.SaveDebounce << min(r.flushFailures-1, flushRetryMaxShift)
+	if backoff > maxFlushRetryBackoff {
+		backoff = maxFlushRetryBackoff
+	}
+	stopTimer(saveTimer)
+	saveTimer.Reset(backoff)
 }
 
 // armIdleTimer (re)arms the idle-release timer. A non-positive IdleTimeout means

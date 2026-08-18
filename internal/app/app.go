@@ -348,10 +348,6 @@ func blobKindFor(mode config.BlobStoreMode) model.BlobStoreKind {
 	switch mode {
 	case config.BlobStoreFileService:
 		return model.BlobStoreFileService
-	case config.BlobStoreS3:
-		return model.BlobStoreS3
-	case config.BlobStoreLocal:
-		return model.BlobStoreLocal
 	default:
 		return model.BlobStoreInline
 	}
@@ -367,6 +363,10 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		MaxConnsPerRoom:  cfg.Limits.MaxConnsPerRoom,
 		UpdateRatePerSec: cfg.Limits.UpdateRatePerSec,
 		UpdateBurst:      cfg.Limits.UpdateBurst,
+		// 0 means "use the core default" rather than "escalate on the first failed
+		// flush", which a literal 0 threshold would mean — a single transient blip
+		// would then tear down a healthy room and discard its edits.
+		FlushFailureThreshold: cfg.Limits.FlushFailureThreshold,
 	}
 	roomCfg.CollaboratorInactivity = time.Duration(cfg.Limits.CollaboratorInactivitySeconds) * time.Second
 	roomCfg.ContributionWindow = time.Duration(cfg.Limits.ContributionWindowSeconds) * time.Second

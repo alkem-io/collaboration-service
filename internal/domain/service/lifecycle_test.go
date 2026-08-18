@@ -22,9 +22,18 @@ import (
 // failingStore is a CheckpointStore whose saves always error, to drive the
 // not-yet-durable control path (R7: the room keeps serving from memory and
 // reports that recent edits are not yet saved).
+//
+// Reads and deletes are delegated to ONE embedded store, deliberately. Wiring
+// the reader and the deleter to two separate instances compiles and passes this
+// test — nothing here deletes — but it models a service in which the delete
+// cascade removes state a load would never have found, so any future test
+// reaching for this double would be reasoning about a system that cannot exist.
 type failingStore struct {
-	persistence.CheckpointStore
-	CheckpointDeleter
+	*persistinprocess.Store
+}
+
+func newFailingStore() failingStore {
+	return failingStore{Store: persistinprocess.New()}
 }
 
 func (failingStore) SaveCheckpoint(context.Context, persistence.SaveCheckpointRequest) (persistence.Revision, error) {
@@ -67,7 +76,7 @@ func TestSaveErrorControlOnBlobFailure(t *testing.T) {
 	metrics := &countingMetrics{}
 	deps := Deps{
 		Metadata:   meta,
-		Checkpoint: failingStore{CheckpointStore: persistinprocess.New(), CheckpointDeleter: persistinprocess.New()},
+		Checkpoint: newFailingStore(),
 		Auth:       open,
 		AuthZ:      open,
 	}

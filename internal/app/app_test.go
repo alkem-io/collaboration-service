@@ -89,7 +89,7 @@ func TestNewFailsOnBroadcasterError(t *testing.T) {
 // Restructured from the old buildBlob tests (FR-018a): the s3 and local branches
 // are gone. They existed to serve the standalone deployment that constitution
 // v3.0.0 §III withdrew, and there is no persistence implementation for them —
-// everything that is not file-service resolves to the in-process store.
+// a selection config.Load has already accepted resolves to a usable store.
 func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
 	cfg := &config.Config{BlobStore: config.BlobStoreFileService}
 	if _, err := buildCheckpoint(cfg, metainmem.New()); err == nil {
@@ -97,18 +97,25 @@ func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
 	}
 }
 
-// TestBuildCheckpointFallsBackToInProcess asserts every non-file-service selection
-// resolves to the in-process store, which backs the test suite, the local
-// development loop and the zero-dependency smoke test (§III).
+// TestBuildCheckpointFallsBackToInProcess asserts `inline` resolves to the
+// in-process store, which backs the test suite, the local development loop and
+// the zero-dependency smoke test (§III).
+//
+// This deliberately no longer sweeps the retired `s3` and `local` values. It used
+// to, on the reasoning that "everything that is not file-service resolves to the
+// in-process store" — which described the behavior accurately and pinned it as if
+// it were desirable. It was not: the same fallback is what let BLOB_STORE=s3 come
+// up healthy on a store that loses everything at restart. The gate now lives in
+// config.Load (TestRemovedBlobStoreValuesFailStartupNamingTheReplacement), so
+// those values cannot reach this function at all, and asserting they still land
+// somewhere plausible would only re-legitimise the hole.
 func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
-	for _, mode := range []config.BlobStoreMode{config.BlobStoreInline, config.BlobStoreLocal, config.BlobStoreS3} {
-		store, err := buildCheckpoint(&config.Config{BlobStore: mode}, metainmem.New())
-		if err != nil {
-			t.Fatalf("buildCheckpoint(%v): %v", mode, err)
-		}
-		if store == nil {
-			t.Fatalf("buildCheckpoint(%v) returned no store", mode)
-		}
+	store, err := buildCheckpoint(&config.Config{BlobStore: config.BlobStoreInline}, metainmem.New())
+	if err != nil {
+		t.Fatalf("buildCheckpoint(inline): %v", err)
+	}
+	if store == nil {
+		t.Fatal("buildCheckpoint(inline) returned no store")
 	}
 }
 
@@ -122,8 +129,6 @@ func TestBlobKindForMapsEverySelection(t *testing.T) {
 		want model.BlobStoreKind
 	}{
 		{config.BlobStoreFileService, model.BlobStoreFileService},
-		{config.BlobStoreS3, model.BlobStoreS3},
-		{config.BlobStoreLocal, model.BlobStoreLocal},
 		{config.BlobStoreInline, model.BlobStoreInline},
 		{config.BlobStoreMode("unknown"), model.BlobStoreInline}, // default → inline
 	}
