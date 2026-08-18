@@ -93,23 +93,23 @@ completed flush.
 - [ ] T020 [P] [US2] Add a kill/restart durability test in `internal/domain/service/durability_crash_test.go` asserting recovery to the last completed flush across repeated cycles (SC-004)
 - [ ] T021 [P] [US2] Add a cold-load cost test in `internal/domain/service/durability_coldload_test.go` asserting cost tracks document size, not accumulated edit count (SC-012)
 - [ ] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/seed_exactly_once_test.go` asserting seeding happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
-- [ ] T023 [P] [US2] Add a degraded-durability test in `internal/domain/service/durability_degraded_test.go`: with the backend failing, assert the session keeps serving, retries, and surfaces the not-yet-durable state **via metrics before anyone is disconnected** (SC-013)
-- [ ] T024 [P] [US2] Add an escalation test in `internal/domain/service/durability_escalation_test.go` asserting a distinct counter, a log entry naming document and undurable duration, and a non-generic disconnect reason (SC-016, FR-028)
+- [X] T023 [P] [US2] Add a degraded-durability test in `internal/domain/service/durability_degraded_test.go`: with the backend failing, assert the session keeps serving, retries, and surfaces the not-yet-durable state **via metrics before anyone is disconnected** (SC-013)
+- [X] T024 [P] [US2] Add an escalation test in `internal/domain/service/durability_escalation_test.go` asserting a distinct counter, a log entry naming document and undurable duration, and a non-generic disconnect reason (SC-016, FR-028)
 
 ### Implementation for User Story 2
 
 - [X] T025 [US2] Implement the checkpoint-only `persistence.Store` over file-service in `internal/adapter/outbound/persistence/fileservice/` — `Appender` + `Loader` + `FenceMode`, deliberately no `Compactor` (D1, contracts/persistence-store.md)
 - [X] T026 [US2] Make the store in `internal/adapter/outbound/persistence/fileservice/` constructible in **both** fence modes, threading the epoch through the write path though it is always zero in deployment (FR-008a, D6)
 - [X] T027 [P] [US2] Implement the in-process `persistence.Store` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
-- [ ] T028 [US2] Implement flush batching **above** the store in a new `internal/domain/service/flush.go`: merge a window, call `Append` once, so `Append` never overstates durability (D2, FR-007a)
-- [ ] T029 [US2] Make the flush interval operator-configurable in `internal/config/config.go` with a documented default, armed only when the document changed; shutdown flush unconditional (FR-010)
-- [ ] T030 [US2] Implement the durability state machine (clean → dirty → undurable → escalated) in `internal/domain/service/flush.go` with retry/backoff and a configurable consecutive-failure threshold (FR-013, D10)
-- [ ] T031 [US2] Implement escalation in `internal/domain/service/flush.go` and the reason code in `internal/domain/model/control.go`: invalidate, signal holders, disconnect with a reason meaning *recent edits could not be saved*; tear down even when the backend is unreachable (FR-013, FR-028). **Both halves of FR-027**: notify collaborators when their edits become not-yet-durable **and again when durability is restored** — a one-way notification leaves clients believing their work is still at risk after recovery
-- [ ] T032 [US2] Add the observability signals in `internal/adapter/inbound/http/metrics.go` — flush outcome, consecutive-failure count, escalation events, generation invalidation, time-in-undurable — as **metrics**, not only logs (FR-026)
-- [ ] T069 [US2] Inventory every persistence-related signal the service emits today (metrics and logs) in `internal/adapter/inbound/http/metrics.go`, and assert each has a post-rebuild equivalent — a signal silently lost in the rebuild is invisible until an alert fails to fire during an incident (FR-025, SC-014)
-- [ ] T033 [US2] Detect and error in `internal/adapter/outbound/persistence/fileservice/` on a recovery view that presents partial history as complete (FR-014)
-- [ ] T034 [US2] Delete `internal/adapter/outbound/blobstore/` and the `BlobStore` port from `internal/domain/port/ports.go` — removed, not wrapped (FR-007, SC-008a)
-- [ ] T035 [US2] Document the write-volume envelope (`document size ÷ flush interval × active documents`) beside the interval setting, with the default justified against `MAX_DOC_BYTES` (FR-010a, SC-020)
+- [X] T028 [US2] Implement flush batching **above** the store in a new `internal/domain/service/flush.go`: merge a window, call `Append` once, so `Append` never overstates durability (D2, FR-007a)
+- [X] T029 [US2] Make the flush interval operator-configurable in `internal/config/config.go` with a documented default, armed only when the document changed; shutdown flush unconditional (FR-010)
+- [X] T030 [US2] Implement the durability state machine (clean → dirty → undurable → escalated) in `internal/domain/service/flush.go` with retry/backoff and a configurable consecutive-failure threshold (FR-013, D10)
+- [X] T031 [US2] Implement escalation in `internal/domain/service/flush.go` and the reason code in `internal/domain/model/control.go`: invalidate, signal holders, disconnect with a reason meaning *recent edits could not be saved*; tear down even when the backend is unreachable (FR-013, FR-028). **Both halves of FR-027**: notify collaborators when their edits become not-yet-durable **and again when durability is restored** — a one-way notification leaves clients believing their work is still at risk after recovery
+- [X] T032 [US2] Add the observability signals in `internal/adapter/inbound/http/metrics.go` — flush outcome, consecutive-failure count, escalation events, generation invalidation, time-in-undurable — as **metrics**, not only logs (FR-026)
+- [X] T069 [US2] Inventory every persistence-related signal the service emits today (metrics and logs) in `internal/adapter/inbound/http/metrics.go`, and assert each has a post-rebuild equivalent — a signal silently lost in the rebuild is invisible until an alert fails to fire during an incident (FR-025, SC-014)
+- [X] T033 [US2] Detect and error in `internal/adapter/outbound/persistence/fileservice/` on a recovery view that presents partial history as complete (FR-014)
+- [X] T034 [US2] Delete `internal/adapter/outbound/blobstore/` and the `BlobStore` port from `internal/domain/port/ports.go` — removed, not wrapped (FR-007, SC-008a)
+- [X] T035 [US2] Document the write-volume envelope (`document size ÷ flush interval × active documents`) beside the interval setting, with the default justified against `MAX_DOC_BYTES` (FR-010a, SC-020)
 
 **Checkpoint**: durability tests green; no `BlobStore` remains; degraded state visible in metrics before disconnects.
 
@@ -153,7 +153,7 @@ by this repo's tests.
 - [X] T045 [P] [US4] Wire `conformance.Persistence` against both store implementations (SC-006)
 - [X] T046 [US4] Wire `conformance.PersistenceFencing` against a **fenced** instance, though no deployment enables fencing (FR-008a, SC-017)
 - [X] T047 [P] [US4] Wire `conformance.Memory` against the registry usage (SC-006)
-- [ ] T048 [US4] Record which suites apply and **why each non-applicable suite is not run** — notably compaction, since the store implements no `Compactor` (FR-008b)
+- [X] T048 [US4] Record which suites apply and **why each non-applicable suite is not run** — notably compaction, since the store implements no `Compactor` (FR-008b)
 - [X] T049 [P] [US4] Assert in `internal/app/app.go` that the core's shipped single-process defaults are used **as shipped** in the in-process path, with no bespoke reimplementation (§X, §XI)
 
 **Checkpoint**: all applicable conformance suites green in CI; non-applicable ones documented as decisions.
