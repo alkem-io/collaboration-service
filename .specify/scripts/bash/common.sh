@@ -328,3 +328,20 @@ except Exception:
     return 1
 }
 
+# resolve_template_content resolves a template through the same override stack as
+# resolve_template and prints its CONTENT rather than its path. Callers
+# (resolve-template.sh, setup-tasks.sh) expect this name; without it they fail with
+# "resolve_template_content: command not found" — a version skew between the shipped
+# scripts and this file.
+#
+# Returns 1 when the template cannot be resolved or cannot be read, so callers can
+# distinguish "not found" from "found but empty".
+resolve_template_content() {
+    local template_name="$1"
+    local repo_root="$2"
+    local path
+    path=$(resolve_template "$template_name" "$repo_root") || return 1
+    [ -f "$path" ] || return 1
+    cat "$path"
+}
+
