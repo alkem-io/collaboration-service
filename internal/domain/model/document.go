@@ -36,10 +36,14 @@ const (
 	// BlobStoreFileService offloads the blob to the existing file-service;
 	// the content pointer is a file-service object id.
 	BlobStoreFileService BlobStoreKind = "file-service"
-	// BlobStoreS3 offloads the blob to an S3 bucket (standalone).
-	BlobStoreS3 BlobStoreKind = "s3"
-	// BlobStoreLocal keeps the blob on the local filesystem (standalone).
-	BlobStoreLocal BlobStoreKind = "local"
+
+	// There is deliberately no s3 or local kind. Both existed to serve the
+	// standalone deployment that constitution v3.0.0 withdrew, their adapters were
+	// removed with the BlobStore port, and no code can read a blob from either.
+	// Keeping them as accepted wire values would mean taking a metadata row that
+	// says "this document's content is in S3", accepting it, and then reading from
+	// whichever store this process happens to be configured with — the wrong
+	// backend, silently. Rejecting the row is the truthful answer.
 )
 
 // DocumentID is the single id namespace shared by memos and whiteboards.

@@ -139,7 +139,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		ContentType:           "memo",
 		Version:               2,
 		ContentPointer:        "ptr",
-		BlobStore:             "s3",
+		BlobStore:             "file-service",
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
 		Content:               seed,
@@ -159,7 +159,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	}
 	if meta.ID != "doc-9" || meta.ContentType != model.ContentTypeMemo ||
 		meta.Version != 2 || meta.ContentPointer != "ptr" ||
-		meta.BlobStore != model.BlobStoreS3 || meta.AuthorizationPolicyID != "pol-1" {
+		meta.BlobStore != model.BlobStoreFileService || meta.AuthorizationPolicyID != "pol-1" {
 		t.Errorf("mapped metadata = %+v", meta)
 	}
 	// The document's own storage bucket must be carried through from the
@@ -187,15 +187,26 @@ func TestLoadRejectsUnknownContentType(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsUnknownBlobStore asserts a corrupt server reply carrying an
-// unsupported blobStore is rejected at the adapter boundary.
+// TestLoadRejectsUnknownBlobStore asserts a server reply carrying a blobStore
+// this service cannot read is rejected at the adapter boundary.
+//
+// "s3" and "local" are in the table deliberately. Both were once accepted values
+// here, and their adapters are gone — so accepting such a row would mean taking a
+// metadata row that says "this document's content is in S3", and then reading it
+// from whichever store this process happens to be configured with. That is the
+// wrong backend, silently, on a path where being wrong means serving or
+// overwriting the wrong document content. Rejecting is the truthful answer.
 func TestLoadRejectsUnknownBlobStore(t *testing.T) {
-	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
-		Found: true, ContentType: "memo", BlobStore: "gdrive",
-	}}}
-	store := newWithRPC(f)
-	if _, err := store.Load(context.Background(), "doc-x"); err == nil {
-		t.Fatal("Load with unknown blobStore: expected error, got nil")
+	for _, kind := range []string{"gdrive", "s3", "local"} {
+		t.Run(kind, func(t *testing.T) {
+			f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
+				Found: true, ContentType: "memo", BlobStore: kind,
+			}}}
+			store := newWithRPC(f)
+			if _, err := store.Load(context.Background(), "doc-x"); err == nil {
+				t.Fatalf("Load with blobStore %q: expected an error — this service cannot read that backend, so serving the document would read from the wrong one", kind)
+			}
+		})
 	}
 }
 

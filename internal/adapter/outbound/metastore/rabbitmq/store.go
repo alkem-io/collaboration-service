@@ -58,7 +58,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	}
 	blobStore := model.BlobStoreKind(reply.BlobStore)
 	switch blobStore {
-	case "", model.BlobStoreInline, model.BlobStoreFileService, model.BlobStoreS3, model.BlobStoreLocal:
+	case "", model.BlobStoreInline, model.BlobStoreFileService:
 	default:
 		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown blobStore %q", reply.BlobStore)
 	}

@@ -121,7 +121,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		ID:                    "doc-2",
 		ContentType:           model.ContentTypeMemo,
 		ContentPointer:        "ptr",
-		BlobStore:             model.BlobStoreS3,
+		BlobStore:             model.BlobStoreFileService,
 		AuthorizationPolicyID: "pol-9",
 		OwnerRef:              "owner",
 	})
@@ -133,7 +133,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		t.Errorf("unexpected upsert SQL: %s", q.lastExec)
 	}
 	// id, content_type, content_pointer, blob_store, authorization_policy_id, owner_ref
-	want := []any{"doc-2", "memo", "ptr", "s3", "pol-9", "owner"}
+	want := []any{"doc-2", "memo", "ptr", "file-service", "pol-9", "owner"}
 	if len(q.lastArgs) != len(want) {
 		t.Fatalf("save args = %v, want %v", q.lastArgs, want)
 	}
