@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"

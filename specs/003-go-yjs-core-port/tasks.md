@@ -29,7 +29,7 @@ Existing hexagonal layout (see plan.md Structure Decision). Domain core in
 
 **Purpose**: dependency and scaffolding, nothing behavioural.
 
-- [ ] T001 Add `github.com/antst/go-yjs` pinned to an explicit version in `go.mod`, and remove the `replace` directive redirecting `github.com/skyterra/y-crdt` (§XIV, FR-024)
+- [X] T001 Add `github.com/antst/go-yjs` pinned to an explicit version in `go.mod`, and remove the `replace` directive redirecting `github.com/skyterra/y-crdt` (§XIV, FR-024)
 - [ ] T002 [P] Create the adapter package skeletons `internal/adapter/outbound/persistence/` and `internal/adapter/outbound/hub/` per plan.md Structure Decision
 - [ ] T003 [P] Wire the core's `backend/conformance` suites into the CI workflow so they run per package
 - [ ] T004 Record the pinned version and the oracle-reverification rule in `specs/003-go-yjs-core-port/research.md` sequencing notes
@@ -41,14 +41,14 @@ Existing hexagonal layout (see plan.md Structure Decision). Domain core in
 **Purpose**: the core swap and document lifetime. **No user story can proceed until this
 phase completes** — every story needs documents that exist on the new core.
 
-- [ ] T005 Re-point the CRDT core across the four non-test domain files: `internal/domain/service/{room.go,sync.go,awareness_wire.go,convention.go}` — imports and types only, no behavioural change yet (FR-001)
-- [ ] T006 Re-point the CRDT core across the test/e2e surface: `internal/domain/service/*_test.go`, `internal/adapter/inbound/ws/handler_test.go`, `internal/app/app_integration_test.go`, `test/e2e/*.go`
+- [X] T005 Re-point the CRDT core across the four non-test domain files: `internal/domain/service/{room.go,sync.go,awareness_wire.go,convention.go}` — imports and types only, no behavioural change yet (FR-001)
+- [X] T006 Re-point the CRDT core across the test/e2e surface: `internal/domain/service/*_test.go`, `internal/adapter/inbound/ws/handler_test.go`, `internal/app/app_integration_test.go`, `test/e2e/*.go`
 - [ ] T007 Adopt `memory.Registry` as the owner of document identity and lifetime in `internal/domain/service/manager.go`, replacing the hand-built registry and singleflight acquire (FR-005, D3)
 - [ ] T008 Implement the registry open function in `internal/domain/service/manager.go`: load from the store, else seed from the metadata-delivered content; a session must never observe a partially initialised document (FR-004a)
 - [ ] T009 Rebuild `internal/domain/service/room.go` to hold a `memory.Handle` and observe its invalidation signal, ceasing to own document identity or teardown ordering (D3)
 - [ ] T010 Retire the parts of `internal/domain/service/lifecycle_state.go` that duplicate registry semantics; keep only what the registry does not absorb (D3)
 - [ ] T011 Keep the `002` idle-release policy driving `Evict` in `internal/domain/service/room.go` — the registry starts no goroutines and has no eviction policy of its own (contracts/registry-session.md)
-- [ ] T012 Delete `y-crdt` from the module graph and verify zero references remain (`grep -rn "y-crdt" --include="*.go" .`, `go list -m all`) (SC-008)
+- [X] T012 Delete `y-crdt` from the module graph and verify zero references remain (`grep -rn "y-crdt" --include="*.go" .`, `go list -m all`) (SC-008)
 
 **Checkpoint**: `go build ./...` clean, `go test -race ./...` green, no `y-crdt` references.
 
@@ -70,11 +70,11 @@ JS-interop suite; assert convergence for both document conventions.
 
 ### Implementation for User Story 1
 
-- [ ] T015 [US1] Rebuild `internal/domain/service/sync.go` on the core's `protocol.SyncHandler`, registering a sync-type override so the byte budget and view-only write rejection still run **before** anything is applied (FR-009b, D4)
-- [ ] T016 [US1] Rebuild `internal/domain/service/awareness_wire.go` on the core's awareness dispatch, keeping the custom ephemeral channel distinct from y-awareness (FR-009b)
-- [ ] T017 [US1] Use allocation-free frame inspection for the byte-budget pre-check in `internal/domain/service/limits.go`, so the check works from frame length without decoding (D4)
-- [ ] T018 [US1] Delete the parallel sync state machine left behind in `internal/domain/service/`, retaining only policy (FR-007, §VIII)
-- [ ] T019 [US1] Verify both conventions in `internal/domain/service/convention.go`: memo `Y.XmlFragment` and whiteboard id-keyed `Y.Map` per-property merge (FR-003)
+- [X] T015 [US1] Rebuild `internal/domain/service/sync.go` on the core's `protocol.SyncHandler`, registering a sync-type override so the byte budget and view-only write rejection still run **before** anything is applied (FR-009b, D4)
+- [X] T016 [US1] Rebuild `internal/domain/service/awareness_wire.go` on the core's awareness dispatch, keeping the custom ephemeral channel distinct from y-awareness (FR-009b)
+- [X] T017 [US1] Use allocation-free frame inspection for the byte-budget pre-check in `internal/domain/service/limits.go`, so the check works from frame length without decoding (D4)
+- [X] T018 [US1] Delete the parallel sync state machine left behind in `internal/domain/service/`, retaining only policy (FR-007, §VIII)
+- [X] T019 [US1] Verify both conventions in `internal/domain/service/convention.go`: memo `Y.XmlFragment` and whiteboard id-keyed `Y.Map` per-property merge (FR-003)
 
 **Checkpoint**: e2e single-pod, two-pod, and JS-interop suites green; a malformed frame kills only its own connection.
 

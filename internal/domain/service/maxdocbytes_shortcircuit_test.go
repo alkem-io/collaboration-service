@@ -3,7 +3,7 @@ package service
 import (
 	"testing"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 )
 
 // TestBudgetCheapSkipPreservesVerdict asserts the cheap O(1) short-circuit in

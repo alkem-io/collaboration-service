@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 )
 
 // TestSinglePodMemoConvergence drives two real WebSocket clients editing a memo

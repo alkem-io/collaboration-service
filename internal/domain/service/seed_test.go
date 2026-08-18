@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -161,7 +161,7 @@ func TestRoomSeedsFromStoredContentOnFirstOpen(t *testing.T) {
 				t.Fatalf("get promoted snapshot: %v", err)
 			}
 			reloaded := newRoomDoc("verify")
-			ycrdt.ApplyUpdateV2(reloaded, snap, nil)
+			_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 			tc.assertBlob(t, reloaded)
 		})
 	}
@@ -302,21 +302,21 @@ func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
 	}
 	// The whiteboard convention roots exist; the memo "default" fragment does NOT.
 	for _, root := range []string{"elements", "files", "appState"} {
-		if _, ok := room.doc.Share[root]; !ok {
-			t.Fatalf("whiteboard root %q was not materialized; doc.Share has %v", root, shareKeys(room.doc))
+		if !room.doc.ToJson().Has(root) {
+			t.Fatalf("whiteboard root %q was not materialized; roots are %v", root, shareKeys(room.doc))
 		}
 	}
-	if _, ok := room.doc.Share["default"]; ok {
-		t.Fatalf("the stale memo convention root \"default\" was materialized for a whiteboard doc; doc.Share has %v", shareKeys(room.doc))
+	if room.doc.ToJson().Has("default") {
+		t.Fatalf("the stale memo convention root \"default\" was materialized for a whiteboard doc; roots are %v", shareKeys(room.doc))
 	}
 }
 
 // shareKeys lists the root share names materialized on a doc, for assertion
 // messages.
+// Doc.Share is unexported in go-yjs; ToJson ranges over EVERY share root
+// (including ones materialized but still empty), so its keys are an exact
+// exported equivalent of the old Share key set — the assertion is preserved,
+// not weakened (FR-018a).
 func shareKeys(doc *ycrdt.Doc) []string {
-	keys := make([]string, 0, len(doc.Share))
-	for k := range doc.Share {
-		keys = append(keys, k)
-	}
-	return keys
+	return doc.ToJson().Keys()
 }

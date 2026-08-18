@@ -10,7 +10,7 @@ import (
 
 // TestInvPersistRoundtrip — INV-PERSIST-ROUNDTRIP (spec 002 FR-016). The persistence
 // layer round-trips byte-identically and loses no metadata field, independent of CRDT
-// merge semantics (a y-crdt-independent server property). Green now; pins behaviour the
+// merge semantics (a CRDT-core-independent server property). Green now; pins behaviour the
 // redesign must preserve.
 func TestInvPersistRoundtrip(t *testing.T) {
 	ctx := context.Background()

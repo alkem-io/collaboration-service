@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -454,7 +454,11 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// nil) — and a fresh room then reports zero awareness states until a real client
 	// announces one.
 	awareness := ycrdt.NewAwareness(doc)
-	awareness.SetLocalState(ycrdt.Object{})
+	if err := awareness.SetLocalState(ycrdt.Object{}); err != nil {
+		// The core surfaces this now; a failure here means the server would carry a
+		// phantom local awareness entry, so it is worth seeing rather than dropping.
+		logger.Warn("clearing server local awareness state failed", zap.Error(err))
+	}
 	// The room-lifetime context: every backend call on the run loop derives from
 	// it, and it is cancelled on release (finish) so a hung call unblocks at
 	// teardown. It is decoupled from any request lifetime (the caller already
@@ -603,7 +607,12 @@ func (r *Room) loadSnapshot(ctx context.Context) error {
 	// rehydration is local state, not a new edit to broadcast. A live snapshot
 	// is authoritative: any SeedContent on the row is a stale create-time bootstrap
 	// and is deliberately ignored (re-applying it would resurrect old content).
-	ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0, peer: true})
+	if err := ycrdt.ApplyUpdateV2(r.doc, data, updateOrigin{src: 0, peer: true}); err != nil {
+		// A stored snapshot that will not decode is corrupt. Surface it instead of
+		// opening the document on a half-applied state — the caller treats a load
+		// error as "do not serve this document from this data" (FR-014).
+		return fmt.Errorf("applying stored snapshot: %w", err)
+	}
 	return nil
 }
 
@@ -621,7 +630,14 @@ func (r *Room) seedFromContent(content []byte) {
 	if len(content) == 0 {
 		return
 	}
-	ycrdt.ApplyUpdateV2(r.doc, content, updateOrigin{src: 0, peer: true})
+	if err := ycrdt.ApplyUpdateV2(r.doc, content, updateOrigin{src: 0, peer: true}); err != nil {
+		// Do NOT mark dirty on a failed seed: promoting it would persist an EMPTY
+		// document as this document's first real snapshot, destroying the content the
+		// seed was carrying. Leave the room clean so the stored content is retried.
+		r.logger.Error("seeding room from stored content failed; leaving room unseeded",
+			zap.String("doc", string(r.id)), zap.Error(err))
+		return
+	}
 	// Mark dirty so the seed is persisted as the document's first real snapshot.
 	// Unlike a loaded snapshot (which already has a ContentPointer and stays
 	// clean), the seed has no blob yet; promoting it on first save means
@@ -951,24 +967,19 @@ func (r *Room) evictAwareness(m roomMember) {
 // y-awareness client id seen over a room's lifetime, bounded by that cardinality
 // within a single room session and fully reclaimed when the room is released and
 // GC'd. A periodic Meta sweep for clients absent beyond a TTL is the y-protocols
-// "outdated timeout" mechanism (commented out in the vendored y-crdt awareness.go)
-// and belongs there, not as a room-level reimplementation — tracked as a y-crdt
-// follow-up, not a defect of this layer.
+// "outdated timeout" mechanism. go-yjs judges expiry ON ACCESS in GetStates
+// (a remote client past OutdatedTimeout is simply not returned as present), so
+// this is the core's concern rather than a room-level reimplementation.
 func (r *Room) forcedAwarenessRemoval(clientID ycrdt.Number) []byte {
-	meta := r.awareness.Meta[clientID]
-	clock := 0
-	if !meta.IsNil() {
-		if c, ok := meta.Get("clock"); ok {
-			if cn, ok := c.(ycrdt.Number); ok {
-				clock = cn
-			}
-		}
-	}
-	delete(r.awareness.States, clientID)
-	newMeta := ycrdt.NewObject()
-	newMeta.Set("clock", clock+1)
-	newMeta.Set("lastUpdated", ycrdt.GetUnixTime())
-	r.awareness.Meta[clientID] = newMeta
+	// RemoveAwarenessStates drops the client from the active set and is the core's
+	// own removal path; the encode that follows carries a null state at the client's
+	// current clock. A receiver accepts that as a removal — its merge rule admits an
+	// equal-clock null state when it still holds one (currClock == clock && state
+	// nil && exists) — so no manual clock bump is needed. This previously reached
+	// into Awareness.Meta/States directly; those are unexported in go-yjs, and the
+	// native call expresses the same intent without a local re-implementation
+	// (FR-007).
+	ycrdt.RemoveAwarenessStates(r.awareness, []ycrdt.Number{clientID}, updateOrigin{src: 0})
 	update := ycrdt.EncodeAwarenessUpdate(r.awareness, []ycrdt.Number{clientID}, nil)
 	return encodeAwarenessFrame(update)
 }
@@ -1044,7 +1055,7 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		// leave) and apply it to the room's awareness (so a late joiner gets a
 		// snapshot). Fan the raw frame out to local members verbatim and publish
 		// it to peer pods on the awareness:{id} channel. Never persisted (FR-008).
-		body, ok := decodeAwarenessBody(payload)
+		body, ok := awarenessBody(frame)
 		if !ok {
 			r.logger.Warn("dropping malformed awareness frame")
 			return false
@@ -1144,7 +1155,13 @@ func (r *Room) applyUpdate(update []byte, origin updateOrigin) bool {
 		r.logger.Warn("peer update would exceed MaxDocBytes; applied to avoid cross-pod divergence (check for MaxDocBytes config skew)",
 			zap.String("doc", string(r.id)))
 	}
-	ycrdt.ApplyUpdate(r.doc, update, origin)
+	if err := ycrdt.ApplyUpdate(r.doc, update, origin); err != nil {
+		// The size verdict is unchanged (this bool reports the budget, not decode
+		// validity) but a malformed update reaching the chokepoint is worth seeing:
+		// dispatchSync rejects most of these earlier, so one arriving here means a
+		// path bypassed inspection.
+		r.logger.Warn("applying update failed", zap.String("doc", string(r.id)), zap.Error(err))
+	}
 	return true
 }
 
@@ -1153,15 +1170,16 @@ func (r *Room) applyUpdate(update []byte, origin updateOrigin) bool {
 // the remote cursor) and fanned to local members; a custom ephemeral frame is
 // fanned to local members. Neither is persisted nor re-published.
 func (r *Room) applyPeerEphemeral(frame []byte) {
-	in := bytes.NewBuffer(frame)
-	msgType, payload, err := protocol.ReadMessage(in)
+	// Classify without allocating a reader: InspectMessage parses the outer type
+	// over the caller-owned frame, and awarenessBody re-derives the body below.
+	info, err := protocol.InspectMessage(frame)
 	if err != nil {
 		r.logger.Warn("dropping malformed peer frame", zap.Error(err))
 		return
 	}
-	switch model.WireMessageType(msgType) {
+	switch model.WireMessageType(info.Type) {
 	case model.WireAwareness:
-		body, ok := decodeAwarenessBody(payload)
+		body, ok := awarenessBody(frame)
 		if !ok {
 			r.logger.Warn("dropping malformed peer awareness frame")
 			return
@@ -1287,8 +1305,19 @@ func (r *Room) applyWouldExceedMaxDocBytes(update []byte) bool {
 	// Refresh the cached size from the authoritative encode we just paid for, so the
 	// next cheap skip is measured against the true current size, not a stale one.
 	r.docBytes = len(curr)
-	ycrdt.ApplyUpdateV2(scratch, curr, nil)
-	ycrdt.ApplyUpdate(scratch, update, nil)
+	// A scratch-measurement failure is a SERVER fault, not client misbehaviour.
+	// Returning true here would reject the update and disconnect the sender as an
+	// offender, punishing a client for our own error — so these fail OPEN and log
+	// loudly, matching the encode-error path below (§VIII). The next exact check
+	// re-measures, and the failure is visible in the persistence signals (FR-026).
+	if err := ycrdt.ApplyUpdateV2(scratch, curr, nil); err != nil {
+		r.logger.Error("budget check: seeding scratch doc failed", zap.String("doc", string(r.id)), zap.Error(err))
+		return false
+	}
+	if err := ycrdt.ApplyUpdate(scratch, update, nil); err != nil {
+		r.logger.Error("budget check: applying candidate update to scratch failed", zap.String("doc", string(r.id)), zap.Error(err))
+		return false
+	}
 	encoded, err := ycrdt.EncodeStateAsUpdateV2(scratch, nil)
 	if err != nil {
 		r.logger.Error("budget check: encoding scratch doc failed", zap.String("doc", string(r.id)), zap.Error(err))

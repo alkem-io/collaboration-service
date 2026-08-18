@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -46,7 +46,7 @@ func TestDispatchSyncStep1ProducesDelta(t *testing.T) {
 	insertText(room.doc, "server-only ")
 
 	// A peer with an empty doc asks for what it is missing.
-	peer := ycrdt.NewDoc("unit", true, ycrdt.DefaultGCFilter, nil, false)
+	peer := ycrdt.NewDoc("unit")
 	step1 := protocol.EncodeSyncStep1(peer)
 
 	var reply bytes.Buffer
@@ -75,7 +75,7 @@ func TestDispatchSyncUpdateAppliesToServer(t *testing.T) {
 	room := newBareRoom(t)
 
 	// Build an update on a peer doc and frame it as a sync Update.
-	peer := ycrdt.NewDoc("unit", true, ycrdt.DefaultGCFilter, nil, false)
+	peer := ycrdt.NewDoc("unit")
 	insertText(peer, "from-peer ")
 	update, err := ycrdt.EncodeStateAsUpdate(peer, nil)
 	if err != nil {
@@ -106,13 +106,13 @@ func TestOnDocUpdateSkipsOriginator(t *testing.T) {
 	// Apply an update tagged with connection 1's origin; the observer must fan
 	// it to connection 2 only.
 	room.doc.On("update", ycrdt.NewObserverHandler(room.onDocUpdate))
-	peer := ycrdt.NewDoc("unit", true, ycrdt.DefaultGCFilter, nil, false)
+	peer := ycrdt.NewDoc("unit")
 	insertText(peer, "x ")
 	peerUpdate, err := ycrdt.EncodeStateAsUpdate(peer, nil)
 	if err != nil {
 		t.Fatalf("encode peer state: %v", err)
 	}
-	ycrdt.ApplyUpdate(room.doc, peerUpdate, updateOrigin{src: 1})
+	_ = ycrdt.ApplyUpdate(room.doc, peerUpdate, updateOrigin{src: 1})
 
 	if originator.count() != 0 {
 		t.Errorf("update echoed back to originator (%d frames)", originator.count())

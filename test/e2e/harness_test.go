@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"github.com/coder/websocket"
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/app"
@@ -147,7 +147,7 @@ func dialWithDialOptions(t *testing.T, base, documentID, contentType string, opt
 		_ = resp.Body.Close()
 	}
 
-	doc := ycrdt.NewDoc(documentID, true, ycrdt.DefaultGCFilter, nil, false)
+	doc := ycrdt.NewDoc(documentID)
 	c := &wsClient{
 		t:         t,
 		conn:      conn,
@@ -237,7 +237,7 @@ func (c *wsClient) dispatch(ctx context.Context, frame []byte) {
 func (c *wsClient) insertMemo(s string) {
 	c.lock()
 	defer c.unlock()
-	frag := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
+	frag := c.doc.GetXmlFragment("default")
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -247,14 +247,14 @@ func (c *wsClient) insertMemo(s string) {
 func (c *wsClient) memoText() string {
 	c.lock()
 	defer c.unlock()
-	return c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment).ToString()
+	return c.doc.GetXmlFragment("default").ToString()
 }
 
 // addElement sets an id-keyed element on the whiteboard's "elements" Y.Map.
 func (c *wsClient) addElement(id string, x float64) {
 	c.lock()
 	defer c.unlock()
-	elements := c.doc.GetMap("elements").(*ycrdt.YMap)
+	elements := c.doc.GetMap("elements")
 	el := ycrdt.NewYMap(nil)
 	elements.Set(id, el)
 	el.Set("x", x)
@@ -264,7 +264,7 @@ func (c *wsClient) addElement(id string, x float64) {
 func (c *wsClient) hasElement(id string) bool {
 	c.lock()
 	defer c.unlock()
-	return c.doc.GetMap("elements").(*ycrdt.YMap).Has(id)
+	return c.doc.GetMap("elements").Has(id)
 }
 
 // setAwareness sets the client's local awareness state and broadcasts it framed

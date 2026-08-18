@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -281,7 +281,7 @@ func dialClient(t *testing.T, base, docID string, content model.ContentType) *ws
 	}
 	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
 
-	doc := ycrdt.NewDoc(docID, true, ycrdt.DefaultGCFilter, nil, false)
+	doc := ycrdt.NewDoc(docID)
 	c := &wsTestClient{t: t, conn: conn, doc: doc, handler: protocol.NewSyncHandler(doc)}
 
 	// Forward locally-originated edits to the server as framed sync Updates. The
@@ -346,13 +346,13 @@ func (c *wsTestClient) run(ctx context.Context) {
 func (c *wsTestClient) text() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment).ToString()
+	return c.doc.GetXmlFragment("default").ToString()
 }
 
 func (c *wsTestClient) insert(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	f := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
+	f := c.doc.GetXmlFragment("default")
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
 	// Insert with the nil Object (IsNil) — no explicit formatting attributes,
@@ -363,7 +363,7 @@ func (c *wsTestClient) insert(s string) {
 func (c *wsTestClient) addElement(id string, x float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	elements := c.doc.GetMap("elements").(*ycrdt.YMap)
+	elements := c.doc.GetMap("elements")
 	el := ycrdt.NewYMap(nil)
 	elements.Set(id, el)
 	el.Set("x", x)
@@ -372,7 +372,7 @@ func (c *wsTestClient) addElement(id string, x float64) {
 func (c *wsTestClient) hasElement(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.doc.GetMap("elements").(*ycrdt.YMap).Has(id)
+	return c.doc.GetMap("elements").Has(id)
 }
 
 // TestJoinCloseStatusMapsRefusalToWSCloseCode asserts each refused-join error

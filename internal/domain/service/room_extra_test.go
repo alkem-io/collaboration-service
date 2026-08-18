@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"

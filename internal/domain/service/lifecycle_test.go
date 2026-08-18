@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	blobinline "github.com/alkem-io/collaboration-service/internal/adapter/outbound/blobstore/inline"
@@ -131,8 +131,8 @@ func TestManagerCloseReleasesRooms(t *testing.T) {
 		return err == nil
 	})
 	snap, _ := deps.blob.Get(context.Background(), "close-me")
-	reloaded := ycrdt.NewDoc("guid", true, ycrdt.DefaultGCFilter, nil, false)
-	ycrdt.ApplyUpdateV2(reloaded, snap, nil)
+	reloaded := ycrdt.NewDoc("guid")
+	_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 	if !contains(xmlText(reloaded), "kept") {
 		t.Fatalf("close-time snapshot missing content: %q", xmlText(reloaded))
 	}

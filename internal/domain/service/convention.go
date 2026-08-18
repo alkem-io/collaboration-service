@@ -3,16 +3,16 @@ package service
 import (
 	"errors"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
 // newRoomDoc constructs the authoritative, garbage-collected Y.Doc that backs a
 // room. The collaboration service holds plaintext docs (FR-021); GC is enabled
-// (the configurable GC policy is FR-025, refined in the y-crdt fork).
+// (the configurable GC policy is FR-025; go-yjs enables GC by default, matching the yjs Doc constructor).
 func newRoomDoc(guid string) *ycrdt.Doc {
-	return ycrdt.NewDoc(guid, true, ycrdt.DefaultGCFilter, nil, false)
+	return ycrdt.NewDoc(guid)
 }
 
 // applyConvention materializes the root shared type for a document's content

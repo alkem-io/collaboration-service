@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"github.com/coder/websocket"
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/config"
@@ -148,7 +148,7 @@ func integDial(t *testing.T, base, documentID string) *integClient {
 	}
 	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
 
-	doc := ycrdt.NewDoc(documentID, true, ycrdt.DefaultGCFilter, nil, false)
+	doc := ycrdt.NewDoc(documentID)
 	c := &integClient{conn: conn, doc: doc, handler: protocol.NewSyncHandler(doc)}
 	doc.On("update", ycrdt.NewObserverHandler(func(v ...interface{}) {
 		if len(v) < 1 {
@@ -190,7 +190,7 @@ func (c *integClient) pump() {
 func (c *integClient) insert(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	frag := c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
+	frag := c.doc.GetXmlFragment("default")
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -199,7 +199,7 @@ func (c *integClient) insert(s string) {
 func (c *integClient) text() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.doc.GetXmlFragment("default").(*ycrdt.YXmlFragment).ToString()
+	return c.doc.GetXmlFragment("default").ToString()
 }
 
 func (c *integClient) close() { _ = c.conn.Close(websocket.StatusNormalClosure, "bye") }

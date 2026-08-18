@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )

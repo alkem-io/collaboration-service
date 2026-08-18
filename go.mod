@@ -1,9 +1,10 @@
 module github.com/alkem-io/collaboration-service
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/antst/go-yjs v0.0.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.0
@@ -18,7 +19,6 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/rabbitmq/amqp091-go v1.12.0
 	github.com/redis/go-redis/v9 v9.20.1
-	github.com/skyterra/y-crdt v0.0.0-20260623143751-1f624bc0eb36
 	github.com/sony/gobreaker/v2 v2.4.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.56.0
@@ -53,8 +53,6 @@ require (
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/lib/pq v1.10.9 // indirect
-	github.com/mitchellh/copystructure v1.2.0 // indirect
-	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
@@ -70,9 +68,3 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
-
-// The CRDT core is the Alkemio fork of skyterra/y-crdt. The fork keeps the
-// upstream module path (github.com/skyterra/y-crdt) so this replace is valid;
-// it pins the v2-encoding-and-sync-protocol branch at commit a2c966d (the
-// commit whose cross-impl fuzz gate is green — WS-A of 003-unify-collab-yjs).
-replace github.com/skyterra/y-crdt => github.com/antst/y-crdt v0.0.0-20260623143751-1f624bc0eb36

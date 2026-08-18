@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 )
 
 // failingConn is a service.Conn whose Send always fails — modelling a client whose
@@ -41,10 +41,20 @@ func (f *failingConn) count() int {
 // announceAwareness registers a member in the room with a real awareness id so its
 // eviction broadcasts a forced-removal frame (the path that re-enters the cascade).
 func announceAwareness(r *Room, id connID, clientID ycrdt.Number, conn Conn) {
-	r.awareness.States[clientID] = ycrdt.NewObject()
-	meta := ycrdt.NewObject()
-	meta.Set("clock", 1)
-	r.awareness.Meta[clientID] = meta
+	// Seed a REMOTE client's awareness through the public path: a peer awareness
+	// pinned to clientID publishes its state and the room merges it. Awareness
+	// States/Meta are unexported in go-yjs, and going through encode/apply models
+	// what actually crosses the wire instead of reaching into core internals — so
+	// this test exercises the same code path production does.
+	peerDoc := ycrdt.NewDoc("peer", ycrdt.WithClientID(clientID))
+	peerAw := ycrdt.NewAwareness(peerDoc)
+	if err := peerAw.SetLocalState(ycrdt.MakeObject("user", "test")); err != nil {
+		panic(err)
+	}
+	update := ycrdt.EncodeAwarenessUpdate(peerAw, []ycrdt.Number{clientID}, nil)
+	if err := ycrdt.ApplyAwarenessUpdate(r.awareness, update, nil); err != nil {
+		panic(err)
+	}
 	r.members[id] = roomMember{id: id, conn: conn, awarenessID: clientID, hasAwareness: true}
 }
 

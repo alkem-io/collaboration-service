@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -129,8 +129,8 @@ func TestAwarenessFanOutAndNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("blob get: %v", err)
 	}
-	reloaded := ycrdt.NewDoc("guid", true, ycrdt.DefaultGCFilter, nil, false)
-	ycrdt.ApplyUpdateV2(reloaded, snap, nil)
+	reloaded := ycrdt.NewDoc("guid")
+	_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 
 	if txt := xmlText(reloaded); !contains(txt, "persisted") {
 		t.Fatalf("snapshot missing the doc edit: %q", txt)

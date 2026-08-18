@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -83,26 +83,42 @@ func TestNewTokenBucketNilClockUsesWallClock(t *testing.T) {
 
 // --- awareness_wire.go ---
 
-// TestDecodeAwarenessBodyRejectsMalformed asserts a payload that is not a
-// well-formed varUint8Array is rejected (returns false), so a corrupt awareness
-// frame is dropped rather than misapplied to the room awareness.
-func TestDecodeAwarenessBodyRejectsMalformed(t *testing.T) {
+// TestAwarenessBodyRejectsMalformed asserts a frame whose awareness payload is
+// not a well-formed varUint8Array is rejected (returns false), so a corrupt
+// awareness frame is dropped rather than misapplied to the room awareness.
+//
+// Restructured for the go-yjs port (FR-018a): the helper now takes the FULL
+// framed message rather than the post-type payload, because the core's
+// InspectMessage parses the frame. Every property the payload-level version
+// asserted is preserved, and frame-level type validation is additionally
+// covered — the assertions are strengthened, never weakened. 0x01 is the
+// awareness message type.
+func TestAwarenessBodyRejectsMalformed(t *testing.T) {
 	// A length varint with the continuation bit set but no following byte is a
 	// truncated/unterminated length prefix → the array read errors.
-	if _, ok := decodeAwarenessBody([]byte{0xff}); ok {
+	if _, ok := awarenessBody([]byte{0x01, 0xff}); ok {
 		t.Fatal("an unterminated length varint must be rejected")
 	}
-	// An empty payload is also not a readable array (EOF on the length read).
-	if _, ok := decodeAwarenessBody(nil); ok {
-		t.Fatal("an empty payload must be rejected")
+	// An empty frame is not a readable message at all.
+	if _, ok := awarenessBody(nil); ok {
+		t.Fatal("an empty frame must be rejected")
 	}
-	// A well-formed array followed by trailing bytes is non-canonical and must be
-	// rejected (a valid awareness payload is exactly one length-prefixed array).
-	if body, ok := decodeAwarenessBody([]byte{0x02, 0xAA, 0xBB}); !ok || len(body) != 2 {
+	// A frame with only a type byte has no array to read.
+	if _, ok := awarenessBody([]byte{0x01}); ok {
+		t.Fatal("a frame with no awareness payload must be rejected")
+	}
+	// A well-formed array decodes to exactly its body.
+	if body, ok := awarenessBody([]byte{0x01, 0x02, 0xAA, 0xBB}); !ok || len(body) != 2 {
 		t.Fatalf("a clean length-2 array must decode: ok=%v body=%v", ok, body)
 	}
-	if _, ok := decodeAwarenessBody([]byte{0x02, 0xAA, 0xBB, 0xCC}); ok {
-		t.Fatal("a payload with trailing bytes after the array must be rejected")
+	// A well-formed array followed by trailing bytes is non-canonical and must be
+	// rejected (a valid awareness frame is exactly one length-prefixed array).
+	if _, ok := awarenessBody([]byte{0x01, 0x02, 0xAA, 0xBB, 0xCC}); ok {
+		t.Fatal("a frame with trailing bytes after the array must be rejected")
+	}
+	// A non-awareness frame must not be decoded as awareness.
+	if _, ok := awarenessBody([]byte{0x00, 0x02, 0xAA, 0xBB}); ok {
+		t.Fatal("a non-awareness frame must be rejected")
 	}
 }
 
@@ -273,7 +289,7 @@ func TestSaveDebounceDisabledPersistsOnlyOnRelease(t *testing.T) {
 	})
 	snap, _ := deps.blob.Get(context.Background(), "no-debounce")
 	reloaded := newRoomDoc("guid")
-	ycrdt.ApplyUpdateV2(reloaded, snap, nil)
+	_ = ycrdt.ApplyUpdateV2(reloaded, snap, nil)
 	if !contains(xmlText(reloaded), "kept") {
 		t.Fatalf("release snapshot missing content: %q", xmlText(reloaded))
 	}
@@ -353,7 +369,7 @@ func TestHandleMessageDropsMalformedAwareness(t *testing.T) {
 	room.members[2] = roomMember{id: 2, conn: peer}
 
 	// A well-framed awareness MESSAGE whose inner payload is an unterminated
-	// length varint → decodeAwarenessBody rejects it.
+	// length varint → awarenessBody rejects it.
 	var frame bytes.Buffer
 	protocol.WriteMessage(&frame, uint8(model.WireAwareness), []byte{0xff})
 	if room.handleMessage(1, frame.Bytes()) {
@@ -534,11 +550,11 @@ func TestAwarenessSnapshotEmptyReturnsNil(t *testing.T) {
 	// A fresh awareness carries the doc's own (empty) local-client state; clearing
 	// it drops the state count to zero — the no-presence case a brand-new room is
 	// in before any client announces a cursor.
-	aw.SetLocalState(ycrdt.Object{})
+	_ = aw.SetLocalState(ycrdt.Object{})
 	if awarenessSnapshot(aw) != nil {
 		t.Fatal("an empty awareness must snapshot to nil")
 	}
-	aw.SetLocalState(ycrdt.MakeObject("user", "x"))
+	_ = aw.SetLocalState(ycrdt.MakeObject("user", "x"))
 	if awarenessSnapshot(aw) == nil {
 		t.Fatal("a populated awareness must snapshot to a non-nil frame")
 	}
@@ -554,7 +570,7 @@ func TestDispatchSyncMalformedSyncStep1Errors(t *testing.T) {
 
 	// Inner sync payload: [SyncStep1 sub-tag][0xff = unterminated length varint].
 	// ReadVarUint8Array fails to read the state-vector length → decode error.
-	inner := []byte{byte(ycrdt.MessageYjsSyncStep1), 0xff}
+	inner := []byte{byte(protocol.SyncMessageStep1), 0xff}
 	var framed bytes.Buffer
 	protocol.WriteMessage(&framed, protocol.MessageSync, inner)
 
@@ -570,7 +586,7 @@ func TestDispatchSyncMalformedSyncStep1Errors(t *testing.T) {
 func TestDispatchSyncMalformedUpdateErrors(t *testing.T) {
 	room := newBareRoom(t)
 
-	inner := []byte{byte(ycrdt.MessageYjsUpdate), 0xff} // unterminated length varint
+	inner := []byte{byte(protocol.SyncMessageUpdate), 0xff} // unterminated length varint
 	var framed bytes.Buffer
 	protocol.WriteMessage(&framed, protocol.MessageSync, inner)
 
@@ -711,7 +727,7 @@ func TestHandleSyncDropsMalformedSyncPayload(t *testing.T) {
 	room.members[1] = roomMember{id: 1, conn: &captureConn{}, mode: model.ModeCollaborator}
 
 	// Inner sync payload with an unterminated array length → dispatchSync errors.
-	malformed := []byte{byte(ycrdt.MessageYjsUpdate), 0xff}
+	malformed := []byte{byte(protocol.SyncMessageUpdate), 0xff}
 	if room.handleSync(1, malformed) {
 		t.Fatal("a malformed sync payload must not report a mutation")
 	}

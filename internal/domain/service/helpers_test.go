@@ -2,10 +2,11 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -17,7 +18,7 @@ import (
 // containing both (CRDT, no last-write-wins loss) — the property the convergence
 // tests assert.
 func insertText(doc *ycrdt.Doc, s string) {
-	f := doc.GetXmlFragment("default").(*ycrdt.YXmlFragment)
+	f := doc.GetXmlFragment("default")
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -25,7 +26,7 @@ func insertText(doc *ycrdt.Doc, s string) {
 
 // xmlText renders the memo's "default" fragment to a plain string.
 func xmlText(doc *ycrdt.Doc) string {
-	return doc.GetXmlFragment("default").(*ycrdt.YXmlFragment).ToString()
+	return doc.GetXmlFragment("default").ToString()
 }
 
 // --- whiteboard (id-keyed Y.Map) helpers ---
@@ -33,7 +34,7 @@ func xmlText(doc *ycrdt.Doc) string {
 // addElement inserts a per-element Y.Map keyed by id into the "elements" root
 // map, mirroring the Excalidraw scene convention (data-model.md).
 func addElement(doc *ycrdt.Doc, id string, props map[string]interface{}) {
-	elements := doc.GetMap("elements").(*ycrdt.YMap)
+	elements := doc.GetMap("elements")
 	el := ycrdt.NewYMap(nil)
 	elements.Set(id, el)
 	for k, v := range props {
@@ -41,7 +42,7 @@ func addElement(doc *ycrdt.Doc, id string, props map[string]interface{}) {
 	}
 }
 
-func elements(doc *ycrdt.Doc) *ycrdt.YMap { return doc.GetMap("elements").(*ycrdt.YMap) }
+func elements(doc *ycrdt.Doc) *ycrdt.YMap { return doc.GetMap("elements") }
 
 func elementsLen(doc *ycrdt.Doc) int { return elements(doc).GetSize() }
 
@@ -57,8 +58,15 @@ func docMentions(doc *ycrdt.Doc, needle string) bool {
 }
 
 // ycrdtJSON renders a doc's shared state as a JSON string (diagnostic helper).
+// The core no longer exports a JSON stringifier, so this marshals the Object
+// itself — a test-only diagnostic, and going through encoding/json avoids
+// depending on an internal serializer for a leak assertion.
 func ycrdtJSON(doc *ycrdt.Doc) string {
-	return ycrdt.JsonString(doc.ToJson())
+	b, err := json.Marshal(doc.ToJson())
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // --- wire-frame helpers ---
@@ -121,7 +129,7 @@ func (c *fakeClient) elementKeys() []string {
 func (c *fakeClient) setAwareness(state ycrdt.Object) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.aware.SetLocalState(state)
+	_ = c.aware.SetLocalState(state)
 	update := ycrdt.EncodeAwarenessUpdate(c.aware, []ycrdt.Number{c.aware.ClientID}, nil)
 	c.session.Forward(encodeAwareness(update))
 }

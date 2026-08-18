@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/app"

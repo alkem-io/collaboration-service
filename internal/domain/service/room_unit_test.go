@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -73,8 +73,8 @@ func TestApplyPeerEphemeralAwareness(t *testing.T) {
 	room.members[1] = roomMember{id: 1, conn: local}
 
 	// Build a real awareness frame from a separate awareness instance.
-	other := ycrdt.NewAwareness(ycrdt.NewDoc("peer", true, ycrdt.DefaultGCFilter, nil, false))
-	other.SetLocalState(ycrdt.MakeObject("user", "remote"))
+	other := ycrdt.NewAwareness(ycrdt.NewDoc("peer"))
+	_ = other.SetLocalState(ycrdt.MakeObject("user", "remote"))
 	update := ycrdt.EncodeAwarenessUpdate(other, []ycrdt.Number{other.ClientID}, nil)
 	frame := encodeAwarenessFrame(update)
 
@@ -154,13 +154,13 @@ func TestTrackAwarenessIDOnlyFirstFrame(t *testing.T) {
 	room := newBareRoom(t)
 	room.members[1] = roomMember{id: 1, conn: &captureConn{}}
 
-	first := ycrdt.NewAwareness(ycrdt.NewDoc("c1", true, ycrdt.DefaultGCFilter, nil, false))
-	first.SetLocalState(ycrdt.MakeObject("u", "1"))
+	first := ycrdt.NewAwareness(ycrdt.NewDoc("c1"))
+	_ = first.SetLocalState(ycrdt.MakeObject("u", "1"))
 	room.trackAwarenessID(1, ycrdt.EncodeAwarenessUpdate(first, []ycrdt.Number{first.ClientID}, nil))
 	got := room.members[1].awarenessID
 
-	second := ycrdt.NewAwareness(ycrdt.NewDoc("c2", true, ycrdt.DefaultGCFilter, nil, false))
-	second.SetLocalState(ycrdt.MakeObject("u", "2"))
+	second := ycrdt.NewAwareness(ycrdt.NewDoc("c2"))
+	_ = second.SetLocalState(ycrdt.MakeObject("u", "2"))
 	room.trackAwarenessID(1, ycrdt.EncodeAwarenessUpdate(second, []ycrdt.Number{second.ClientID}, nil))
 	if room.members[1].awarenessID != got {
 		t.Fatal("awareness id was overwritten by a later frame")

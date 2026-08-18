@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
-	"github.com/skyterra/y-crdt/protocol"
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -46,7 +46,7 @@ func newFakeClient(t *testing.T) *fakeClient {
 // id, so presence/contribution/authZ paths that key off the actor are exercised.
 func newFakeClientWithIdentity(t *testing.T, actorID string) *fakeClient {
 	t.Helper()
-	doc := ycrdt.NewDoc("guid", true, ycrdt.DefaultGCFilter, nil, false)
+	doc := ycrdt.NewDoc("guid")
 	aw := ycrdt.NewAwareness(doc)
 	h := protocol.NewSyncHandler(doc)
 	h.SetAwareness(aw)
@@ -87,13 +87,12 @@ func (c *fakeClient) Send(frame []byte) error {
 		// Decode the canonical y-protocols awareness framing
 		// ([type][writeVarUint8Array(body)], awareness_wire.go) and apply the body
 		// — modelling a real y-protocols client, which reads readVarUint8Array
-		// before applyAwarenessUpdate (the fork's SyncHandler does not, so we do it
-		// here rather than via c.handler).
-		if body, ok := decodeAwarenessBody(payload); ok {
+		// before applyAwarenessUpdate.
+		if body, ok := awarenessBody(cp); ok {
 			// Best-effort, mirroring a real client's receive path: a malformed
 			// awareness body is dropped rather than crashing the fan-out goroutine
 			// (Send runs on the room's goroutine, not the test's, so it must not
-			// Fatal). decodeAwarenessBody already guarded the framing.
+			// Fatal). awarenessBody already guarded the framing.
 			_ = ycrdt.ApplyAwarenessUpdate(c.aware, body, c.handler)
 		}
 	case model.WireEphemeral:

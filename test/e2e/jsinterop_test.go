@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	ycrdt "github.com/skyterra/y-crdt"
+	ycrdt "github.com/antst/go-yjs/crdt"
 )
 
 // jsResult is the JSON the harness emits on its `RESULT <json>` line.
