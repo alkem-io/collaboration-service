@@ -139,6 +139,35 @@ appends (wrong for an immutable blob medium — see D1).
 
 ---
 
+## D0 — Pinned core version and the oracle-reverification rule (T004)
+
+**Pinned**: `github.com/antst/go-yjs v0.0.3` in [go.mod](../../go.mod). An exact
+version, not a range, per §XIV's carve-out for a first-party pre-1.0 core: the
+usual "track the latest" rule assumes an upstream that versions defensively
+against strangers, and this one does not — it is our own product, moving fast,
+and a floating dependency would let a change land in this service without anyone
+choosing it.
+
+**Reverification rule.** The core is the ORACLE for CRDT behaviour: this service
+asserts nothing about merge semantics itself, it runs the core's conformance
+suites. So a version bump is not a dependency update, it is a change of oracle,
+and it MUST re-run every adopted suite before it is accepted —
+`CheckpointPersistence`, `CheckpointPersistenceFencing`,
+`CheckpointPersistenceDeletion`, `Memory`, and `Hub` — plus the JS-interop e2e,
+which is the only check that the core still agrees with real Yjs rather than
+merely with itself. [conformance-coverage.md](./conformance-coverage.md) records
+which suites apply and why each non-applicable one does not.
+
+**Sequencing.** Four contract gaps were found by building against the core rather
+than by reading it: the missing checkpoint profile, a false backstop claim in the
+cluster documentation, a conformance suite that rejected a sanctioned
+implementation strategy, and the absent deletion capability. Each was escalated
+upstream and fixed there rather than accommodated locally — silent local
+divergence from the core is prohibited, because it would make this service's
+behaviour depend on a contract nobody else can read.
+
+---
+
 ## D3 — Full adoption of `memory.Registry`
 
 **Decision**: the registry owns document identity, coalesced acquisition, eviction,
@@ -153,6 +182,16 @@ the registry's vocabulary *and* the hand-built one would recreate that condition
 ordering that persists before backends close (FR-001); flush policy and its timer;
 presence; limits and the byte budget; authz re-evaluation; control messages; the
 lifecycle-event consumer's bounded idempotent handling.
+
+**Outcome (T010)**: on inspection, nothing in `lifecycle_state.go` duplicated
+registry semantics — the two govern different objects. `roomState` is about
+whether one serving entity may accept work and who owns its teardown; the
+registry is about which live document exists and who holds it. A document can be
+healthy while its room drains, and a room can be Active while its document is
+invalidated underneath it (precisely what `Handle.Done()` signals). What `002`
+carried that the registry HAS absorbed — the `released` bool and the hand-built
+handle lifetime — is gone. The boundary is now documented at the top of
+`lifecycle_state.go` so it is not re-litigated.
 
 **Forced, not chosen**: `InProcessRegistry` documents that it *starts no goroutines*
 and that `Evict` never invalidates an outstanding handle. It therefore has no eviction

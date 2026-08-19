@@ -5,6 +5,30 @@ import (
 	"sync/atomic"
 )
 
+// WHAT THIS IS, AND WHY THE REGISTRY DID NOT ABSORB IT (003 D3, T010).
+//
+// The port moved document identity, coalesced acquisition, eviction, invalidation
+// and handle lifetime into memory.Registry, and D3 called for retiring 002's
+// state machine "wherever it duplicates registry semantics". On inspection it
+// duplicates none of them, because the two govern DIFFERENT OBJECTS:
+//
+//	registry  → the DOCUMENT. One live Y.Doc per id, who holds it, when it is
+//	            destroyed. Shared across every room that ever serves that id.
+//	roomState → the ROOM. Whether THIS serving entity may accept a command, and
+//	            which caller owns its teardown. Private to one room.
+//
+// A document can be perfectly healthy while the room serving it is draining, and
+// a room can be Active while its document is being invalidated underneath it —
+// which is exactly the case handle.Done() exists to signal. Collapsing the two
+// vocabularies would not simplify anything; it would make "is this document
+// alive" and "may this room take work" the same question, which they are not.
+//
+// What 002 DID carry that the registry has now absorbed is gone: the `released`
+// bool and the hand-built handle lifetime around it. What remains is the list D3
+// explicitly reserved to this service — admission control, teardown idempotency,
+// and the idle-release policy that drives Evict, since InProcessRegistry starts
+// no goroutines and therefore has no eviction policy of its own.
+//
 // roomState is the explicit lifecycle state of a Room (spec 002 redesign, FR-012).
 // It is the single source of truth for "what may happen now". Transitions are
 // centrally enforced by lifecycle.transition, so a teardown or edge can never be

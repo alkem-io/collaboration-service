@@ -32,7 +32,7 @@ Existing hexagonal layout (see plan.md Structure Decision). Domain core in
 - [X] T001 Add `github.com/antst/go-yjs` pinned to an explicit version in `go.mod`, and remove the `replace` directive redirecting `github.com/skyterra/y-crdt` (§XIV, FR-024)
 - [X] T002 [P] Create the adapter package skeletons `internal/adapter/outbound/persistence/` and `internal/adapter/outbound/hub/` per plan.md Structure Decision
 - [X] T003 [P] Wire the core's `backend/conformance` suites into the CI workflow so they run per package — **satisfied without a CI change**: the suites are ordinary Go tests beside each implementation, so the existing `go test ./...` runs them; the workflow comment now records that
-- [ ] T004 Record the pinned version and the oracle-reverification rule in `specs/003-go-yjs-core-port/research.md` sequencing notes
+- [X] T004 Record the pinned version and the oracle-reverification rule in `specs/003-go-yjs-core-port/research.md` sequencing notes
 
 ---
 
@@ -46,7 +46,7 @@ phase completes** — every story needs documents that exist on the new core.
 - [X] T007 Adopt `memory.Registry` as the owner of document identity and lifetime in `internal/domain/service/manager.go`, replacing the hand-built registry and singleflight acquire (FR-005, D3)
 - [X] T008 Implement the registry open function in `internal/domain/service/manager.go`: load from the store, else seed from the metadata-delivered content; a session must never observe a partially initialised document (FR-004a)
 - [X] T009 Rebuild `internal/domain/service/room.go` to hold a `memory.Handle` and observe its invalidation signal, ceasing to own document identity or teardown ordering (D3)
-- [ ] T010 Retire the parts of `internal/domain/service/lifecycle_state.go` that duplicate registry semantics; keep only what the registry does not absorb (D3)
+- [X] T010 Retire the parts of `internal/domain/service/lifecycle_state.go` that duplicate registry semantics; keep only what the registry does not absorb (D3)
 - [X] T011 Keep the `002` idle-release policy driving `Evict` in `internal/domain/service/room.go` — the registry starts no goroutines and has no eviction policy of its own (contracts/registry-session.md)
 - [X] T012 Delete `y-crdt` from the module graph and verify zero references remain (`grep -rn "y-crdt" --include="*.go" .`, `go list -m all`) (SC-008)
 
