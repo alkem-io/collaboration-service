@@ -1,13 +1,13 @@
 -- The collaboration document index (data-model.md "Document metadata / index").
 -- The small, queryable row; never holds the snapshot blob (that lives in the
--- BlobStore behind content_pointer). One row per document id (single namespace
+-- checkpoint store behind content_pointer). One row per document id (single namespace
 -- across memos and whiteboards).
 CREATE TABLE IF NOT EXISTS collaboration_metadata (
     id                      TEXT        PRIMARY KEY,
     content_type            TEXT        NOT NULL,
     version                 INTEGER     NOT NULL DEFAULT 0,
     content_pointer         TEXT        NOT NULL DEFAULT '',
-    blob_store              TEXT        NOT NULL DEFAULT 'inline',
+    checkpoint_store              TEXT        NOT NULL DEFAULT 'inline',
     authorization_policy_id TEXT        NOT NULL DEFAULT '',
     owner_ref               TEXT        NOT NULL DEFAULT '',
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -18,7 +18,7 @@ import (
 
 // MetadataStore persists the small, queryable document index (NOT the blob).
 // The default Alkemio adapter rides the existing server RabbitMQ save/fetch
-// pattern, extended with content_pointer + blob_store; the standalone adapter
+// pattern, extended with content_pointer + checkpoint_store; the standalone adapter
 // uses Postgres (sqlc/pgx) or a local file.
 //
 // Maps to: contracts/persistence-ports.md (MetadataStore port) and

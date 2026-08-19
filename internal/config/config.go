@@ -285,7 +285,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	blobStore, err := parseCheckpointStore(os.Getenv("CHECKPOINT_STORE"))
+	checkpointStore, err := parseCheckpointStore(os.Getenv("CHECKPOINT_STORE"))
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +304,7 @@ func Load() (*Config, error) {
 		Port:            port,
 		HubMode:         fanout,
 		MetadataStore:   metadataStore,
-		CheckpointStore: blobStore,
+		CheckpointStore: checkpointStore,
 		AuthMode:        authMode,
 		AuthZMode:       authZMode,
 		Auth: AuthConfig{

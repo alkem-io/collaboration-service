@@ -25,19 +25,19 @@
 //	  pattern "collaboration-contribution"  data ContributionData
 //
 // The metadata/blob split (persistence-ports.md) is honoured: SaveData carries
-// only the index — contentPointer + blobStore locate the blob in the BlobStore;
+// only the index — contentPointer + checkpointStore locate the blob in the checkpoint store;
 // the snapshot bytes NEVER cross this bus.
 package rabbitmq
 
 // SaveData is the collaboration-save request payload: the index row only.
 // (carries forward nothing of the legacy binaryStateInBase64 / content fields —
-// the blob lives in the checkpoint store, located by ContentPointer + BlobStore.)
+// the blob lives in the checkpoint store, located by ContentPointer + CheckpointStore.)
 type SaveData struct {
 	ID                    string `json:"id"`
 	ContentType           string `json:"contentType"`
 	Version               int    `json:"version"`
 	ContentPointer        string `json:"contentPointer"`
-	BlobStore             string `json:"blobStore"`
+	CheckpointStore       string `json:"checkpointStore"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	OwnerRef              string `json:"ownerRef,omitempty"`
 }
@@ -62,13 +62,13 @@ type FetchReply struct {
 	ContentType           string `json:"contentType,omitempty"`
 	Version               int    `json:"version,omitempty"`
 	ContentPointer        string `json:"contentPointer,omitempty"`
-	BlobStore             string `json:"blobStore,omitempty"`
+	CheckpointStore       string `json:"checkpointStore,omitempty"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
-	// the server FetchOutputData.storageBucketId). The file-service BlobStore
+	// the server FetchOutputData.storageBucketId). The file-service checkpoint store
 	// uploads each snapshot into THIS bucket so blobs co-locate with the
 	// document rather than a single flat platform bucket. Absent for documents
-	// the server cannot resolve a bucket for; the BlobStore then falls back to
+	// the server cannot resolve a bucket for; the checkpoint store then falls back to
 	// its configured bucket.
 	StorageBucketID string `json:"storageBucketId,omitempty"`
 	// Content is the document's stored content for the FIRST-OPEN SEED (R4):
@@ -87,7 +87,7 @@ type FetchReply struct {
 }
 
 // DeleteData is the collaboration-delete request payload (the owner-delete
-// cascade purges the index row; the blob is purged separately via the BlobStore).
+// cascade purges the index row; the blob is purged separately via the checkpoint store).
 type DeleteData struct {
 	ID string `json:"id"`
 }

@@ -38,7 +38,7 @@ import (
 //
 // SCOPE, deliberately narrowed. This test used to select the local-disk blob
 // store and describe itself as proving the durable path. That adapter was removed
-// with the BlobStore port, so the selection now resolves to the IN-PROCESS
+// with the old blob port, so the selection now resolves to the IN-PROCESS
 // checkpoint store — which survives a reconnect within one process but not a
 // restart. Left as it was, the test would still pass and still read as a
 // durability proof, which is worse than not having it: the reload below only

@@ -42,7 +42,7 @@ func (s *Store) Load(_ context.Context, id model.DocumentID) (model.Metadata, er
 // Metadata leaves BLANK, mirroring the postgres adapter's
 // COALESCE(NULLIF(EXCLUDED.x,”), existing) upsert — one canonical save behavior
 // across backends. This matters because two callers Save partial rows:
-//   - a per-snapshot persist (Room.persist) carries content_pointer/blob_store but
+//   - a per-snapshot persist (Room.persist) carries content_pointer/checkpoint_store but
 //     historically blank lifecycle fields; and
 //   - a (re)delivered document.created pre-register carries owner_ref/content_type
 //     but a blank content_pointer.

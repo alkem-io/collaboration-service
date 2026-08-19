@@ -45,9 +45,9 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	}
 
 	// Validate the wire enums at the adapter boundary: reply.ContentType and
-	// reply.BlobStore are raw RPC strings, so reject an unsupported value here with
+	// reply.CheckpointStore are raw RPC strings, so reject an unsupported value here with
 	// a clear diagnostic rather than casting it blindly and letting it fail later
-	// (much weaker error) deep in the room. Empty is allowed — an unset BlobStore
+	// (much weaker error) deep in the room. Empty is allowed — an unset CheckpointStore
 	// means "inline/default" and an unset ContentType is resolved from the ?type=
 	// handshake — only a SET-but-unknown value is a corrupt server reply.
 	contentType := model.ContentType(reply.ContentType)
@@ -56,11 +56,11 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	default:
 		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown contentType %q", reply.ContentType)
 	}
-	blobStore := model.CheckpointStoreKind(reply.BlobStore)
-	switch blobStore {
+	checkpointStore := model.CheckpointStoreKind(reply.CheckpointStore)
+	switch checkpointStore {
 	case "", model.CheckpointStoreInline, model.CheckpointStoreFileService:
 	default:
-		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown blobStore %q", reply.BlobStore)
+		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown checkpointStore %q", reply.CheckpointStore)
 	}
 
 	return model.Metadata{
@@ -68,7 +68,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 		ContentType:           contentType,
 		Version:               reply.Version,
 		ContentPointer:        reply.ContentPointer,
-		CheckpointStore:       blobStore,
+		CheckpointStore:       checkpointStore,
 		AuthorizationPolicyID: reply.AuthorizationPolicyID,
 		StorageBucketID:       reply.StorageBucketID,
 		// Surface the server-delivered content for the first-open seed (R4): the
@@ -81,16 +81,16 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 // Save upserts the document index over collaboration-save (index only — the blob
 // goes to the checkpoint store, never this bus).
 func (s *Store) Save(ctx context.Context, meta model.Metadata) error {
-	blobStore := meta.CheckpointStore
-	if blobStore == "" {
-		blobStore = model.CheckpointStoreInline
+	checkpointStore := meta.CheckpointStore
+	if checkpointStore == "" {
+		checkpointStore = model.CheckpointStoreInline
 	}
 	data := SaveData{
 		ID:                    string(meta.ID),
 		ContentType:           string(meta.ContentType),
 		Version:               meta.Version,
 		ContentPointer:        meta.ContentPointer,
-		BlobStore:             string(blobStore),
+		CheckpointStore:       string(checkpointStore),
 		AuthorizationPolicyID: meta.AuthorizationPolicyID,
 		OwnerRef:              meta.OwnerRef,
 	}

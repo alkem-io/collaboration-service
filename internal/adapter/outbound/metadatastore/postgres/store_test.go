@@ -132,7 +132,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		!strings.Contains(q.lastExec, "ON CONFLICT") {
 		t.Errorf("unexpected upsert SQL: %s", q.lastExec)
 	}
-	// id, content_type, content_pointer, blob_store, authorization_policy_id, owner_ref
+	// id, content_type, content_pointer, checkpoint_store, authorization_policy_id, owner_ref
 	want := []any{"doc-2", "memo", "ptr", "file-service", "pol-9", "owner"}
 	if len(q.lastArgs) != len(want) {
 		t.Fatalf("save args = %v, want %v", q.lastArgs, want)
@@ -144,34 +144,34 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 	}
 }
 
-// TestSaveBindsBlobStoreRawAndDefaultsInSQL asserts the blob_store handling: the
+// TestSaveBindsCheckpointStoreRawAndDefaultsInSQL asserts the checkpoint_store handling: the
 // adapter binds the value RAW (empty stays empty on the wire) so the SQL can
 // distinguish "unset" (preserve the existing row's backend on conflict) from a
 // real value; the inline default for a genuine first insert is applied by the
 // SQL's COALESCE(NULLIF($4,”),'inline') in the INSERT position, not in Go.
 // Pre-defaulting in Go would make a (re)delivered blank pre-register flip a
-// populated row's blob_store back to 'inline' and lie about where the live blob
+// populated row's checkpoint_store back to 'inline' and lie about where the live blob
 // lives.
-func TestSaveBindsBlobStoreRawAndDefaultsInSQL(t *testing.T) {
+func TestSaveBindsCheckpointStoreRawAndDefaultsInSQL(t *testing.T) {
 	q := &fakeQuerier{}
 	store := &Store{db: q}
 	if err := store.Save(context.Background(), model.Metadata{ID: "d", ContentType: model.ContentTypeMemo}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	// The bound arg is the raw (empty) BlobStore — defaulting is the SQL's job.
+	// The bound arg is the raw (empty) CheckpointStore — defaulting is the SQL's job.
 	if q.lastArgs[3] != "" {
-		t.Errorf("blob_store arg = %q, want raw empty (SQL defaults it)", q.lastArgs[3])
+		t.Errorf("checkpoint_store arg = %q, want raw empty (SQL defaults it)", q.lastArgs[3])
 	}
 	// The SQL defaults a blank to inline on INSERT and preserves the existing
-	// blob_store / content_pointer on a blank conflict update.
+	// checkpoint_store / content_pointer on a blank conflict update.
 	if !strings.Contains(q.lastExec, "NULLIF($4, ''), 'inline'") {
-		t.Errorf("upsert SQL does not default blank blob_store to inline on insert: %s", q.lastExec)
+		t.Errorf("upsert SQL does not default blank checkpoint_store to inline on insert: %s", q.lastExec)
 	}
 	if !strings.Contains(q.lastExec, "content_pointer         = COALESCE(NULLIF(EXCLUDED.content_pointer, ''), collaboration_metadata.content_pointer)") {
 		t.Errorf("upsert SQL does not preserve content_pointer on a blank update: %s", q.lastExec)
 	}
-	if !strings.Contains(q.lastExec, "blob_store              = COALESCE(NULLIF($4, ''), collaboration_metadata.blob_store)") {
-		t.Errorf("upsert SQL does not preserve blob_store on a blank update: %s", q.lastExec)
+	if !strings.Contains(q.lastExec, "checkpoint_store              = COALESCE(NULLIF($4, ''), collaboration_metadata.checkpoint_store)") {
+		t.Errorf("upsert SQL does not preserve checkpoint_store on a blank update: %s", q.lastExec)
 	}
 }
 

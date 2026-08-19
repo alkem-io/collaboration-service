@@ -238,7 +238,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 // --- stored-state helpers for tests -----------------------------------------
 //
-// The old BlobStore was addressed by content pointer; a CheckpointStore is
+// The superseded blob port was addressed by content pointer; a CheckpointStore is
 // addressed by document id and returns the document's whole current state. These
 // keep the call sites readable and put the id conversion in one place.
 

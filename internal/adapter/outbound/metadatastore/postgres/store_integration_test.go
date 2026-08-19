@@ -99,15 +99,15 @@ func TestPostgresRoundTrip(t *testing.T) {
 
 	// REDELIVERED document.created (pre-register) against a row that already has a
 	// live snapshot: PreRegister is a blind Save carrying owner_ref/content_type but
-	// a BLANK content_pointer + blob_store. It MUST NOT clobber the live pointer back
-	// to '' (which would orphan the persisted blob) nor flip blob_store away from the
+	// a BLANK content_pointer + checkpoint_store. It MUST NOT clobber the live pointer back
+	// to '' (which would orphan the persisted blob) nor flip checkpoint_store away from the
 	// snapshot's backend — a blank value on the snapshot columns means "unchanged".
 	// The version still bumps (any upsert does), but the pointer/backend survive.
 	preRegisterRedelivery := model.Metadata{
 		ID:          id,
 		ContentType: model.ContentTypeWhiteboard,
 		OwnerRef:    "owner-1",
-		// ContentPointer + BlobStore intentionally blank (pre-register path).
+		// ContentPointer + CheckpointStore intentionally blank (pre-register path).
 	}
 	if err := store.Save(ctx, preRegisterRedelivery); err != nil {
 		t.Fatalf("Save pre-register redelivery: %v", err)
@@ -117,7 +117,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 		t.Fatalf("redelivered pre-register orphaned the blob: content_pointer = %q, want preserved %q", got.ContentPointer, "ptr-3")
 	}
 	if got.CheckpointStore != model.CheckpointStoreFileService {
-		t.Fatalf("redelivered pre-register flipped blob_store: got %q, want preserved %q", got.CheckpointStore, model.CheckpointStoreFileService)
+		t.Fatalf("redelivered pre-register flipped checkpoint_store: got %q, want preserved %q", got.CheckpointStore, model.CheckpointStoreFileService)
 	}
 	if got.Version != 4 {
 		t.Fatalf("redelivered pre-register version = %d, want 4 (upsert still bumps)", got.Version)

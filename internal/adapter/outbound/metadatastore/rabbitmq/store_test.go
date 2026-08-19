@@ -79,7 +79,7 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 		ContentType:           "whiteboard",
 		Version:               4,
 		ContentPointer:        "file-uuid",
-		BlobStore:             "file-service",
+		CheckpointStore:       "file-service",
 		AuthorizationPolicyID: "pol-7",
 		OwnerRef:              "owner-1",
 	}
@@ -91,7 +91,7 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 	raw, _ := json.Marshal(data)
 	for _, field := range []string{
 		`"id":"doc-1"`, `"contentType":"whiteboard"`, `"version":4`,
-		`"contentPointer":"file-uuid"`, `"blobStore":"file-service"`,
+		`"contentPointer":"file-uuid"`, `"checkpointStore":"file-service"`,
 		`"authorizationPolicyId":"pol-7"`,
 	} {
 		if !contains(string(raw), field) {
@@ -111,8 +111,8 @@ func TestSaveDefaultsCheckpointStore(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	data := f.calls[0].data.(SaveData)
-	if data.BlobStore != string(model.CheckpointStoreInline) {
-		t.Errorf("default blobStore = %q, want inline", data.BlobStore)
+	if data.CheckpointStore != string(model.CheckpointStoreInline) {
+		t.Errorf("default checkpointStore = %q, want inline", data.CheckpointStore)
 	}
 }
 
@@ -139,7 +139,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		ContentType:           "memo",
 		Version:               2,
 		ContentPointer:        "ptr",
-		BlobStore:             "file-service",
+		CheckpointStore:       "file-service",
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
 		Content:               seed,
@@ -163,7 +163,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		t.Errorf("mapped metadata = %+v", meta)
 	}
 	// The document's own storage bucket must be carried through from the
-	// collaboration-fetch reply so the BlobStore can persist snapshots into it.
+	// collaboration-fetch reply so the checkpoint store can persist snapshots into it.
 	if meta.StorageBucketID != "bucket-1" {
 		t.Errorf("StorageBucketID = %q, want bucket-1", meta.StorageBucketID)
 	}
@@ -179,7 +179,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 // into the domain to fail later with a weaker diagnostic.
 func TestLoadRejectsUnknownContentType(t *testing.T) {
 	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
-		Found: true, ContentType: "spreadsheet", BlobStore: "inline",
+		Found: true, ContentType: "spreadsheet", CheckpointStore: "inline",
 	}}}
 	store := newWithRPC(f)
 	if _, err := store.Load(context.Background(), "doc-x"); err == nil {
@@ -187,7 +187,7 @@ func TestLoadRejectsUnknownContentType(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsUnknownCheckpointStore asserts a server reply carrying a blobStore
+// TestLoadRejectsUnknownCheckpointStore asserts a server reply carrying a checkpointStore
 // this service cannot read is rejected at the adapter boundary.
 //
 // There are exactly two backends this service can read: file-service and the
@@ -199,11 +199,11 @@ func TestLoadRejectsUnknownCheckpointStore(t *testing.T) {
 	for _, kind := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
-				Found: true, ContentType: "memo", BlobStore: kind,
+				Found: true, ContentType: "memo", CheckpointStore: kind,
 			}}}
 			store := newWithRPC(f)
 			if _, err := store.Load(context.Background(), "doc-x"); err == nil {
-				t.Fatalf("Load with blobStore %q: expected an error — this service cannot read that backend, so serving the document would read from the wrong one", kind)
+				t.Fatalf("Load with checkpointStore %q: expected an error — this service cannot read that backend, so serving the document would read from the wrong one", kind)
 			}
 		})
 	}
