@@ -15,18 +15,17 @@ package inprocess
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
-	"github.com/antst/go-yjs/crdt"
 )
 
 // Store keeps one current state per document. It is safe for concurrent use.
 type Store struct {
 	mu        sync.Mutex
 	blobs     map[backend.DocumentID][]byte
+	vectors   map[backend.DocumentID][]byte
 	revisions map[backend.DocumentID]persistence.Revision
 	revision  persistence.Revision
 	mode      persistence.FenceMode
@@ -48,6 +47,7 @@ func NewFenced() *Store { return newStore(persistence.Fenced) }
 func newStore(mode persistence.FenceMode) *Store {
 	return &Store{
 		blobs:     map[backend.DocumentID][]byte{},
+		vectors:   map[backend.DocumentID][]byte{},
 		revisions: map[backend.DocumentID]persistence.Revision{},
 		fences:    map[backend.DocumentID]backend.Fence{},
 		mode:      mode,
@@ -99,6 +99,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	}
 	s.revision++
 	s.blobs[req.DocumentID] = append([]byte(nil), req.Update...)
+	s.vectors[req.DocumentID] = append([]byte(nil), req.StateVector...)
 	s.revisions[req.DocumentID] = s.revision
 	return s.revision, nil
 }
@@ -116,12 +117,18 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 	if !ok {
 		return persistence.Checkpoint{}, persistence.ErrNotFound
 	}
-	vector, err := crdt.EncodeStateVectorFromUpdate(blob)
-	if err != nil {
-		// Bytes that will not parse cannot form the state a successful load
-		// promises, which is precisely ErrCorrupt.
-		return persistence.Checkpoint{}, fmt.Errorf("%w: %w", persistence.ErrCorrupt, err)
-	}
+	// The vector is RETURNED AS STORED, never re-derived.
+	//
+	// Deriving it means choosing a decoder, and SaveCheckpointRequest.Update
+	// carries no V1/V2 discriminator — so the store must guess which codec its
+	// caller used. Guessing wrong is not an error: EncodeStateVectorFromUpdate on
+	// V2 bytes returns a confident, EMPTY vector with err == nil, which reads as
+	// "this document has nothing from any client". This store keeps what the
+	// writer computed instead, so the codec question never arises here.
+	// Copied on the way OUT as well as in: the contract says both returned slices
+	// are caller-owned, so handing back the stored backing array would let a
+	// caller's mutation reach into this store's state.
+	vector := append([]byte(nil), s.vectors[id]...)
 	return persistence.Checkpoint{
 		Revision:    s.revisions[id],
 		Update:      append([]byte(nil), blob...),
@@ -155,6 +162,7 @@ func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error
 		s.fences[req.DocumentID] = req.Fence
 	}
 	delete(s.blobs, req.DocumentID)
+	delete(s.vectors, req.DocumentID)
 	delete(s.revisions, req.DocumentID)
 	return nil
 }

@@ -180,7 +180,7 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 	if err != nil {
 		return persistence.Checkpoint{}, err
 	}
-	vector, err := crdt.EncodeStateVectorFromUpdate(blob)
+	vector, err := deriveStateVector(blob)
 	if err != nil {
 		// Stored bytes that will not parse cannot form the state a successful
 		// load promises.
@@ -319,6 +319,47 @@ func readErrBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, 2<<10))
 	return strings.TrimSpace(string(b))
 }
+
+// deriveStateVector extracts the state vector from a stored update.
+//
+// This store CANNOT keep the vector the writer computed: its blob is a bare Yjs
+// update by cross-repo contract — `server` writes the same shape on create and in
+// the T009 migration — so there is nowhere to put a second value without
+// changing a format two other repos read.
+//
+// Deriving means choosing a decoder, and the update carries no V1/V2
+// discriminator. Choosing wrong does not fail: EncodeStateVectorFromUpdate on V2
+// bytes returns err == nil and an EMPTY vector, which reads as "this document
+// has nothing from any client" — a confident wrong answer, which is worse than a
+// decode error because nothing downstream can detect it.
+//
+// V2 first because that is what this service writes (Room.persist encodes
+// V2). The V1 fallback exists for updates this service did not write — the
+// migration path, and the conformance suite, whose fixtures are V1-encoded. An
+// empty result from one decoder is treated as "wrong codec" rather than as an
+// empty document: a genuinely empty document yields an empty vector from BOTH,
+// so the fallback returns the same answer and the ambiguity is harmless.
+//
+// TEMPORARY. The go-yjs owners are making the encoding explicit in the
+// persistence contract rather than inferred, and extending the conformance suite
+// to cover both codecs so a store handling only one cannot pass. When that
+// lands, this sniffing is deleted in favour of the declared encoding.
+func deriveStateVector(update []byte) ([]byte, error) {
+	if v2, err := crdt.EncodeStateVectorFromUpdateV2(update); err == nil && !isEmptyStateVector(v2) {
+		return v2, nil
+	}
+	v1, err := crdt.EncodeStateVectorFromUpdate(update)
+	if err == nil && !isEmptyStateVector(v1) {
+		return v1, nil
+	}
+	// Neither decoder found any client state. Re-run the V2 decoder so a genuinely
+	// unparseable update surfaces its error rather than an empty vector.
+	return crdt.EncodeStateVectorFromUpdateV2(update)
+}
+
+// isEmptyStateVector reports the encoding of "no client state": a single
+// zero-valued length prefix.
+func isEmptyStateVector(v []byte) bool { return len(v) <= 1 }
 
 var _ persistence.DeletingCheckpointStore = (*Store)(nil)
 

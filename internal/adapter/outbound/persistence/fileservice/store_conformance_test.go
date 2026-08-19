@@ -1,6 +1,7 @@
 package fileservice
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -612,5 +613,83 @@ func TestSaveRejectsAnOversizeSnapshotBeforeUploading(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("the oversize snapshot was uploaded before being refused; the guard must run before the request")
+	}
+}
+
+// TestLoadReturnsAStateVectorThatDescribesTheDocument is the regression for the
+// silent-empty-vector defect, found by independent review.
+//
+// This store's blob is a bare Yjs update with no V1/V2 discriminator, so a load
+// must choose a decoder. Choosing wrong is NOT an error:
+// EncodeStateVectorFromUpdate on V2 bytes returns `err == nil` and the vector
+// `00` — "this document has nothing from any client". Every checkpoint this
+// service writes is V2 (Room.persist), so every load was returning that.
+//
+// It survived because the conformance suite's fixtures are V1-encoded, so the
+// V1 decoder was correct for them: the suite asserted the vector describes the
+// update, and it did — for bytes production never produces. Green over a live
+// defect.
+//
+// The assertion here is against the document's OWN state vector, so it cannot
+// pass by agreeing with whichever decoder the store happens to call.
+//
+// Non-vacuity: switch deriveStateVector back to the V1 decoder and this fails
+// with an empty vector.
+func TestLoadReturnsAStateVectorThatDescribesTheDocument(t *testing.T) {
+	store, _ := newStoreForTest(t)
+	ctx := context.Background()
+
+	// Built exactly as production does: V2.
+	doc := crdt.NewDoc("vector-fixture")
+	doc.GetText("content").Insert(0, "state vector must not be empty", crdt.Object{})
+	update, err := crdt.EncodeStateAsUpdateV2(doc, nil)
+	if err != nil {
+		t.Fatalf("encode V2 update: %v", err)
+	}
+	truth := crdt.EncodeStateVector(doc)
+
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: update, StateVector: truth,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	cp, err := store.LoadCheckpoint(ctx, "doc")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if isEmptyStateVector(cp.StateVector) {
+		t.Fatalf("LoadCheckpoint returned an EMPTY state vector (%v) for a document with content; a caller diffing against it would conclude the server holds nothing and resend everything", cp.StateVector)
+	}
+	if !bytes.Equal(cp.StateVector, truth) {
+		t.Fatalf("state vector = %v, want the document's own %v", cp.StateVector, truth)
+	}
+}
+
+// TestLoadStillDescribesAV1EncodedUpdate covers the other codec, which reaches
+// this store from the migration path and from the conformance fixtures.
+func TestLoadStillDescribesAV1EncodedUpdate(t *testing.T) {
+	store, _ := newStoreForTest(t)
+	ctx := context.Background()
+
+	doc := crdt.NewDoc("v1-fixture")
+	doc.GetText("content").Insert(0, "written by an older writer", crdt.Object{})
+	update, err := crdt.EncodeStateAsUpdate(doc, nil)
+	if err != nil {
+		t.Fatalf("encode V1 update: %v", err)
+	}
+	truth := crdt.EncodeStateVector(doc)
+
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Update: update, StateVector: truth,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	cp, err := store.LoadCheckpoint(ctx, "doc")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !bytes.Equal(cp.StateVector, truth) {
+		t.Fatalf("state vector for a V1 update = %v, want %v", cp.StateVector, truth)
 	}
 }
