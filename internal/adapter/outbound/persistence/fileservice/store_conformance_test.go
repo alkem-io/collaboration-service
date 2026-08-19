@@ -456,38 +456,35 @@ func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
 	}
 }
 
-// TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives pins a DELIBERATE
-// divergence from the core's CheckpointPersistenceDeletion suite, which requires
-// load-after-delete to report ErrNotFound.
+// TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives pins what the
+// persistence contract REQUIRES for a dangling pointer. It is not a divergence,
+// though an earlier version of this comment called it one.
 //
-// This store cannot satisfy that without creating a resurrection path, because it
-// does not own everything that makes a document findable. The blob is its own; the
-// POINTER lives in the metadata row, which belongs to `server`. Delete erases the
-// blob and leaves the row alone.
+// persistence.ErrNotFound's own doc states the rule directly: a store that
+// resolves a document through a pointer, finds the pointer set and the target
+// gone, "has not found 'no history' ... reporting ErrNotFound there makes the
+// caller treat a document that HAD content as new, seed it with create-time
+// content, and overwrite the last good state on the next save. That is silent
+// data loss arriving through the error type. Use ErrCorrupt."
 //
-// Follow the two options through the cascade. purgeDurable deletes the content
-// FIRST and the index row second, so there is a window — a broker failure between
-// the two steps — where the row outlives the blob:
+// That is exactly this store's dangling-row window. purgeDurable erases the blob
+// FIRST and drops the index row second, so a broker failure between the two steps
+// leaves the row outliving the blob. Reporting ErrNotFound there would send
+// restoreInto down its seed path, reviving the deleted document as its
+// create-time content and making that durable on the next save.
 //
-//   - Pointer left in place (what this store does): the next load sees a pointer
-//     resolving to a missing file and reports ErrCorrupt. Materialization fails
-//     and the join is refused. Unfriendly, but nothing is invented, and the state
-//     self-heals when the cascade is retried.
+// What genuinely conflicts is Deleter's load-after-delete clause, which requires
+// ErrNotFound in the same situation. Both rules cannot hold for a store that does
+// not own the pointer — ours lives in server's metadata row. Raised upstream and
+// resolved in favour of ErrNotFound's rule, since the data-loss argument is the
+// stronger one; the Deleter clause now states its precondition that the
+// implementation owns everything making the document findable.
 //
-//   - Pointer cleared (what the upstream suite would require): the next load sees
-//     no pointer, reports ErrNotFound, and restoreInto treats that as "never
-//     saved" — seeding meta.SeedContent, the row's create-time bootstrap. The
-//     deleted document comes back as its original content, and the next save makes
-//     that durable. A deleted whiteboard reappearing with its starting content is
-//     worse than a load error by every measure.
-//
-// So ErrCorrupt here is the safe answer for this medium, and ErrNotFound stays
-// reserved for a document with no row at all — which is what the completed cascade
-// produces, and where the suite's property does hold end to end.
-//
-// Reported upstream rather than worked around: the deletion contract assumes the
-// store owns every artefact that makes a document disappear, which is not true of
-// a store whose pointer lives in another system's row.
+// The consequence for this file: the blob store is not a conforming Deleter ON
+// ITS OWN and should not be measured as one. The load-after-delete guarantee
+// belongs to whatever owns the whole document — the purge cascade, which does
+// provide it end to end, because the completed cascade drops the row and a
+// rowless document loads as ErrNotFound.
 func TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives(t *testing.T) {
 	store, _ := newStoreForTest(t)
 	ctx := context.Background()
