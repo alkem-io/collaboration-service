@@ -197,7 +197,7 @@ delivery.
 - [X] T064 [P] Confirm the in-process path still serves all three roles per `specs/003-go-yjs-core-port/quickstart.md` §3: test suite, local development with real editors, and the zero-dependency smoke test (§III)
 - [X] T065 [P] Verify unit coverage ≥95% across `internal/...`, with no coverage-padding tests (SC-011, §XII)
 - [X] T066 Run the full gate set — `go build`, `go vet`, `go vet -tags integration`, `golangci-lint run` at zero, `go test -race ./...` (§IX)
-- [ ] T067 Run a full adversarial review of the rebuilt service (`internal/...`, `cmd/...`) and drive it to zero findings (SC-010)
+- [X] T067 Run a full adversarial review of the rebuilt service (`internal/...`, `cmd/...`) and drive it to zero findings (SC-010)
 - [X] T068 Update `specs/001-collaboration-server/quickstart.md`, which is stale on the metadata-store default and predates the standalone withdrawal
 
 ---

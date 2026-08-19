@@ -39,9 +39,13 @@ func (r *Room) onFlushSucceeded() {
 	r.flushFailures = 0
 	r.undurableSince = time.Time{}
 	r.metrics.DocumentDurabilityRestored()
-	// Tell collaborators their work is safe again. A one-way notification would
-	// leave clients believing they are still at risk after recovery (FR-027).
-	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})
+	// FR-027's restore half — telling collaborators their work is safe again — is
+	// carried by persist's own unconditional `saved` broadcast, which runs
+	// immediately after this. Emitting one here too sent the client TWO identical
+	// frames with the same version on every recovery, so anything counting saves
+	// double-counted exactly when it was already reporting an incident.
+	//
+	// The transition is what the client reads: save-error, then saved.
 }
 
 // onFlushFailed records a failed save and escalates once the configured threshold
