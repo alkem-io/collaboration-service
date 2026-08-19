@@ -194,6 +194,24 @@ func TestCheckpointConformance(t *testing.T) {
 	})
 }
 
+// The core's CheckpointPersistenceDeletion suite is deliberately NOT run against
+// this store, and the reason is now stated upstream rather than inferred here.
+//
+// Its load-after-delete clause requires ErrNotFound. This store returns ErrCorrupt
+// while the index row survives, because it does not own the pointer — that lives
+// in server's metadata row. persistence/store.go (v0.0.6) states the precondition:
+// "a partial owner cannot satisfy Deleter alone ... a component store failing the
+// suite on this rule has a shape mismatch, not a bug."
+//
+// The guarantee is real, it just belongs a layer up: the completed purge cascade
+// drops the row, and a rowless document loads as ErrNotFound. The suite therefore
+// belongs against purgeDurable, not against the blob store.
+//
+// I re-added the invocation once when v0.0.6 fixed the unrelated codec-fixture
+// defect, and it failed on exactly this clause. Recorded so the next person does
+// not repeat it. The four properties it would check are covered directly below
+// and in TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives.
+
 // --- behaviours the contract cannot express, but this medium requires ---
 
 // realUpdate builds a genuine Yjs update carrying text. Opaque bytes will not do

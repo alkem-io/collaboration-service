@@ -80,27 +80,20 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	// Checked BEFORE the lock and before any mutation: a rejected save must leave
 	// the store untouched.
 	//
-	// V1 is accepted here for exactly ONE live consumer, named so it can be
-	// removed the moment that consumer goes away: the core's
-	// CheckpointPersistenceDeletion suite seeds every fixture with EncodingV1 and
-	// has no ErrUnsupportedEncoding skip, so a V2-only store cannot run it. That is
-	// an upstream defect, reported and already fixed on go-yjs main (the deletion
-	// suites now seed through acceptedFixtures) but NOT in the pinned v0.0.5.
+	// V2 ONLY, matching the deployed file-service store. Room.persist encodes V2
+	// and restoreInto reads V2, so nothing in this service produces anything else;
+	// a codec with no producer would be untested flexibility that also makes this
+	// fixture a weaker stand-in for production than it should be.
 	//
-	// REMOVAL BOUNDARY: when the pin moves to a release containing that fix, delete
-	// the V1 case here. Nothing in this service produces V1 — Room.persist encodes
-	// V2 and restoreInto reads V2 — and the deployed file-service store already
-	// refuses it.
-	//
-	// EncodingUnspecified is refused because the zero value would otherwise
-	// silently become whichever codec this store happens to prefer — the
+	// EncodingUnspecified is refused separately because the zero value would
+	// otherwise silently become whichever codec this store happens to prefer — the
 	// confident-wrong-answer the field exists to remove.
 	switch req.Encoding {
-	case persistence.EncodingV1, persistence.EncodingV2:
+	case persistence.EncodingV2:
 	case persistence.EncodingUnspecified:
 		return 0, persistence.ErrEncodingRequired
 	default:
-		return 0, fmt.Errorf("%w: %d", persistence.ErrUnsupportedEncoding, req.Encoding)
+		return 0, fmt.Errorf("%w: this store accepts V2 only, got %d", persistence.ErrUnsupportedEncoding, req.Encoding)
 	}
 
 	s.mu.Lock()
