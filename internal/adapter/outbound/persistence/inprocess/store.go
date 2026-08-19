@@ -11,10 +11,10 @@
 // every save. If the fixture had a different shape from production, every test
 // would be exercising a persistence model the deployed service does not use.
 //
-// It does differ from the file-service store in one respect, deliberately: this
-// medium can record the state vector and the codec alongside the bytes, so it
-// accepts either V1 or V2. The file-service blob is a bare Yjs update that other
-// systems read, with nowhere to put that metadata, so it supports V2 only.
+// Like the file-service store it accepts V2 only — the codec this service writes
+// and reads. It differs in recording the state vector alongside the bytes rather
+// than deriving it, which the file-service blob (a bare Yjs update other systems
+// read) has nowhere to put.
 package inprocess
 
 import (
@@ -96,10 +96,23 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 		return 0, err
 	}
 	// Checked BEFORE the lock and before any mutation: a rejected save must leave
-	// the store untouched. This medium records the codec alongside the bytes, so
-	// it accepts either — but never an unstated one, because the zero value would
-	// otherwise silently become whichever codec this store happens to prefer.
-	// That is the confident-wrong-answer the field exists to remove.
+	// the store untouched.
+	//
+	// V1 is accepted here for exactly ONE live consumer, named so it can be
+	// removed the moment that consumer goes away: the core's
+	// CheckpointPersistenceDeletion suite seeds every fixture with EncodingV1 and
+	// has no ErrUnsupportedEncoding skip, so a V2-only store cannot run it. That is
+	// an upstream defect, reported and already fixed on go-yjs main (the deletion
+	// suites now seed through acceptedFixtures) but NOT in the pinned v0.0.5.
+	//
+	// REMOVAL BOUNDARY: when the pin moves to a release containing that fix, delete
+	// the V1 case here. Nothing in this service produces V1 — Room.persist encodes
+	// V2 and restoreInto reads V2 — and the deployed file-service store already
+	// refuses it.
+	//
+	// EncodingUnspecified is refused because the zero value would otherwise
+	// silently become whichever codec this store happens to prefer — the
+	// confident-wrong-answer the field exists to remove.
 	switch req.Encoding {
 	case persistence.EncodingV1, persistence.EncodingV2:
 	case persistence.EncodingUnspecified:
