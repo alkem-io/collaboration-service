@@ -37,10 +37,19 @@ it down either — the pod holds that subscription and its goroutine for life.
 it, which is what `removeSubscriber`'s arithmetic already relied on. The two
 sites now agree by construction rather than by coincidence.
 
-**Honestly characterised:** the stress test does NOT reproduce the original race
-(600 concurrent subscribe/close cycles, `-race`, `-count=10`, all green). This
-one rests on inspection plus `TestPumpRefsAlwaysMatchTheLiveSubscriberCount`,
-which pins the invariant that was violated.
+**Proven, not argued.** A 600-iteration concurrent stress test never reproduced
+it — the window is only as wide as one `client.Subscribe` call — so it was
+initially recorded as resting on inspection. It is now deterministic:
+`TestSubscriberClosingInsideThePumpStartWindowLeavesNoPump` widens the window
+from OUTSIDE the hub, by supplying a Redis client whose `Subscribe` blocks until
+the test releases it, and closes the only subscriber while a goroutine is parked
+in there. Verified RED against the original `p.refs = 1` with "a Redis
+subscription was installed for a document with NO subscribers".
+
+No production seam was added for this. The hub already takes its client as an
+interface, which is what made the window reachable from a test — a hook in
+production code to prove a lock-window bug is a change nobody can justify at
+review time.
 
 ## 3. Escalation spun instead of terminating — the one with real blast radius
 
