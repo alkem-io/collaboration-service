@@ -24,18 +24,18 @@ const (
 	ContentTypeWhiteboard ContentType = "whiteboard"
 )
 
-// BlobStoreKind identifies which BlobStore adapter holds a document's encoded
+// CheckpointStoreKind identifies which checkpoint-store adapter holds a document's encoded
 // snapshot. It is persisted in the metadata row so a document can be rehydrated
 // from the right backend regardless of the running configuration.
-type BlobStoreKind string
+type CheckpointStoreKind string
 
 const (
-	// BlobStoreInline keeps the blob in the main DB; the content pointer is
+	// CheckpointStoreInline keeps the blob in the main DB; the content pointer is
 	// the metadata row key (today's behavior).
-	BlobStoreInline BlobStoreKind = "inline"
-	// BlobStoreFileService offloads the blob to the existing file-service;
+	CheckpointStoreInline CheckpointStoreKind = "inline"
+	// CheckpointStoreFileService offloads the blob to the existing file-service;
 	// the content pointer is a file-service object id.
-	BlobStoreFileService BlobStoreKind = "file-service"
+	CheckpointStoreFileService CheckpointStoreKind = "file-service"
 
 	// These two are the ONLY kinds. A metadata row naming any other backend is
 	// rejected at the adapter boundary rather than accepted: this service could
@@ -50,7 +50,7 @@ type DocumentID string
 // Metadata is the small, queryable index row for a collaboration document,
 // owned by the Alkemio server (or the standalone metadata store). It records
 // where the blob lives and who owns the document's lifecycle — never the blob
-// bytes themselves (those live in the BlobStore behind ContentPointer).
+// bytes themselves (those live in the checkpoint store behind ContentPointer).
 type Metadata struct {
 	ID DocumentID
 	// ContentType drives the document convention and client binding.
@@ -61,18 +61,18 @@ type Metadata struct {
 	// ContentPointer locates the snapshot inside the blob store (inline row
 	// key / file-service object id).
 	ContentPointer string
-	// BlobStore names the adapter that holds the blob for ContentPointer.
-	BlobStore BlobStoreKind
+	// CheckpointStore names the adapter that holds the blob for ContentPointer.
+	CheckpointStore CheckpointStoreKind
 	// AuthorizationPolicyID is the Alkemio authorization policy this document
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
 	// the authorization-evaluation-service; empty in open/standalone mode.
 	AuthorizationPolicyID string
 	// StorageBucketID is the document's OWN storage bucket (its
 	// profile.storageBucket.id, carried on collaboration-fetch). The
-	// file-service BlobStore persists each snapshot into this per-document
+	// file-service checkpoint store persists each snapshot into this per-document
 	// bucket so blobs co-locate with the document's other media rather than
 	// piling into one flat platform bucket. Empty in standalone / no-metadata
-	// mode, where the BlobStore falls back to its configured bucket.
+	// mode, where the checkpoint store falls back to its configured bucket.
 	StorageBucketID string
 	// SeedContent is the document's stored content delivered on
 	// collaboration-fetch for the FIRST-OPEN SEED (R4): a freshly-created
@@ -102,6 +102,6 @@ type Snapshot struct {
 	ID DocumentID
 	// Version matches the Metadata.Version the bytes were persisted at.
 	Version int
-	// Data is the encoded Y.Doc state (v2) handed to BlobStore.Put.
+	// Data is the encoded Y.Doc state (v2) handed to CheckpointStore.SaveCheckpoint.
 	Data []byte
 }

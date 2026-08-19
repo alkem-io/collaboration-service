@@ -120,10 +120,10 @@ backend is a new adapter package + one switch arm — no domain change.
 > conflated handshake-AuthN with per-doc-AuthZ. Wave 5 splits them: **`AUTH_MODE`**
 > selects the **handshake-AuthN** strategy (`header`|`oidc`|`open`) and **`AUTHZ_MODE`**
 > selects the **per-doc-AuthZ** adapter (`authzeval`|`open`), independently. When
-> `AUTHZ_MODE` is unset it is **derived** from `AUTH_MODE` for backward-compat
-> (`open`→`open`; `header`/`oidc`→`authzeval`), and the retired
-> `AUTH_MODE=authzeval` value was REMOVED, superseded by `header` AuthN +
-> `authzeval` AuthZ (OPEN-5). Validation stays fail-fast: `oidc` requires its
+> `AUTHZ_MODE` is unset it is **derived** from `AUTH_MODE`
+> (`open`→`open`; `header`/`oidc`→`authzeval`) — a sensible default, since an
+> authenticated deployment wants real authorization. A value that bundled both
+> into one key was removed while the shape was still settling (OPEN-5). Validation stays fail-fast: `oidc` requires its
 > session-store/JWKS config (whichever paths are enabled); `authzeval` AuthZ
 > requires `AUTH_SERVICE_URL`.
 

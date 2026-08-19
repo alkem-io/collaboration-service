@@ -79,7 +79,7 @@ func TestPurgeDurableOnlyDocument(t *testing.T) {
 	}
 	if err := deps.meta.Save(context.Background(), model.Metadata{
 		ID: "durable-only", ContentType: model.ContentTypeMemo,
-		ContentPointer: "durable-only", BlobStore: model.BlobStoreInline,
+		ContentPointer: "durable-only", CheckpointStore: model.CheckpointStoreInline,
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}

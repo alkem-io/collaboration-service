@@ -120,10 +120,10 @@ func TestRoomSeedsFromStoredContentOnFirstOpen(t *testing.T) {
 			// the first collaboration save. This is the "created, never opened in a
 			// session" state (US1 acceptance #3).
 			if err := meta.Save(context.Background(), model.Metadata{
-				ID:          docID,
-				ContentType: tc.content,
-				BlobStore:   model.BlobStoreInline,
-				SeedContent: tc.seed,
+				ID:              docID,
+				ContentType:     tc.content,
+				CheckpointStore: model.CheckpointStoreInline,
+				SeedContent:     tc.seed,
 			}); err != nil {
 				t.Fatalf("seed metadata: %v", err)
 			}
@@ -196,12 +196,12 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 	}
 	pointer := "file-" + string(docID)
 	if err := meta.Save(context.Background(), model.Metadata{
-		ID:             docID,
-		ContentType:    model.ContentTypeMemo,
-		ContentPointer: pointer,
-		BlobStore:      model.BlobStoreInline,
-		Version:        1,
-		SeedContent:    memoSeedV2(t, "stale seed "),
+		ID:              docID,
+		ContentType:     model.ContentTypeMemo,
+		ContentPointer:  pointer,
+		CheckpointStore: model.CheckpointStoreInline,
+		Version:         1,
+		SeedContent:     memoSeedV2(t, "stale seed "),
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}
@@ -233,9 +233,9 @@ func TestRoomFreshWithoutSeedStaysEmpty(t *testing.T) {
 	open := authopen.New()
 
 	if err := meta.Save(context.Background(), model.Metadata{
-		ID:          docID,
-		ContentType: model.ContentTypeMemo,
-		BlobStore:   model.BlobStoreInline,
+		ID:              docID,
+		ContentType:     model.ContentTypeMemo,
+		CheckpointStore: model.CheckpointStoreInline,
 		// no SeedContent, no ContentPointer.
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
@@ -285,9 +285,9 @@ func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
 	// Pre-register the document as a WHITEBOARD with no ContentPointer and no seed —
 	// the "created, never opened in a session" state.
 	if err := deps.meta.Save(context.Background(), model.Metadata{
-		ID:          docID,
-		ContentType: model.ContentTypeWhiteboard,
-		BlobStore:   model.BlobStoreInline,
+		ID:              docID,
+		ContentType:     model.ContentTypeWhiteboard,
+		CheckpointStore: model.CheckpointStoreInline,
 	}); err != nil {
 		t.Fatalf("pre-register whiteboard: %v", err)
 	}

@@ -22,12 +22,12 @@ import (
 // with the epic R9 limit defaults, the base every error case mutates one field of.
 func standaloneConfig() *config.Config {
 	return &config.Config{
-		Port:          0,
-		Fanout:        config.FanoutInMemory,
-		MetadataStore: config.MetadataStoreInMemory,
-		BlobStore:     config.BlobStoreInline,
-		AuthMode:      config.AuthModeOpen,
-		AuthZMode:     config.AuthZModeOpen,
+		Port:            0,
+		HubMode:         config.HubInMemory,
+		MetadataStore:   config.MetadataStoreInMemory,
+		CheckpointStore: config.CheckpointStoreInline,
+		AuthMode:        config.AuthModeOpen,
+		AuthZMode:       config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -74,7 +74,7 @@ func TestNewStandaloneWiresAndCloses(t *testing.T) {
 // (via buildDeps' cleanup) leaves nothing started — no half-configured run.
 func TestNewFailsOnHubError(t *testing.T) {
 	cfg := standaloneConfig()
-	cfg.Fanout = config.FanoutRedis
+	cfg.HubMode = config.HubRedis
 	cfg.Redis = config.RedisConfig{URL: "://not-a-redis-url"}
 
 	if _, err := New(cfg, zap.NewNop()); err == nil {
@@ -91,7 +91,7 @@ func TestNewFailsOnHubError(t *testing.T) {
 // v3.0.0 §III withdrew, and there is no persistence implementation for them —
 // a selection config.Load has already accepted resolves to a usable store.
 func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
-	cfg := &config.Config{BlobStore: config.BlobStoreFileService}
+	cfg := &config.Config{CheckpointStore: config.CheckpointStoreFileService}
 	if _, err := buildCheckpoint(cfg, metainmem.New()); err == nil {
 		t.Fatal("buildCheckpoint must error when file-service has no base URL")
 	}
@@ -108,11 +108,11 @@ func TestBuildCheckpointErrorsOnIncompleteConfig(t *testing.T) {
 // described the behaviour accurately and pinned it as if it were desirable. It was
 // not: that same fallback is what let an unrecognised selector come up healthy on
 // a store that loses everything at restart. The gate now lives in config.Load
-// (TestUnsupportedBlobStoreValuesFailStartup), so nothing else reaches this
+// (TestUnsupportedCheckpointStoreValuesFailStartup), so nothing else reaches this
 // function, and asserting that it lands somewhere plausible would only
 // re-legitimise the hole.
 func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
-	store, err := buildCheckpoint(&config.Config{BlobStore: config.BlobStoreInline}, metainmem.New())
+	store, err := buildCheckpoint(&config.Config{CheckpointStore: config.CheckpointStoreInline}, metainmem.New())
 	if err != nil {
 		t.Fatalf("buildCheckpoint(inline): %v", err)
 	}
@@ -127,12 +127,12 @@ func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
 // rehydrate from the wrong backend, so this is a real persistence invariant.
 func TestBlobKindForMapsEverySelection(t *testing.T) {
 	cases := []struct {
-		mode config.BlobStoreMode
-		want model.BlobStoreKind
+		mode config.CheckpointStoreMode
+		want model.CheckpointStoreKind
 	}{
-		{config.BlobStoreFileService, model.BlobStoreFileService},
-		{config.BlobStoreInline, model.BlobStoreInline},
-		{config.BlobStoreMode("unknown"), model.BlobStoreInline}, // default → inline
+		{config.CheckpointStoreFileService, model.CheckpointStoreFileService},
+		{config.CheckpointStoreInline, model.CheckpointStoreInline},
+		{config.CheckpointStoreMode("unknown"), model.CheckpointStoreInline}, // default → inline
 	}
 	for _, c := range cases {
 		if got := blobKindFor(c.mode); got != c.want {

@@ -84,7 +84,7 @@ func TestLoadMapsRow(t *testing.T) {
 	}
 	if got.ID != "doc-1" || got.ContentType != model.ContentTypeWhiteboard ||
 		got.Version != 3 || got.ContentPointer != "ptr-uuid" ||
-		got.BlobStore != model.BlobStoreFileService ||
+		got.CheckpointStore != model.CheckpointStoreFileService ||
 		got.AuthorizationPolicyID != "pol-7" || got.OwnerRef != "owner-x" {
 		t.Errorf("mapped row = %+v", got)
 	}
@@ -121,7 +121,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		ID:                    "doc-2",
 		ContentType:           model.ContentTypeMemo,
 		ContentPointer:        "ptr",
-		BlobStore:             model.BlobStoreFileService,
+		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-9",
 		OwnerRef:              "owner",
 	})

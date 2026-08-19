@@ -31,15 +31,15 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 			// Stage 1: nothing open yet.
 			name: "broadcaster",
 			cfg: &config.Config{
-				Fanout: config.FanoutRedis,
-				Redis:  config.RedisConfig{URL: "not-a-redis-url"},
+				HubMode: config.HubRedis,
+				Redis:   config.RedisConfig{URL: "not-a-redis-url"},
 			},
 		},
 		{
 			// Stage 2: the broadcaster is already open and must be closed.
 			name: "metadata after a live broadcaster",
 			cfg: &config.Config{
-				Fanout:        config.FanoutRedis,
+				HubMode:       config.HubRedis,
 				MetadataStore: config.MetadataStoreRabbitMQ,
 				RabbitMQ:      config.RabbitMQConfig{URL: "amqp://%zz-invalid", Queue: "q"},
 			},
@@ -49,13 +49,13 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 			// no base URL fails the checkpoint build.
 			name: "checkpoint after a live metadata store",
 			cfg: &config.Config{
-				MetadataStore: config.MetadataStoreInMemory,
-				BlobStore:     config.BlobStoreFileService,
+				MetadataStore:   config.MetadataStoreInMemory,
+				CheckpointStore: config.CheckpointStoreFileService,
 			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.cfg.Fanout == config.FanoutRedis && tc.name != "broadcaster" {
+			if tc.cfg.HubMode == config.HubRedis && tc.name != "broadcaster" {
 				// Give the later cases a REAL redis so the broadcaster genuinely opens
 				// and the cleanup has something to close.
 				tc.cfg.Redis = config.RedisConfig{URL: "redis://" + startMiniredis(t)}
@@ -79,10 +79,10 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 // above cannot pass against a buildDeps that never succeeds.
 func TestBuildDepsWiresTheStandaloneDefaults(t *testing.T) {
 	deps, cleanup, err := buildDeps(&config.Config{
-		Fanout:        config.FanoutInMemory,
-		MetadataStore: config.MetadataStoreInMemory,
-		BlobStore:     config.BlobStoreInline,
-		AuthMode:      config.AuthModeOpen,
+		HubMode:         config.HubInMemory,
+		MetadataStore:   config.MetadataStoreInMemory,
+		CheckpointStore: config.CheckpointStoreInline,
+		AuthMode:        config.AuthModeOpen,
 	}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("buildDeps: %v", err)

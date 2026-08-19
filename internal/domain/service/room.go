@@ -178,8 +178,8 @@ type Room struct {
 	pointer       string
 	// blobKind is the configured blob backend persisted in the metadata row so a
 	// document rehydrates from the right backend regardless of running config
-	// (data-model.md BlobStore; T005.6).
-	blobKind model.BlobStoreKind
+	// (data-model.md checkpoint store; T005.6).
+	blobKind model.CheckpointStoreKind
 	// policyID is the document's Alkemio authorization policy id (OPEN-1),
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
@@ -192,9 +192,9 @@ type Room struct {
 	// pre-registered owner_ref the delete cascade keys off.
 	ownerRef string
 	// bucketID is the document's own storage bucket, loaded from metadata and
-	// passed to BlobStore.Put so each snapshot is persisted into the document's
+	// passed to CheckpointStore.SaveCheckpoint so each snapshot is persisted into the document's
 	// own bucket (not a single flat platform bucket). Empty in standalone /
-	// no-metadata mode, where the BlobStore falls back to its configured bucket.
+	// no-metadata mode, where the checkpoint store falls back to its configured bucket.
 	bucketID string
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
@@ -369,7 +369,7 @@ type RoomConfig struct {
 	// BlobKind is the configured blob backend, persisted in each saved metadata
 	// row so a document rehydrates from the right backend (T005.6). Empty
 	// defaults to inline.
-	BlobKind model.BlobStoreKind
+	BlobKind model.CheckpointStoreKind
 
 	// Limits carries the configurable enforcement bounds (FR-024, epic R9).
 	Limits Limits
@@ -472,7 +472,7 @@ func DefaultRoomConfig() RoomConfig {
 		SaveDebounce:           500 * time.Millisecond,
 		IdleTimeout:            30 * time.Second,
 		SendBuffer:             64,
-		BlobKind:               model.BlobStoreInline,
+		BlobKind:               model.CheckpointStoreInline,
 		Limits:                 DefaultLimits(),
 		CollaboratorInactivity: defaultCollaboratorInactivity,
 		ContributionWindow:     defaultContributionWindowEvery,
@@ -516,7 +516,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	}
 	blobKind := cfg.BlobKind
 	if blobKind == "" {
-		blobKind = model.BlobStoreInline
+		blobKind = model.CheckpointStoreInline
 	}
 	if cfg.BackendTimeout <= 0 {
 		cfg.BackendTimeout = defaultBackendTimeout
@@ -750,14 +750,14 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
 	}
-	if meta.BlobStore != "" {
+	if meta.CheckpointStore != "" {
 		// Record the backend the document was last saved to so subsequent saves
 		// re-persist it in the metadata row (the row stays truthful about where the
 		// state lives). Note this does not re-route the read below: the checkpoint
 		// store is the single adapter selected at startup, so a running config whose
-		// CHECKPOINT_STORE differs from meta.BlobStore must point that adapter at the same
+		// CHECKPOINT_STORE differs from meta.CheckpointStore must point that adapter at the same
 		// backing store to rehydrate (T005.6).
-		r.blobKind = meta.BlobStore
+		r.blobKind = meta.CheckpointStore
 	}
 	return meta, true, nil
 }
@@ -1709,7 +1709,7 @@ func (r *Room) persist(ctx context.Context) {
 	// which is exactly the window this misses: recreation happens on a later save.
 	// Gated on the store actually being pointer-addressed, so the in-process path
 	// — which never sets a pointer — pays nothing.
-	if r.blobKind == model.BlobStoreFileService {
+	if r.blobKind == model.CheckpointStoreFileService {
 		if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
 			r.pointer = meta.ContentPointer
 		}
@@ -1721,7 +1721,7 @@ func (r *Room) persist(ctx context.Context) {
 		ContentType:           r.content,
 		Version:               newVersion,
 		ContentPointer:        r.pointer,
-		BlobStore:             r.blobKind,
+		CheckpointStore:       r.blobKind,
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,

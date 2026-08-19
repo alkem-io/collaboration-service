@@ -56,9 +56,9 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	default:
 		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown contentType %q", reply.ContentType)
 	}
-	blobStore := model.BlobStoreKind(reply.BlobStore)
+	blobStore := model.CheckpointStoreKind(reply.BlobStore)
 	switch blobStore {
-	case "", model.BlobStoreInline, model.BlobStoreFileService:
+	case "", model.CheckpointStoreInline, model.CheckpointStoreFileService:
 	default:
 		return model.Metadata{}, fmt.Errorf("collaboration-fetch: unknown blobStore %q", reply.BlobStore)
 	}
@@ -68,7 +68,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 		ContentType:           contentType,
 		Version:               reply.Version,
 		ContentPointer:        reply.ContentPointer,
-		BlobStore:             blobStore,
+		CheckpointStore:       blobStore,
 		AuthorizationPolicyID: reply.AuthorizationPolicyID,
 		StorageBucketID:       reply.StorageBucketID,
 		// Surface the server-delivered content for the first-open seed (R4): the
@@ -79,11 +79,11 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 }
 
 // Save upserts the document index over collaboration-save (index only — the blob
-// goes to the BlobStore, never this bus).
+// goes to the checkpoint store, never this bus).
 func (s *Store) Save(ctx context.Context, meta model.Metadata) error {
-	blobStore := meta.BlobStore
+	blobStore := meta.CheckpointStore
 	if blobStore == "" {
-		blobStore = model.BlobStoreInline
+		blobStore = model.CheckpointStoreInline
 	}
 	data := SaveData{
 		ID:                    string(meta.ID),

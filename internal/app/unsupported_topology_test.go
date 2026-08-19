@@ -27,7 +27,7 @@ import (
 // instead.
 func TestUnsupportedTopologyIsWarnedBeforeServing(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
-	cfg := &config.Config{Fanout: config.FanoutRedis, BlobStore: config.BlobStoreFileService}
+	cfg := &config.Config{HubMode: config.HubRedis, CheckpointStore: config.CheckpointStoreFileService}
 
 	warnUnsupportedTopology(cfg, zap.New(core))
 
@@ -60,9 +60,9 @@ func TestSupportedTopologiesAreNotWarnedAbout(t *testing.T) {
 		name string
 		cfg  *config.Config
 	}{
-		{"single pod, durable", &config.Config{Fanout: config.FanoutInMemory, BlobStore: config.BlobStoreFileService}},
-		{"multi pod, non-durable", &config.Config{Fanout: config.FanoutRedis, BlobStore: config.BlobStoreInline}},
-		{"single pod, non-durable", &config.Config{Fanout: config.FanoutInMemory, BlobStore: config.BlobStoreInline}},
+		{"single pod, durable", &config.Config{HubMode: config.HubInMemory, CheckpointStore: config.CheckpointStoreFileService}},
+		{"multi pod, non-durable", &config.Config{HubMode: config.HubRedis, CheckpointStore: config.CheckpointStoreInline}},
+		{"single pod, non-durable", &config.Config{HubMode: config.HubInMemory, CheckpointStore: config.CheckpointStoreInline}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zapcore.DebugLevel)

@@ -242,7 +242,7 @@ func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
 	// Pre-seed a metadata row so loadSnapshot proceeds to the blob fetch.
 	if err := meta.Save(context.Background(), model.Metadata{
 		ID: "blob-fail", ContentType: model.ContentTypeMemo,
-		ContentPointer: "blob-fail", BlobStore: model.BlobStoreInline,
+		ContentPointer: "blob-fail", CheckpointStore: model.CheckpointStoreInline,
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}

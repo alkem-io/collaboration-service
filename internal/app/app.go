@@ -120,12 +120,12 @@ func (a *App) Close() {
 // be said out loud, before serving, naming both keys — the failure mode is silent
 // data loss that appears only under conditions nobody reproduces on purpose.
 func warnUnsupportedTopology(cfg *config.Config, logger *zap.Logger) {
-	if cfg.Fanout != config.FanoutRedis || cfg.BlobStore != config.BlobStoreFileService {
+	if cfg.HubMode != config.HubRedis || cfg.CheckpointStore != config.CheckpointStoreFileService {
 		return
 	}
 	logger.Warn("UNSUPPORTED CONFIGURATION: multi-pod fan-out with a durable store and no document ownership mechanism",
-		zap.String("HUB_MODE", string(cfg.Fanout)),
-		zap.String("CHECKPOINT_STORE", string(cfg.BlobStore)),
+		zap.String("HUB_MODE", string(cfg.HubMode)),
+		zap.String("CHECKPOINT_STORE", string(cfg.CheckpointStore)),
 		zap.String("consequence", "every pod flushes the whole document on its own schedule with nothing deciding which write wins; two pods that diverge will overwrite each other and the later writer silently discards edits it never received"),
 		zap.String("supported", "run a single pod (HUB_MODE=inmemory) with CHECKPOINT_STORE=file-service"),
 	)
@@ -175,7 +175,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 }
 
 func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hub, error) {
-	if cfg.Fanout != config.FanoutRedis {
+	if cfg.HubMode != config.HubRedis {
 		// The core's shipped single-process hub. Not a no-op: the room publishes and
 		// subscribes on this path too, so single-pod exercises the same code multi-pod
 		// does rather than a stub.
@@ -281,7 +281,7 @@ func lifecycleQueue(cfg *config.Config) string {
 // and the zero-dependency smoke test (§III). Any other value is rejected by
 // config.Load and cannot reach here.
 func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.DeletingCheckpointStore, error) {
-	if cfg.BlobStore == config.BlobStoreFileService {
+	if cfg.CheckpointStore == config.CheckpointStoreFileService {
 		return persistfileservice.New(persistfileservice.Config{
 			BaseURL:          cfg.FileService.BaseURL,
 			FallbackBucketID: cfg.FileService.StorageBucketID,
@@ -378,12 +378,12 @@ func (p policyResolver) PolicyID(ctx context.Context, id model.DocumentID) (stri
 
 // blobKindFor maps the configured blob store to the kind persisted in each saved
 // metadata row, so a document rehydrates from the right backend (T005.6).
-func blobKindFor(mode config.BlobStoreMode) model.BlobStoreKind {
+func blobKindFor(mode config.CheckpointStoreMode) model.CheckpointStoreKind {
 	switch mode {
-	case config.BlobStoreFileService:
-		return model.BlobStoreFileService
+	case config.CheckpointStoreFileService:
+		return model.CheckpointStoreFileService
 	default:
-		return model.BlobStoreInline
+		return model.CheckpointStoreInline
 	}
 }
 
@@ -391,7 +391,7 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 	httpAdapter.InitMetrics()
 
 	roomCfg := service.DefaultRoomConfig()
-	roomCfg.BlobKind = blobKindFor(cfg.BlobStore)
+	roomCfg.BlobKind = blobKindFor(cfg.CheckpointStore)
 	roomCfg.Limits = service.Limits{
 		MaxDocBytes:      cfg.Limits.MaxDocBytes,
 		MaxConnsPerRoom:  cfg.Limits.MaxConnsPerRoom,

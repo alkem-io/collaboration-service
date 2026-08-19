@@ -31,7 +31,7 @@ package rabbitmq
 
 // SaveData is the collaboration-save request payload: the index row only.
 // (carries forward nothing of the legacy binaryStateInBase64 / content fields —
-// the blob lives in the BlobStore, located by ContentPointer + BlobStore.)
+// the blob lives in the checkpoint store, located by ContentPointer + BlobStore.)
 type SaveData struct {
 	ID                    string `json:"id"`
 	ContentType           string `json:"contentType"`

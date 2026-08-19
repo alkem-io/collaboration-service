@@ -19,14 +19,14 @@ import (
 	"strings"
 )
 
-// FanoutMode selects the ClusterBroadcaster adapter.
-type FanoutMode string
+// HubMode selects the ClusterBroadcaster adapter.
+type HubMode string
 
 const (
-	// FanoutInMemory is the single-pod default (no cross-pod fan-out).
-	FanoutInMemory FanoutMode = "inmemory"
-	// FanoutRedis fans out across pods via Redis pub-sub (doc:/awareness:).
-	FanoutRedis FanoutMode = "redis"
+	// HubInMemory is the single-pod default (no cross-pod fan-out).
+	HubInMemory HubMode = "inmemory"
+	// HubRedis fans out across pods via Redis pub-sub (doc:/awareness:).
+	HubRedis HubMode = "redis"
 )
 
 // MetadataStoreMode selects the MetadataStore adapter.
@@ -42,14 +42,14 @@ const (
 	MetadataStorePostgres MetadataStoreMode = "postgres"
 )
 
-// BlobStoreMode selects the BlobStore adapter.
-type BlobStoreMode string
+// CheckpointStoreMode selects the checkpoint-store adapter (CHECKPOINT_STORE).
+type CheckpointStoreMode string
 
 const (
-	// BlobStoreInline keeps the blob in the main DB (default).
-	BlobStoreInline BlobStoreMode = "inline"
-	// BlobStoreFileService offloads the blob to file-service.
-	BlobStoreFileService BlobStoreMode = "file-service"
+	// CheckpointStoreInline keeps the blob in the main DB (default).
+	CheckpointStoreInline CheckpointStoreMode = "inline"
+	// CheckpointStoreFileService offloads the blob to file-service.
+	CheckpointStoreFileService CheckpointStoreMode = "file-service"
 )
 
 // AuthMode selects the handshake-AuthN adapter (Wave 5: AuthN is named
@@ -88,12 +88,12 @@ const (
 type Config struct {
 	// Port is the HTTP/WS listen port.
 	Port int
-	// Fanout selects the cross-pod broadcaster (inmemory default).
-	Fanout FanoutMode
+	// HubMode selects the cross-pod hub. REQUIRED; no default.
+	HubMode HubMode
 	// MetadataStore selects the metadata/index adapter (rabbitmq default).
 	MetadataStore MetadataStoreMode
-	// BlobStore selects the snapshot blob adapter (inline default).
-	BlobStore BlobStoreMode
+	// CheckpointStore selects the checkpoint-store adapter. REQUIRED; no default.
+	CheckpointStore CheckpointStoreMode
 	// AuthMode selects the handshake-AuthN adapter (open default for standalone).
 	AuthMode AuthMode
 	// AuthZMode selects the per-document-AuthZ adapter, independently of AuthMode
@@ -275,7 +275,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	fanout, err := parseFanout(os.Getenv("HUB_MODE"))
+	fanout, err := parseHubMode(os.Getenv("HUB_MODE"))
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	blobStore, err := parseBlobStore(os.Getenv("CHECKPOINT_STORE"))
+	blobStore, err := parseCheckpointStore(os.Getenv("CHECKPOINT_STORE"))
 	if err != nil {
 		return nil, err
 	}
@@ -301,12 +301,12 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:          port,
-		Fanout:        fanout,
-		MetadataStore: metadataStore,
-		BlobStore:     blobStore,
-		AuthMode:      authMode,
-		AuthZMode:     authZMode,
+		Port:            port,
+		HubMode:         fanout,
+		MetadataStore:   metadataStore,
+		CheckpointStore: blobStore,
+		AuthMode:        authMode,
+		AuthZMode:       authZMode,
 		Auth: AuthConfig{
 			TokenHeader: getenv("AUTH_TOKEN_HEADER", DefaultAuthTokenHeader),
 		},
@@ -394,20 +394,20 @@ func loadLimitsConfig() (LimitsConfig, error) {
 // selected adapters, dispatching to one loader per port so each stays small and
 // independently testable.
 func loadAdapterConfig(cfg *Config) error {
-	if err := loadFanoutConfig(cfg); err != nil {
+	if err := loadHubConfig(cfg); err != nil {
 		return err
 	}
 	if err := loadMetadataStoreConfig(cfg); err != nil {
 		return err
 	}
-	if err := loadBlobStoreConfig(cfg); err != nil {
+	if err := loadCheckpointStoreConfig(cfg); err != nil {
 		return err
 	}
 	return loadAuthConfig(cfg)
 }
 
-func loadFanoutConfig(cfg *Config) error {
-	if cfg.Fanout != FanoutRedis {
+func loadHubConfig(cfg *Config) error {
+	if cfg.HubMode != HubRedis {
 		return nil
 	}
 	cfg.Redis.URL = os.Getenv("REDIS_URL")
@@ -442,10 +442,10 @@ func loadMetadataStoreConfig(cfg *Config) error {
 	return nil
 }
 
-func loadBlobStoreConfig(cfg *Config) error {
+func loadCheckpointStoreConfig(cfg *Config) error {
 	// Only file-service carries adapter settings: `inline` (the in-process store)
-	// has none, and the retired values were already rejected by parseBlobStore.
-	if cfg.BlobStore != BlobStoreFileService {
+	// has none, and the retired values were already rejected by parseCheckpointStore.
+	if cfg.CheckpointStore != CheckpointStoreFileService {
 		return nil
 	}
 	maxUpload, err := getenvInt64("MAX_UPLOAD_SIZE", 0)
@@ -644,14 +644,14 @@ func postgresDSN() string {
 	return u.String()
 }
 
-// parseFanout resolves HUB_MODE. It is MANDATORY — see parseBlobStore for the
+// parseHubMode resolves HUB_MODE. It is MANDATORY — see parseCheckpointStore for the
 // reasoning, which applies here for the same reason in a weaker form: an absent
 // HUB_MODE silently running single-pod is a correctness problem for a deployment
 // that believed it had cross-pod fan-out.
-func parseFanout(v string) (FanoutMode, error) {
-	switch FanoutMode(v) {
-	case FanoutInMemory, FanoutRedis:
-		return FanoutMode(v), nil
+func parseHubMode(v string) (HubMode, error) {
+	switch HubMode(v) {
+	case HubInMemory, HubRedis:
+		return HubMode(v), nil
 	case "":
 		return "", fmt.Errorf("HUB_MODE must be set explicitly to one of inmemory, redis; there is no default")
 	default:
@@ -668,10 +668,10 @@ func parseMetadataStore(v string) (MetadataStoreMode, error) {
 	}
 }
 
-func parseBlobStore(v string) (BlobStoreMode, error) {
-	switch BlobStoreMode(v) {
-	case BlobStoreInline, BlobStoreFileService:
-		return BlobStoreMode(v), nil
+func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
+	switch CheckpointStoreMode(v) {
+	case CheckpointStoreInline, CheckpointStoreFileService:
+		return CheckpointStoreMode(v), nil
 	case "":
 		// MANDATORY, with no default, because the only safe default does not exist.
 		//
@@ -686,10 +686,6 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 		// So the key is required and local/test configuration says inline out loud.
 		// This deliberately gives up zero-CONFIG standalone; zero-DEPENDENCY
 		// standalone is unaffected (CHECKPOINT_STORE=inline needs nothing running).
-		//
-		// It also removes the need to know any abandoned key name: BLOB_STORE=... is
-		// rejected not because the old name is recognised, but because the canonical
-		// one is absent.
 		return "", fmt.Errorf("CHECKPOINT_STORE must be set explicitly to one of inline, file-service; there is no default (inline is the non-durable in-process store for tests and local development, file-service is the durable one)")
 	default:
 		// FAIL, never fall back. buildCheckpoint answers anything it does not

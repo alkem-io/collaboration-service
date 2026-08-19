@@ -21,7 +21,7 @@ import (
 // to users.
 func TestBuildHubSurfacesARedisMisconfiguration(t *testing.T) {
 	var closers []func()
-	cfg := &config.Config{Fanout: config.FanoutRedis, Redis: config.RedisConfig{URL: "not-a-redis-url"}}
+	cfg := &config.Config{HubMode: config.HubRedis, Redis: config.RedisConfig{URL: "not-a-redis-url"}}
 
 	if _, err := buildHub(cfg, zap.NewNop(), &closers); err == nil {
 		t.Fatal("a bad REDIS_URL must fail startup; degrading to single-pod silently gives every pod a private copy of every document")
@@ -144,7 +144,7 @@ func TestBuildHubWiresRedisAndRegistersItsCloser(t *testing.T) {
 	srv := miniredis.RunT(t)
 
 	var closers []func()
-	cfg := &config.Config{Fanout: config.FanoutRedis, Redis: config.RedisConfig{URL: "redis://" + srv.Addr()}}
+	cfg := &config.Config{HubMode: config.HubRedis, Redis: config.RedisConfig{URL: "redis://" + srv.Addr()}}
 
 	b, err := buildHub(cfg, zap.NewNop(), &closers)
 	if err != nil {

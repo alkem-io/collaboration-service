@@ -59,7 +59,7 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 		ContentType:           model.ContentTypeWhiteboard,
 		Version:               4,
 		ContentPointer:        "file-uuid",
-		BlobStore:             model.BlobStoreFileService,
+		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-7",
 		OwnerRef:              "owner-1",
 	})
@@ -104,14 +104,14 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 	}
 }
 
-func TestSaveDefaultsBlobStore(t *testing.T) {
+func TestSaveDefaultsCheckpointStore(t *testing.T) {
 	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
 	store := newWithRPC(f)
 	if err := store.Save(context.Background(), model.Metadata{ID: "d", ContentType: model.ContentTypeMemo}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	data := f.calls[0].data.(SaveData)
-	if data.BlobStore != string(model.BlobStoreInline) {
+	if data.BlobStore != string(model.CheckpointStoreInline) {
 		t.Errorf("default blobStore = %q, want inline", data.BlobStore)
 	}
 }
@@ -159,7 +159,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	}
 	if meta.ID != "doc-9" || meta.ContentType != model.ContentTypeMemo ||
 		meta.Version != 2 || meta.ContentPointer != "ptr" ||
-		meta.BlobStore != model.BlobStoreFileService || meta.AuthorizationPolicyID != "pol-1" {
+		meta.CheckpointStore != model.CheckpointStoreFileService || meta.AuthorizationPolicyID != "pol-1" {
 		t.Errorf("mapped metadata = %+v", meta)
 	}
 	// The document's own storage bucket must be carried through from the
@@ -187,7 +187,7 @@ func TestLoadRejectsUnknownContentType(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsUnknownBlobStore asserts a server reply carrying a blobStore
+// TestLoadRejectsUnknownCheckpointStore asserts a server reply carrying a blobStore
 // this service cannot read is rejected at the adapter boundary.
 //
 // There are exactly two backends this service can read: file-service and the
@@ -195,7 +195,7 @@ func TestLoadRejectsUnknownContentType(t *testing.T) {
 // accepting it would mean reading the document through whichever store this
 // process happens to be configured with, which is the wrong backend, silently, on
 // the path where being wrong serves or overwrites the wrong document content.
-func TestLoadRejectsUnknownBlobStore(t *testing.T) {
+func TestLoadRejectsUnknownCheckpointStore(t *testing.T) {
 	for _, kind := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{

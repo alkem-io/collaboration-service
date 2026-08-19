@@ -130,9 +130,9 @@ unsaveable.
    conformance-gated, so the Redis one inherits the same suite.
 5. **Leave T060–T062 (config-key rename) for last and do it in one atomic
    change** across this repo, the manifests on `feat/003-migration`, and
-   `server`'s 006 quickstart. FR-022e calls a partial rollout a data-loss risk,
-   and it is: the renamed keys have silent defaults, so a stale key would send
-   blobs to memory while the service reported healthy.
+   `server`'s 006 quickstart — ordinary internal consistency, done in one pass.
+   The silent-default defect the selectors had is fixed separately and on its own
+   merits (FR-022f): unset must never mean non-durable.
 
 ## Not done, and why
 

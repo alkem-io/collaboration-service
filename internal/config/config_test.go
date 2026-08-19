@@ -76,27 +76,6 @@ func TestHubModeIsMandatory(t *testing.T) {
 	}
 }
 
-// TestRenamedKeysAloneStillFail is a REGRESSION FIXTURE, not compatibility
-// behaviour. It pins the property that makes the mandatory-selector design work:
-// a process carrying only the OLD key names fails because the CANONICAL selector
-// is absent, without the config knowing those names exist.
-//
-// This is the exact configuration that prompted the change — specs/001's
-// quickstart still exported these after the rename, and os.Getenv cannot tell a
-// renamed key from an omitted one. Under the old defaults it booted happily on
-// inmemory + inline while appearing to configure redis fan-out and durable
-// storage: a "durable" deployment that silently was not.
-func TestRenamedKeysAloneStillFail(t *testing.T) {
-	t.Setenv("METADATA_STORE", "inmemory")
-	t.Setenv("BLOB_STORE", "file-service")
-	t.Setenv("FANOUT_MODE", "redis")
-	t.Setenv("CHECKPOINT_STORE", "")
-	t.Setenv("HUB_MODE", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("a process carrying only the pre-rename keys started successfully; it would serve on the non-durable in-process store while its configuration claims a durable one")
-	}
-}
-
 // TestExplicitLocalSelectorsRemainSupported: the standalone path costs one line
 // of configuration and still needs nothing running. Zero-DEPENDENCY standalone is
 // intact; only zero-CONFIG was given up.
@@ -108,8 +87,8 @@ func TestExplicitLocalSelectorsRemainSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explicit local selectors must load: %v", err)
 	}
-	if cfg.Fanout != FanoutInMemory || cfg.BlobStore != BlobStoreInline {
-		t.Fatalf("got Fanout=%q BlobStore=%q, want inmemory/inline", cfg.Fanout, cfg.BlobStore)
+	if cfg.HubMode != HubInMemory || cfg.CheckpointStore != CheckpointStoreInline {
+		t.Fatalf("got HubMode=%q CheckpointStore=%q, want inmemory/inline", cfg.HubMode, cfg.CheckpointStore)
 	}
 }
 
@@ -347,7 +326,7 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 // uploads pass) — a safety-limit corruption, not a disable (0 means "use
 // file-service's default ceiling").
 //
-// Non-vacuity: remove the `if maxUpload < 0` guard in loadBlobStoreConfig and this
+// Non-vacuity: remove the `if maxUpload < 0` guard in loadCheckpointStoreConfig and this
 // test fails — Load returns nil for MAX_UPLOAD_SIZE=-1, admitting an uncapped store.
 func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 	pinKnownGood(t)
@@ -377,7 +356,7 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	}
 }
 
-// TestUnsupportedBlobStoreValuesFailStartup is FR-022d.
+// TestUnsupportedCheckpointStoreValuesFailStartup is FR-022d.
 //
 // There are exactly two persistence paths: file-service for production, and the
 // in-process store for the test suite and local development. Anything else must
@@ -388,10 +367,10 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 // The error must also name the supported values. A bare "invalid value" leaves
 // the operator guessing at the exact moment they most need the answer.
 //
-// Non-vacuity: widen parseBlobStore's accepted set and this fails on the missing
+// Non-vacuity: widen parseCheckpointStore's accepted set and this fails on the missing
 // error; drop the supported names from the message and it fails on the substring
 // checks.
-func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
+func TestUnsupportedCheckpointStoreValuesFailStartup(t *testing.T) {
 	pinKnownGood(t)
 	for _, unsupported := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(unsupported, func(t *testing.T) {
@@ -543,7 +522,7 @@ func TestNumericEnvRejectsMalformed(t *testing.T) {
 	}
 }
 
-// --- Wave 5 (T018.1): AuthN/AuthZ mode split + backward-compat alias ---
+// --- Wave 5 (T018.1): AuthN/AuthZ mode split ---
 
 // pinKnownGood pins every non-auth selector to a known-good value so an
 // auth-mode test cannot false-pass (or false-fail) on unrelated ambient env.
@@ -846,11 +825,11 @@ func TestRenamedKeysAreRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with the renamed keys: %v", err)
 	}
-	if cfg.BlobStore != BlobStoreInline {
-		t.Fatalf("CHECKPOINT_STORE was not read: %q", cfg.BlobStore)
+	if cfg.CheckpointStore != CheckpointStoreInline {
+		t.Fatalf("CHECKPOINT_STORE was not read: %q", cfg.CheckpointStore)
 	}
-	if cfg.Fanout != FanoutInMemory {
-		t.Fatalf("HUB_MODE was not read: %q", cfg.Fanout)
+	if cfg.HubMode != HubInMemory {
+		t.Fatalf("HUB_MODE was not read: %q", cfg.HubMode)
 	}
 }
 

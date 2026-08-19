@@ -176,7 +176,7 @@ func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
 	}
 	if err := meta.Save(ctx, model.Metadata{
 		ID: "orphan", ContentType: model.ContentTypeMemo,
-		ContentPointer: "file-orphan", BlobStore: model.BlobStoreInline,
+		ContentPointer: "file-orphan", CheckpointStore: model.CheckpointStoreInline,
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
 	ctx := context.Background()
 	if err := meta.Save(ctx, model.Metadata{
 		ID: "del-fail", ContentType: model.ContentTypeMemo,
-		ContentPointer: "del-fail", BlobStore: model.BlobStoreInline,
+		ContentPointer: "del-fail", CheckpointStore: model.CheckpointStoreInline,
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}

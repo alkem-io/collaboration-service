@@ -181,7 +181,7 @@ func idFromInt(n int) string {
 // blob bytes live in file-service (SC-006/SC-012).
 func fileServiceConfig(baseURL string) *config.Config {
 	cfg := standaloneConfig()
-	cfg.BlobStore = config.BlobStoreFileService
+	cfg.CheckpointStore = config.CheckpointStoreFileService
 	cfg.FileService = config.FileServiceConfig{
 		BaseURL:         baseURL,
 		StorageBucketID: "11111111-1111-1111-1111-111111111111",

@@ -59,7 +59,7 @@ Sync Impact Report
     * RETAIN — `inline` blob, `inmemory` metadata, `open` auth/authz, and
       `inmemory` fan-out. These serve the in-process test path that §III still
       requires, and are kept on that basis rather than as standalone remnants.
-    * UPDATE — the `METADATA_STORE` / `BLOB_STORE` config enums and their
+    * UPDATE — the `METADATA_STORE` / `CHECKPOINT_STORE` config enums and their
       validation, `.env.example`, `README.md`, and `CLAUDE.md`.
     * SUPERSEDE — mark `001` FR-017 and FR-020 superseded by this amendment in
       the `001` spec, so the earlier spec does not silently contradict it.

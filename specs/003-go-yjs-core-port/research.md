@@ -302,17 +302,17 @@ complexity for a deployment nobody runs (§XI).
 **Rationale**: chosen against the recommendation to keep names stable, on §VIII
 consistency grounds — the configuration surface should not name a deleted port.
 
-**The hazard this creates, and its mitigation**: the affected keys have **silent
-defaults**. `BLOB_STORE` unset used to fall back to `inline`, an in-process map. RESOLVED by making the canonical selectors mandatory (spec FR-022f). A stale
-manifest setting the old key after the rename would be ignored, blobs would go to
-memory, and every document would be lost on restart **while the service reported
-healthy**. FR-022d therefore requires a removed key to fail startup with an error
-naming its replacement. This requirement exists *because* of the rename.
+**A separate defect this exposed**: the selectors had **silent defaults** — unset
+`CHECKPOINT_STORE` meant `inline`, an in-process map. A deployment that says
+nothing, or misspells the key, gets the non-durable store, serves normally,
+reports healthy, and loses every document on restart. Resolved by making the
+canonical selectors mandatory (spec FR-022f). Nothing to do with the rename; the
+rename is what made us look.
 
-**Coordination set** (FR-022e — all must move together): this repo's config,
-`.env.example`, README/CLAUDE.md; `deploy/k8s/base/configmap.yaml` on the **unmerged**
-branch `feat/003-migration`; `server`'s 006 `quickstart-services.yml` `collaboration`
-block. A partial rollout is a data-loss risk, not a cosmetic inconsistency.
+**Consistency set** (FR-022e): this repo's config, `.env.example`, CLAUDE.md;
+`deploy/k8s/base/configmap.yaml` on the **unmerged** branch `feat/003-migration`;
+`server`'s 006 `quickstart-services.yml` `collaboration` block. Ordinary internal
+consistency while the shape settles.
 
 ---
 

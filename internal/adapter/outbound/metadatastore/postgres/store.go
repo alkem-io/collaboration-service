@@ -94,7 +94,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	}
 	m.ID = model.DocumentID(idStr)
 	m.ContentType = model.ContentType(contentType)
-	m.BlobStore = model.BlobStoreKind(blobStore)
+	m.CheckpointStore = model.CheckpointStoreKind(blobStore)
 	m.CreatedAt = createdAt
 	m.UpdatedAt = updatedAt
 	return m, nil
@@ -150,7 +150,7 @@ ON CONFLICT (id) DO UPDATE SET
 func (s *Store) Save(ctx context.Context, meta model.Metadata) error {
 	_, err := s.db.Exec(ctx, upsertSQL,
 		string(meta.ID), string(meta.ContentType), meta.ContentPointer,
-		string(meta.BlobStore), meta.AuthorizationPolicyID, meta.OwnerRef)
+		string(meta.CheckpointStore), meta.AuthorizationPolicyID, meta.OwnerRef)
 	if err != nil {
 		return fmt.Errorf("save metadata: %w", err)
 	}

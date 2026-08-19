@@ -46,7 +46,7 @@ func TestInvPersistRoundtrip(t *testing.T) {
 	// Metadata store: the index fields round-trip (version is store-managed, so not asserted).
 	meta := model.Metadata{
 		ID: "doc-rt", ContentType: model.ContentTypeWhiteboard, ContentPointer: "file-rt",
-		BlobStore: "inline", OwnerRef: "owner-9", AuthorizationPolicyID: "policy-3", StorageBucketID: "bucket-1",
+		CheckpointStore: "inline", OwnerRef: "owner-9", AuthorizationPolicyID: "policy-3", StorageBucketID: "bucket-1",
 	}
 	if err := deps.meta.Save(ctx, meta); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -56,7 +56,7 @@ func TestInvPersistRoundtrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if loaded.ContentType != meta.ContentType || loaded.ContentPointer != meta.ContentPointer ||
-		loaded.BlobStore != meta.BlobStore || loaded.OwnerRef != meta.OwnerRef ||
+		loaded.CheckpointStore != meta.CheckpointStore || loaded.OwnerRef != meta.OwnerRef ||
 		loaded.AuthorizationPolicyID != meta.AuthorizationPolicyID || loaded.StorageBucketID != meta.StorageBucketID {
 		t.Fatalf("metadata-store round-trip lost fields:\n got  %+v\n want %+v", loaded, meta)
 	}

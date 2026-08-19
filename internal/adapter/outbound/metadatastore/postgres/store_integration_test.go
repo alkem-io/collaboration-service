@@ -46,7 +46,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 		ID:                    id,
 		ContentType:           model.ContentTypeWhiteboard,
 		ContentPointer:        "ptr-1",
-		BlobStore:             model.BlobStoreFileService,
+		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-1",
 		OwnerRef:              "owner-1",
 	}
@@ -58,7 +58,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 		t.Fatalf("Load v1: %v", err)
 	}
 	if got.Version != 1 || got.ContentPointer != "ptr-1" ||
-		got.BlobStore != model.BlobStoreFileService || got.AuthorizationPolicyID != "pol-1" {
+		got.CheckpointStore != model.CheckpointStoreFileService || got.AuthorizationPolicyID != "pol-1" {
 		t.Fatalf("v1 row = %+v", got)
 	}
 
@@ -77,10 +77,10 @@ func TestPostgresRoundTrip(t *testing.T) {
 	// treated as "unchanged" and PRESERVE the pre-registered lifecycle metadata,
 	// not wipe it — otherwise the delete cascade loses its owner_ref key (FR-023).
 	snapshotSave := model.Metadata{
-		ID:             id,
-		ContentType:    model.ContentTypeWhiteboard,
-		ContentPointer: "ptr-3",
-		BlobStore:      model.BlobStoreFileService,
+		ID:              id,
+		ContentType:     model.ContentTypeWhiteboard,
+		ContentPointer:  "ptr-3",
+		CheckpointStore: model.CheckpointStoreFileService,
 		// OwnerRef + AuthorizationPolicyID intentionally empty (snapshot path).
 	}
 	if err := store.Save(ctx, snapshotSave); err != nil {
@@ -116,8 +116,8 @@ func TestPostgresRoundTrip(t *testing.T) {
 	if got.ContentPointer != "ptr-3" {
 		t.Fatalf("redelivered pre-register orphaned the blob: content_pointer = %q, want preserved %q", got.ContentPointer, "ptr-3")
 	}
-	if got.BlobStore != model.BlobStoreFileService {
-		t.Fatalf("redelivered pre-register flipped blob_store: got %q, want preserved %q", got.BlobStore, model.BlobStoreFileService)
+	if got.CheckpointStore != model.CheckpointStoreFileService {
+		t.Fatalf("redelivered pre-register flipped blob_store: got %q, want preserved %q", got.CheckpointStore, model.CheckpointStoreFileService)
 	}
 	if got.Version != 4 {
 		t.Fatalf("redelivered pre-register version = %d, want 4 (upsert still bumps)", got.Version)

@@ -22,7 +22,7 @@ import (
 // Two pods built from this share one Redis bus — the multi-pod topology (SC-007).
 func redisConfig(url string) *config.Config {
 	cfg := standaloneConfig()
-	cfg.Fanout = config.FanoutRedis
+	cfg.HubMode = config.HubRedis
 	cfg.Redis.URL = url
 	return cfg
 }

@@ -17,7 +17,7 @@ import (
 // into the document's OWN storage bucket, not a single configured fallback.
 //
 // The mechanism moved (FR-018a): the room used to thread the bucket into
-// BlobStore.Put; now the store resolves it here, from the index row the server
+// CheckpointStore.SaveCheckpoint; now the store resolves it here, from the index row the server
 // returns on collaboration-fetch. The assertion follows the property to its new
 // home rather than being dropped with the mechanism.
 func TestPointerReturnsTheDocumentsOwnBucket(t *testing.T) {
