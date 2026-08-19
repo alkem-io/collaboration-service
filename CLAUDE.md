@@ -21,9 +21,11 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
 ## Tech Stack
 
 - **Language**: Go 1.26
-- **CRDT core**: the Alkemio fork of `skyterra/y-crdt` (pure Go Yjs core + v2
-  codec), vendored via a module replace — see [go.mod](./go.mod). Fork branch
-  `001-v2-encoding-and-sync-protocol` (cross-impl fuzz gate green = WS-A).
+- **CRDT core**: `github.com/antst/go-yjs` (pure Go Yjs core + v2 codec, plus the
+  `backend/{persistence,memory,hub,conformance}` contracts). Pinned to an EXPLICIT
+  version — see [go.mod](./go.mod) — never floated to main: it is this team's own
+  pre-1.0 product, so §XIV's "always latest" is satisfied by tracking its releases
+  deliberately rather than by tracking its default branch.
 - **WebSocket**: `coder/websocket`
 - **HTTP Router**: chi v5
 - **Logging**: Zap (structured, JSON)
@@ -32,8 +34,10 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
 - **Persistence (pluggable)**: metadata store (RabbitMQ→server / Postgres),
   content store (in-process / file-service) — pgx v5 + sqlc + golang-migrate
   for the Postgres path
-- **Auth (pluggable)**: `open` (standalone) / `authzeval`
-  (authorization-evaluation-service, h2c HTTP/2 or NATS)
+- **Auth (pluggable)**: handshake AuthN and per-document AuthZ are selected
+  INDEPENDENTLY — `open` (standalone) / `header` (gateway-terminated, the prod
+  default) / `oidc` (direct validation) for AuthN; `open` / `authzeval`
+  (authorization-evaluation-service, h2c HTTP/2 or NATS) for AuthZ
 
 ## Architecture
 
@@ -74,7 +78,11 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 - `HUB_MODE` — `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
 - `CHECKPOINT_STORE` — `inline` | `file-service`
-- `AUTH_MODE` — `open` | `authzeval`
+- `AUTH_MODE` — `header` | `oidc` | `open` (`authzeval` is a retired alias for
+  `header` + `AUTHZ_MODE=authzeval`). In `header` mode the actor id is read from
+  `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
+  client-controllable `Authorization` default is rejected at startup.
+- `AUTHZ_MODE` — `authzeval` | `open` (derived from `AUTH_MODE` when unset)
 
 ## Development Workflow
 
@@ -85,14 +93,18 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 - Use `actorId` internally, never `userId`.
 - The server holds **plaintext** authoritative Y.Docs (FR-021).
 
-## Status — Phase 1 (provisioning)
+## Status
 
-This repo is the fleet-consistent hexagonal skeleton: ports defined, the y-crdt
-core vendored and compiling, CI/lint/governance/constitution in place. The live
-collaboration behavior (room lifecycle, y-protocols sync/awareness, persistence,
-presence, lifecycle cascade) lands with tasks **T004–T017** of
-`../agents-hq/specs/003-unify-collab-yjs/tasks/collaboration-service.md`,
-driven by this repo's own SpecKit spec/plan/tasks.
+The live collaboration behavior is implemented: room lifecycle, y-protocols
+sync/awareness, the ephemeral channel, persistence with debounced flush + retry +
+escalation, presence, limits, and the owner-delete cascade. Ports, adapters, CI,
+lint, and governance are in place.
+
+Persistence is durable-by-declaration: `Room.persist` writes a COMPLETE V2
+snapshot and states its codec, the in-process store records the codec beside the
+bytes, and the file-service store accepts V2 only because its blob is a bare Yjs
+update other systems read. Nothing infers a codec from bytes — the wrong decoder
+returns an empty state vector with no error.
 
 ## Full Constitution
 
