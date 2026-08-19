@@ -404,9 +404,9 @@ func textOf(t *testing.T, update []byte) string {
 //
 // The index saying a document HAS state while the content is gone is NOT the same
 // as a document that was never saved, and the difference is load-bearing: the room
-// seeds create-time content on ErrNotFound, so collapsing the two would resurrect
-// stale content over a document that had real content, and the next save would
-// overwrite the last good state with it. ErrNotFound is reserved for a document
+// opens an EMPTY editable document on ErrNotFound, so collapsing the two would
+// open a document that has real content as empty, and the next save would write
+// that empty state over the last good one. ErrNotFound is reserved for a document
 // with no pointer at all.
 //
 // Non-vacuity: return persistence.ErrNotFound from fetch's 404 branch instead, and
@@ -424,7 +424,7 @@ func TestLoadReportsCorruptWhenTheFileIsGone(t *testing.T) {
 
 	_, err := store.LoadCheckpoint(context.Background(), "doc-1")
 	if errors.Is(err, persistence.ErrNotFound) {
-		t.Fatal("a pointer whose content is gone must NOT report ErrNotFound: the caller would seed over a document that had real content")
+		t.Fatal("a pointer whose content is gone must NOT report ErrNotFound: the caller would open a document that has real content as EMPTY, and the next save would make that permanent")
 	}
 	if !errors.Is(err, persistence.ErrCorrupt) {
 		t.Fatalf("LoadCheckpoint with a missing file = %v, want ErrCorrupt", err)
@@ -433,7 +433,7 @@ func TestLoadReportsCorruptWhenTheFileIsGone(t *testing.T) {
 
 // TestLoadReportsNotFoundForADocumentWithNoPointer is the other side: a document
 // that genuinely has no stored state reports ErrNotFound, which is what lets the
-// room seed its create-time content.
+// room open it empty and editable.
 func TestLoadReportsNotFoundForADocumentWithNoPointer(t *testing.T) {
 	store, _ := newStoreForTest(t)
 	if _, err := store.LoadCheckpoint(context.Background(), "never-saved"); !errors.Is(err, persistence.ErrNotFound) {
@@ -475,21 +475,20 @@ func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
 }
 
 // TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives pins what the
-// persistence contract REQUIRES for a dangling pointer. It is not a divergence,
-// though an earlier version of this comment called it one.
+// persistence contract REQUIRES for a dangling pointer.
 //
-// persistence.ErrNotFound's own doc states the rule directly: a store that
-// resolves a document through a pointer, finds the pointer set and the target
-// gone, "has not found 'no history' ... reporting ErrNotFound there makes the
-// caller treat a document that HAD content as new, seed it with create-time
-// content, and overwrite the last good state on the next save. That is silent
-// data loss arriving through the error type. Use ErrCorrupt."
+// This is what persistence.ErrNotFound's own doc requires: a store that resolves a
+// document through a pointer, finds the pointer set and the target gone, has not
+// found "no history". Reporting ErrNotFound there makes the caller treat a
+// document that HAD content as new — here, open it EMPTY — and the next save
+// overwrites the last good state. Silent data loss arriving through the error
+// type. Use ErrCorrupt.
 //
 // That is exactly this store's dangling-row window. purgeDurable erases the blob
 // FIRST and drops the index row second, so a broker failure between the two steps
 // leaves the row outliving the blob. Reporting ErrNotFound there would send
-// restoreInto down its seed path, reviving the deleted document as its
-// create-time content and making that durable on the next save.
+// restoreInto down its open-empty path, and the next save would make that empty
+// document durable — the deleted document's content replaced by nothing.
 //
 // What genuinely conflicts is Deleter's load-after-delete clause, which requires
 // ErrNotFound in the same situation. Both rules cannot hold for a store that does
@@ -519,7 +518,7 @@ func TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives(t *testing.T) {
 
 	_, err := store.LoadCheckpoint(ctx, "doc")
 	if errors.Is(err, persistence.ErrNotFound) {
-		t.Fatal("load reported ErrNotFound while the index row still carries a pointer; restoreInto treats that as 'never saved' and seeds the row's create-time content, resurrecting a document whose blob was just erased")
+		t.Fatal("load reported ErrNotFound while the index row still carries a pointer; restoreInto treats that as 'never saved' and opens the document EMPTY, so the next save writes an empty document over one whose blob was just erased")
 	}
 	if !errors.Is(err, persistence.ErrCorrupt) {
 		t.Fatalf("load after Delete with the row still present = %v, want ErrCorrupt", err)

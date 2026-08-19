@@ -32,8 +32,8 @@ the drain rather than alongside it.
 path (`sync.go`) and the peer path (`room.go`) — and the only
 `ycrdt.ApplyUpdate*` against the live document is inside `applyUpdate` itself.
 The other call sites operate on a `scratch` document (the budget measurement) or
-run during materialization before the room serves anyone (`restoreInto`,
-`seedInto`), so neither is a mutation entry point.
+run during materialization before the room serves anyone (`restoreInto`), so
+neither is a mutation entry point.
 
 **The two paths differ deliberately, and both are checked.** An over-budget
 CLIENT update is rejected and the sender disconnected. An over-budget PEER update

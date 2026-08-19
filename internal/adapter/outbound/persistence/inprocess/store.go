@@ -39,8 +39,7 @@ type Store struct {
 // New constructs an empty store. It is UNFENCED, like the file-service store
 // (research.md D6a): this service never writes a fence, and the one topology a
 // fence would protect — multiple pods owning one document — is explicitly
-// unsupported. There is no fenced variant; a mutation-authority mechanism for a
-// topology we do not support would be machinery with no caller.
+// unsupported. A non-zero fence is therefore rejected rather than honoured.
 func New() *Store { return newStore() }
 
 func newStore() *Store {

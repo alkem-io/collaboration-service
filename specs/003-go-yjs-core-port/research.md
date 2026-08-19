@@ -9,18 +9,18 @@ rejected, and the sequencing constraints that follow.
 
 ---
 
-## D1 — Persistence shape: checkpoint-only `Store`
+## D1 — Persistence shape: `CheckpointStore`
 
-**Decision**: implement `persistence.Store` as `Appender` + `Loader` + `FenceMode`,
-deliberately **not** `Compactor`. One flush writes one whole-document blob; one load
-reads one blob and returns it as a single `Checkpoint` with no trailing records and an
-empty `Next`.
+**Decision**: implement `persistence.CheckpointStore` — one current state per document,
+replaced on every save. The log profile (`Appender` + `Loader`) and `Compactor` are
+deliberately not implemented. One flush writes one whole-document blob; one load reads
+one blob and returns the whole document.
 
 **Rationale**: the blob backend (file-service) is immutable by contract — every write
 is a new blob. Per-transaction appends would produce a blob per keystroke-burst.
-Whole-document checkpoints fit that medium exactly. `Compactor` is optional in the
-contract and a `Loader` may legitimately return a checkpoint covering all history, so
-this is a permitted point in the contract's design space, not a workaround. It also
+Whole-document checkpoints fit that medium exactly: the contract defines the checkpoint
+profile precisely for a medium whose durable unit is a blob rewritten in place, so this
+is the sanctioned profile rather than a narrowed log. It also
 satisfies FR-012 structurally: recovery cost tracks document size, never edit count.
 
 **Alternatives rejected**:
@@ -35,55 +35,45 @@ interval is the control; the envelope must be documented (SC-020).
 
 ---
 
-## D1a — RESOLVED UPSTREAM: the contract gained a checkpoint profile
+## D1a — Why the checkpoint profile, not the log profile
 
-**Status**: raised during implementation, escalated to the `go-yjs` owners,
-**resolved by adding the missing profile upstream** (antst/go-yjs PR #8).
-Q1's original decision is vindicated; only the mechanism I first proposed was
-wrong.
+**Design result**: a medium that keeps ONE current state per document cannot
+implement the log profile, and the two are not interchangeable by narrowing.
 
-**The problem found**: `conformance.Persistence` mandates a log-shaped backend.
-It appends the OPAQUE bytes `"first"` and `"second"` — not valid Yjs updates —
-and requires them back verbatim, in order, through a paginated view whose
-`Through` is fixed by the first page. There is no merge that folds opaque bytes
-into one covering state, so a single-current-state store cannot satisfy it, and
-`Compactor` does not help because the assertion runs before any compaction.
+`conformance.Persistence` mandates log semantics: it appends OPAQUE bytes — not
+valid Yjs updates — and requires them back verbatim, in order, through a paginated
+view whose `Through` is fixed by the first page. No merge folds opaque bytes into
+one covering state, so a single-current-state store cannot satisfy it, and
+compaction does not help because the assertion runs before any compaction could
+occur.
 
-**Why it could not be worked around locally**. Three options, all bad:
+Nor can the shape be faked on this medium. A framed record envelope inside the
+blob is not available: the stored blob is a bare Yjs update by cross-repo
+contract, so an envelope would leave other writers producing bytes this service
+could not parse. Multi-file logs would abandon the stable-pointer model the medium
+exists to provide.
 
-- *multi-file logs in file-service* — reintroduces the per-save file churn that
-  `fb32d05` removed, and abandons the stable-pointer model;
-- *a framed record envelope inside the blob* — **impossible**: the blob format is
-  a cross-repo contract. `server` also writes it (document create via
-  `markdownToYjsV2State` / `populateYDoc`, and the one-time T009 migration), so
-  an envelope would leave `server` writing bare snapshots this service could not
-  parse;
-- *skip the suite for the file-service store* — violates FR-008, and it is the
-  one implementation that actually runs in production.
-
-**Resolution**: `backend/persistence` gained a `CheckpointStore` profile —
-`SaveCheckpoint` / `LoadCheckpoint` / `FenceMode`, same error sentinels, same
-caller-owned-slice discipline, same returning-nil-means-durable rule — plus a
-`conformance.CheckpointPersistence` suite that asserts what is meaningful for
-that shape (round-trip fidelity, monotonic revisions, alias-safety both
-directions, cancellation, `ErrNotFound`) and NOT per-record history or
+**Result**: the contract offers a `CheckpointStore` profile — `SaveCheckpoint` /
+`LoadCheckpoint` / `FenceMode`, same error sentinels, same caller-owned-slice
+discipline, same returning-nil-means-durable rule — with
+`conformance.CheckpointPersistence` asserting what is meaningful for that shape
+(round-trip fidelity, monotonic revisions, alias-safety in both directions,
+cancellation, `ErrNotFound`, declared encoding) and NOT per-record history or
 pagination.
 
 **Consequences for this feature**:
 
-1. **Q1 stands as written.** One whole-document blob per flush, one blob read on
-   load, no record sequence, no compaction. FR-008b's exemption of the compaction
-   suite is restored — it does not apply because the store is not a log.
+1. One whole-document blob per flush, one blob read on load, no record sequence,
+   no compaction. The compaction suite does not apply because the store is not a
+   log (FR-008b).
 2. **The state vector is derived on read**, with `EncodeStateVectorFromUpdateV2`.
-   The contract explicitly sanctions ignoring the supplied bytes; what
-   `LoadCheckpoint` returns must be correct for the stored update, not identical
-   to what the caller passed. file-service has nowhere to put it —
-   `ContentMetadata` is a typed image-specific JSONB view, not a free-form bag.
+   The contract sanctions ignoring the supplied bytes; what `LoadCheckpoint`
+   returns must be correct for the stored update, not identical to what the caller
+   passed. file-service has nowhere to put it — `ContentMetadata` is a typed
+   image-specific JSONB view, not a free-form bag.
 3. **The file-service store reports `Unfenced`, by design** — see D6a.
-4. **The in-process store needs converting.** It currently implements the log
-   profile (`CompactingStore`) and passes the log suites. Production will be
-   `CheckpointStore`, and the test/dev fixture must be the same shape or the two
-   paths diverge. Follow-up task, once the profile is pinned.
+4. **Both stores implement the checkpoint profile**, so the test and production
+   paths cannot diverge in profile.
 
 **Process note**: the spec's rule — a contract that does not fit this service's
 genuine needs SHOULD be changed in the core, and silent local divergence is
@@ -106,10 +96,9 @@ work mechanically but is **explicitly not a substitute**: the contract is meant 
 be the FINAL stale-owner rejection precisely because a partitioned holder can stay
 alive, and a rejection that must first reach another service is not that backstop.
 
-**Consequence for FR-008a / SC-017**: "build the store fence-capable and prove the
-fenced path in CI" applies to the **in-process** store only. The file-service store
-cannot be fenced, so there is no fenced path to prove. This narrows a requirement
-rather than dropping it, and it is recorded rather than silently unmet.
+**Consequence**: the file-service store cannot hold an epoch, and neither store
+carries a fenced path. Both report `Unfenced` and reject a non-zero `Fence` with
+`ErrUnexpectedFence` (FR-008a), which is the property a caller depends on.
 
 **Operational consequence carried upstream**: on lease loss a node must **shed its
 clients**, not merely decline to write. One that keeps serving reads and presence
@@ -253,26 +242,22 @@ on day one** — the initial deployment is single-pod.
 
 ---
 
-## D6 — Ownership leases deferred; the store is built fence-capable and **tested**
+## D6 — Ownership leases deferred; the stores run unfenced
 
-**Decision**: `cluster.Coordinator` is out of scope. The persistence implementation is
-nonetheless constructible in both fence modes, and `conformance.PersistenceFencing`
-must pass against a fenced instance in CI.
+**Decision**: `cluster.Coordinator` is out of scope, and no fenced path is built.
+Every store reports `Unfenced` and rejects a non-zero `Fence` with
+`ErrUnexpectedFence`.
 
-**Rationale**: single-pod first makes `Fence` zero — the normal non-clustered mode — so
-fencing is inert. The library supports reopening unfenced data as fenced with no
-rewriting of stored history, which makes deferral genuinely cheap. But the *reason* to
-build fence-capability now is to avoid that migration later, and untested capability
-does not deliver it — it relocates the work and risks discovering the design is wrong
-while it guards live documents. `FenceMode` is fixed at construction (deliberately, so
-one omitted fence cannot silently disable stale-owner protection), so both modes must
-be constructible anyway.
+**Rationale**: single-pod first makes `Fence` zero — the normal non-clustered mode
+— so fencing is inert. The library supports reopening unfenced data as fenced with
+no rewriting of stored history, so fencing can arrive with the coordinator that
+needs it, against a store built to hold an epoch at that point. A fence arbitrates
+between multiple owners of one document; this service writes none, and durable
+multi-pod operation is out of scope (FR-022a/b).
 
-**Consequence**: durable multi-pod is **not supported** until ownership lands
-(FR-022a). Only the originating pod persists, but edits originating on different pods
-make several pods writers of one whole-document blob; the later write supersedes the
-earlier, self-healing only if a live pod flushes again. A startup warning names the
-unsupported combination (FR-022b).
+**Consequence**: rejecting a fence this service cannot honour is the property that
+matters, and it is tested. A caller must never believe it has stale-owner
+protection that is not there.
 
 ---
 
@@ -288,14 +273,14 @@ Alkemio `server` and reached by RPC, so every real configuration depends on that
 external service, and no environment runs `server` without file-service. It cost real
 complexity for a deployment nobody runs (§XI).
 
-**Consequence**: exactly **one** `persistence.Store` is written for real use
+**Consequence**: exactly **one** durable `persistence.CheckpointStore` is written for real use
 (file-service), plus an in-process fixture. No durable standalone store.
 
 ---
 
 ## D8 — Configuration keys renamed to match the contracts
 
-**Decision**: the keys selecting the `persistence.Store` backing medium and the
+**Decision**: the keys selecting the `persistence.CheckpointStore` backing medium and the
 `hub.Hub` mode are renamed for the contracts they select. `METADATA_STORE` is unchanged
 (`MetadataStore` survives as a port in its own right).
 
@@ -357,7 +342,7 @@ serving unbacked state.
 
 ## D11 — `MetadataStore` retained, and canonicalised
 
-**Decision**: `MetadataStore` is **not** superseded by `persistence.Store`. It is
+**Decision**: `MetadataStore` is **not** superseded by `persistence.CheckpointStore`. It is
 retained, and `MetadataStore` becomes the single canonical name — port, config
 identifiers, and package path alike (`MetadataStore*` → `MetadataStore*`,
 `metastore/` → `metadatastore/`).
@@ -411,7 +396,7 @@ corrected at source so the next reader does not repeat the error.
    the unmerged `feat/003-migration` manifests are the specific risk.
 4. **`002` must be present as the regression net** — satisfied: this branch forks from
    the commit carrying it.
-5. **Within the feature**: core swap → `persistence.Store` → registry/session rebuild →
+5. **Within the feature**: core swap → `persistence.CheckpointStore` → registry/session rebuild →
    transport dispatch → `hub.Hub`. Each slice keeps the `002` suite green; the suite is
    the gate between slices, not a final check.
 

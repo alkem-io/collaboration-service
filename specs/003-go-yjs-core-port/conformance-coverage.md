@@ -5,14 +5,13 @@ non-applicable suite is not run** — the second half matters more. A suite that
 simply never mentioned is indistinguishable from one that was quietly skipped
 because it failed.
 
-Core version: `github.com/antst/go-yjs v0.0.3`.
+Core version: `github.com/antst/go-yjs v0.0.6`.
 
 ## Run
 
 | Suite | Against | Where |
 |---|---|---|
 | `conformance.CheckpointPersistence` | in-process store | `internal/adapter/outbound/persistence/inprocess/store_conformance_test.go` |
-| `conformance.CheckpointPersistenceFencing` | in-process store, `NewFenced()` | same |
 | `conformance.CheckpointPersistenceDeletion` | in-process store | same |
 | `conformance.CheckpointPersistence` | file-service store | `internal/adapter/outbound/persistence/fileservice/store_conformance_test.go` |
 | `conformance.Memory` | `memory.NewRegistry()` | `internal/domain/service/registry_conformance_test.go` |
@@ -43,13 +42,21 @@ into a covering state. A checkpoint store has nothing to compact — every save
 already writes the document's complete state, so the compacted form is the only
 form it has ever held.
 
-**Fenced CHECKPOINT deletion** — the core ships `PersistenceDeletionFencing` for
-the log profile only; there is no checkpoint equivalent. The property is covered
-locally instead by `TestFencedDeleteRejectsAStaleOwnerAndLeavesStateIntact`,
-which asserts a stale owner's delete is refused, fence-zero on a fenced store is
-refused, and — the part worth pinning — a **rejected delete leaves the state
-intact**. An error return that had already removed the blob would be the same data
-loss with a better error message.
+**Fenced CHECKPOINT deletion** — not run, and no longer applicable: no store here
+has a fenced path. The interface obligation is what matters —
+a non-zero `Fence` is rejected with `ErrUnexpectedFence` BEFORE anything is
+removed, so a rejected delete leaves the state intact. An error return that had
+already removed the blob would be the same data loss with a better error message.
+Covered by `TestDeleteRefusesAFenceThisStoreCannotHonour` (in-process) and
+`TestDeleteRejectsAFenceWithoutTouchingTheNetwork` (file-service).
+
+**`CheckpointPersistenceDeletion` against the FILE-SERVICE store** — not run. Its
+load-after-delete clause requires `ErrNotFound`; that store returns `ErrCorrupt`
+while the index row survives, because it does not own the pointer (it lives in
+`server`'s metadata row). `persistence/store.go` states the precondition:
+"a partial owner cannot satisfy Deleter alone ... a component store failing the
+suite on this rule has a shape mismatch, not a bug." The guarantee holds one layer
+up, at the purge cascade.
 
 ## Deletion is optional, so it is asserted at startup
 
@@ -62,8 +69,12 @@ the cascade cannot complete.
 
 ## Fencing in production
 
-Only the in-process store can be fenced. The file-service store reports
-`Unfenced` by design: a file row has nowhere durable to hold the epoch, and
-keeping it in a separate service is not a substitute for a persistence-level
-backstop (research.md D6a). Exercising the fenced path against the in-process
-store keeps the capability honest without pretending production has it.
+NEITHER store has a fenced path. The file-service store could never have one: a
+file row has nowhere durable to hold the epoch, and keeping it in a separate
+service is not a substitute for a persistence-level backstop (research.md D6a).
+Neither store carries one: a fence arbitrates between multiple owners of one
+document, and this service writes none.
+
+Both report `Unfenced` and reject a non-zero `Fence` rather than accepting one
+they cannot honour, so a caller can never believe it has stale-owner protection
+that is not there. Fencing arrives with the coordinator that needs it.

@@ -356,7 +356,7 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	}
 }
 
-// TestUnsupportedCheckpointStoreValuesFailStartup is FR-022d.
+// TestUnsupportedCheckpointStoreValuesFailStartup is FR-022f.
 //
 // There are exactly two persistence paths: file-service for production, and the
 // in-process store for the test suite and local development. Anything else must
@@ -391,11 +391,9 @@ func TestUnsupportedCheckpointStoreValuesFailStartup(t *testing.T) {
 // AUTHZ_MODE unset resolves AuthZ to authzeval, which cannot run without
 // AUTH_SERVICE_URL. The sibling ...ViaAuthZMode covers the EXPLICIT selection.
 //
-// The error is matched by content, not merely by being non-nil. This test
-// previously set AUTH_MODE=authzeval and asserted only err != nil; once that
-// retired value was removed, parseAuthModes rejected the mode before the
-// service-URL check was ever reached, so it stayed green while proving nothing
-// about the requirement it names.
+// The error is matched by CONTENT, not merely by being non-nil: an assertion that
+// accepts any error passes when Load fails for an unrelated reason and proves
+// nothing about the requirement this test names.
 func TestAuthZEvalRequiresServiceURL(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "header")

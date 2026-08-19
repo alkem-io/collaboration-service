@@ -108,7 +108,7 @@ A wedged/unresponsive backend now blocks only that id's materialization (bounded
 
 ### 8. persist() delete-after-commit (FR-002)
 
-Reorder: upload new blob → **commit metadata** → only then delete the predecessor blob; and `loadSnapshot` tolerates a pointer whose blob is `ErrNotFound` (treat as empty/seed, not fatal). A failed delete leaks a benign orphan (GC-able), never strands a fatal pointer.
+Reorder: upload new blob → **commit metadata** → only then delete the predecessor blob; and `loadMetadata` tolerates a pointer whose blob is `ErrNotFound` (treat as empty/seed, not fatal). A failed delete leaks a benign orphan (GC-able), never strands a fatal pointer.
 
 ### FR / edge-case → mechanism → invariant traceability
 

@@ -1,5 +1,5 @@
 // Non-tagged unit tests for the composition root (app.New / buildDeps / buildBlob
-// / blobKindFor / policyResolver). These cover the standalone happy path and the
+// / policyResolver). These cover the standalone happy path and the
 // adapter-selection ERROR branches that need no live backend — the integration
 // test (build tag `integration`) covers the durable happy paths that do.
 package app

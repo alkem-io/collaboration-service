@@ -75,7 +75,7 @@ The encoded full `Y.Doc` state handed to `BlobStore.Put`.
 The materialized session: the authoritative plaintext `Y.Doc` (FR-021), the
 `*ycrdt.Awareness`, the member registry (`map[connID]roomMember`), the `dirty`
 flag, `version`, `pointer`, and the run-loop goroutine + debounce/idle timers.
-Lazily materialized on first connect (loads the snapshot via `loadSnapshot`),
+Lazily materialized on first connect (loads the snapshot via `loadMetadata`),
 released on idle/empty or owner-delete. `model.Room` is the lightweight identity/
 bookkeeping projection (`model/room.go`).
 

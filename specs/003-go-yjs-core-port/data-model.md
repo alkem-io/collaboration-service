@@ -6,7 +6,7 @@ Two distinct data planes meet in this service and MUST NOT be conflated:
 
 | Plane | Owner | Carries | Reached via |
 |---|---|---|---|
-| **Content** | this service | the encoded document bytes | `persistence.Store` → file-service |
+| **Content** | this service | the encoded document bytes | `persistence.CheckpointStore` → file-service |
 | **Index** | Alkemio `server` | content type, authz policy, owner, bucket, pointer, version | `MetadataStore` → RabbitMQ RPC |
 
 Collapsing the index into the content store is the shim FR-007 forbids, and is the most
@@ -31,49 +31,23 @@ processing path (`002` FR-004, preserved).
 
 ### Checkpoint
 
-The whole encoded document state written by one flush. **Under the checkpoint-only
-design this is the only durable record kept per document.**
+The whole encoded document state written by one flush, and what a load returns in one
+read. Under the checkpoint profile this is the only durable record kept per document.
 
 | Field | Type | Notes |
 |---|---|---|
-| revision | opaque monotonic position | greater than every previously acknowledged revision for that document |
-| update | bytes | a raw Yjs-V2 state snapshot — no envelope, no compression |
-| stateVector | bytes | equivalent coverage; derivable from `update` without constructing a document |
+| `Revision` | opaque monotonic position | greater than every previously acknowledged revision for that document |
+| `Encoding` | codec discriminator | which codec produced `Update`; always `EncodingV2` here, required on save and never inferred |
+| `Update` | bytes | the complete Yjs-V2 state — no envelope, no compression; caller-owned |
+| `StateVector` | bytes | equivalent coverage, without constructing a document; caller-owned |
 
-**Format note**: the payload is byte-identical in kind to what `server` writes with JS
-Yjs (`markdownToYjsV2State`, `populateYDoc`). Compatibility is a design guarantee of the
-core and is **not** re-verified here.
+There is no page, no trailing-record tail, and no continuation token: the profile
+returns one complete state per load by construction.
 
-### Recovery view
-
-What a load returns: exactly one checkpoint, no trailing records, explicitly complete.
-
-| Field | Value under this design |
-|---|---|
-| checkpoint | present |
-| updates | empty |
-| through | the checkpoint's revision |
-| next | **empty** — the only valid signal of completeness |
-
-**Validation rule (FR-014)**: a view that presents partial history as complete is a
-contract violation and MUST be surfaced as an error, never accepted as a document.
-
-### Fence
-
-Ownership epoch carried by every durable mutation.
-
-| Value | Meaning |
-|---|---|
-| zero | clustering not in use — the normal mode for every current deployment |
-| non-zero | a clustered write, rejected by a fenced store if an older epoch than the newest seen |
-
-**Fixed at construction**, never inferred per write, so one omitted fence cannot
-silently disable stale-owner protection. The store is built capable of both modes and
-its fenced path is tested (FR-008a) even though no deployment enables it.
-
----
-
-## Index plane
+**Format note**: the stored payload is a bare Yjs update with no envelope, which is
+what lets another system read or write the same file directly. Cross-implementation
+compatibility of the encoding is a design guarantee of the core and is **not**
+re-verified here.
 
 ### Document metadata
 
@@ -104,14 +78,14 @@ The single lifecycle authority for a document in-process.
 | Concept | Responsibility |
 |---|---|
 | acquire | coalesces concurrent cache misses into one open; a caller abandoning its wait does not cancel the shared initializer |
-| open function | **restores the document**: load from the store; if nothing is stored, seed from the content delivered by the metadata fetch (FR-004a) |
+| open function | **materializes the document**: restore the stored checkpoint, or initialise an empty document when nothing is stored (FR-004a) |
 | handle | keeps one acquisition alive; exposes an invalidation signal |
 | evict | releases a document; never invalidates an outstanding handle |
 | invalidate | poisons the generation, closes handles, forces reload on next acquisition |
 
-**Exactly-once seeding (FR-004b)**: because seeding happens inside the coalesced open,
-concurrent first-opens produce one seed by construction — not by an emptiness check
-performed after acquisition, which races.
+**Exactly-once materialization (FR-004b)**: because it happens inside the coalesced
+open, concurrent first-opens produce one restore — or one empty initialisation — by
+construction, not by an emptiness check performed after acquisition, which races.
 
 **Policy stays here**: the registry starts no goroutines and has no eviction policy of
 its own. The `002` idle-release policy remains this service's and must drive `evict`.
@@ -165,5 +139,5 @@ A redelivered update MUST be a harmless no-op.
 
 ### Ownership lease *(deferred — not implemented)*
 
-Named because the store is built fence-capable and its fencing path is tested. No
-deployment enables it; durable multi-pod is unsupported until it lands (FR-022a).
+Named here only to define the term; durable multi-pod is unsupported until
+ownership lands (FR-022a).

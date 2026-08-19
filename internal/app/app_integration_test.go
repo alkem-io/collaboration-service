@@ -34,7 +34,7 @@ import (
 // TestNewPostgresRoundTrip boots the full service through app.New with the
 // Postgres metadata store selected, then drives a real WebSocket edit +
 // persistence + reload round-trip — covering buildMetadata's postgres branch,
-// buildCheckpoint, blobKindFor, and New's happy path end to end.
+// buildCheckpoint and New's happy path end to end.
 //
 // SCOPE, deliberately narrowed. This test used to select the local-disk blob
 // store and describe itself as proving the durable path. That adapter was removed

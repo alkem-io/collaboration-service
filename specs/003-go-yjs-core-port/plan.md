@@ -8,7 +8,7 @@
 
 Replace the `y-crdt` fork with `github.com/antst/go-yjs`, adopting its backend
 contracts as this service's ports rather than bridging the new library behind the
-old port shapes. `persistence.Store` (checkpoint-only, over file-service) replaces
+old port shapes. `persistence.CheckpointStore` (over file-service) replaces
 `BlobStore`; `hub.Hub` (over Redis) replaces `ClusterBroadcaster`; `memory.Registry`
 takes ownership of in-process document identity and lifetime, and the collaboration
 session is rebuilt around its handle. `MetadataStore` survives untouched in role — it
@@ -27,7 +27,7 @@ is the regression net for the whole rebuild.
 
 **Language/Version**: Go 1.26 (unchanged; `go-yjs` declares `go 1.26.0`)
 **Primary Dependencies**: `github.com/antst/go-yjs` (first-party, **pre-1.0, pinned** — §XIV); `coder/websocket`; `chi/v5`; `zap`; Prometheus; `redis/go-redis/v9`; `amqp091`; `golang.org/x/sync`
-**Storage**: blobs via `persistence.Store` over **file-service**; the document index via `MetadataStore` RPC to the Alkemio `server` over RabbitMQ. **This service opens no database connection of its own** once the `postgres` adapter is removed
+**Storage**: blobs via `persistence.CheckpointStore` over **file-service**; the document index via `MetadataStore` RPC to the Alkemio `server` over RabbitMQ. **This service opens no database connection of its own** once the `postgres` adapter is removed
 **Testing**: `go test -race`; the library's `backend/conformance` suites; the existing e2e harness (single-pod, two-pod) and JS-interop suite; the `002` invariant suite as the regression net
 **Target Platform**: Linux container; k8s (manifests exist on `feat/003-migration`, **not in this branch's history**)
 **Project Type**: WebSocket collaboration backend, hexagonal (ports & adapters)
@@ -109,7 +109,7 @@ internal/
 │       ├── sync.go               # REBUILT on protocol.SyncHandler + overrides
 │       ├── awareness_wire.go     # REBUILT on the core's awareness dispatch
 │       ├── doc.go, convention.go, limits.go, presence.go   # re-pointed to go-yjs
-│       └── flush.go              # NEW: batching above the Store; escalation policy
+│       └── flush.go              # NEW: batching above the CheckpointStore; escalation policy
 │
 └── adapter/
     ├── inbound/
@@ -117,7 +117,7 @@ internal/
     │   ├── http/                 # collab_api.go REMOVED with the standalone withdrawal
     │   └── lifecycle/            # unchanged
     └── outbound/
-        ├── persistence/          # NEW — persistence.Store implementations
+        ├── persistence/          # NEW — persistence.CheckpointStore implementations
         │   ├── fileservice/      #   the real one
         │   └── inprocess/        #   the test/dev fixture
         ├── hub/                  # NEW — hub.Hub implementation

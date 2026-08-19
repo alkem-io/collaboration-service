@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,22 +225,29 @@ func (c *erroringConn) Send(_ []byte) error {
 	return errors.New("unreachable")
 }
 
-// failingLoadStore errors on load with a non-NotFound error, to drive the
-// blob-fetch failure path of loadSnapshot.
+// failingLoadStore errors on load with ErrCorrupt — the error a pointer-addressed
+// store returns when the index says state EXISTS and the file behind the pointer
+// is gone.
 type failingLoadStore struct {
 	*persistinprocess.Store
 }
 
 func (failingLoadStore) LoadCheckpoint(context.Context, backend.DocumentID) (persistence.Checkpoint, error) {
-	return persistence.Checkpoint{}, errors.New("blob backend down")
+	return persistence.Checkpoint{}, fmt.Errorf("%w: file behind the pointer is missing", persistence.ErrCorrupt)
 }
 
-// TestLoadSnapshotPropagatesBlobError asserts that a metadata row pointing at a
-// blob whose Get fails (non-NotFound) aborts materialization rather than serving
-// a silently-empty document.
-func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
+// TestUnreadableStoredStateFailsTheJoinAndNeverServesEmpty asserts through the
+// public Manager.Join path that a document whose stored state cannot be read is
+// refused, not served empty.
+//
+// ErrNotFound means no stored state and opens an EMPTY editable document.
+// ErrCorrupt means the index says state exists and it could not be produced.
+// Conflating them opens a document that HAS content as empty, and the next save
+// writes that over the last good state. The error identity is asserted, not just
+// failure, or the distinction is unobservable upstream.
+func TestUnreadableStoredStateFailsTheJoinAndNeverServesEmpty(t *testing.T) {
 	meta := metainmem.New()
-	// Pre-seed a metadata row so loadSnapshot proceeds to the blob fetch.
+	// Pre-seed a metadata row so loadMetadata proceeds to the blob fetch.
 	if err := meta.Save(context.Background(), model.Metadata{
 		ID: "blob-fail", ContentType: model.ContentTypeMemo,
 		ContentPointer: "blob-fail",
@@ -256,8 +264,12 @@ func TestLoadSnapshotPropagatesBlobError(t *testing.T) {
 	}
 	mgr := NewManager(deps, fastConfig(), nil, nil)
 
-	if _, _, err := mgr.Join(context.Background(), JoinRequest{ID: "blob-fail", Content: model.ContentTypeMemo, Conn: &captureConn{}}); err == nil {
-		t.Fatal("expected Join to fail when the snapshot blob fetch errors")
+	_, _, err := mgr.Join(context.Background(), JoinRequest{ID: "blob-fail", Content: model.ContentTypeMemo, Conn: &captureConn{}})
+	if err == nil {
+		t.Fatal("Join succeeded against unreadable stored state; the room would serve an EMPTY document and the next save would overwrite the last good state")
+	}
+	if !errors.Is(err, persistence.ErrCorrupt) {
+		t.Fatalf("Join must surface ErrCorrupt so the caller can tell 'unreadable' from 'nothing stored', got %v", err)
 	}
 }
 

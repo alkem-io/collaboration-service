@@ -30,15 +30,16 @@ must continue to drive `Evict`, or the no-room-leak invariant regresses.
 
 Ordered, and inside the coalesced open:
 
-1. load from `persistence.Store`;
-2. if nothing is stored, **seed** from the content delivered by the metadata fetch.
+1. restore the stored checkpoint via `persistence.CheckpointStore`;
+2. if nothing is stored, initialise an EMPTY document.
 
 **A session MUST NOT observe a partially initialised document** (FR-004a).
 
-**Seeding is exactly-once by construction** (FR-004b): concurrent first-opens coalesce
-into a single open, so the content cannot be applied twice. It MUST NOT be guarded by
-an emptiness check performed *after* acquisition — that check races, and two
-simultaneous first-opens would both seed.
+**Materialization is exactly-once by construction** (FR-004b): concurrent first-opens
+coalesce into a single open, so a checkpoint cannot be applied twice and an empty
+document cannot be initialised twice. It MUST NOT be guarded by an emptiness check
+performed *after* acquisition — that check races, and two simultaneous first-opens
+would both materialize.
 
 ## Handle obligations
 
@@ -74,7 +75,7 @@ removed structures.
 | join/purge never hang | registry coalescing + bounded handlers |
 | slow client never freezes the room | this service (non-blocking shed) |
 | no multi-pod teardown deadlock | decoupled fan-out + handle lifetime |
-| no stranded document | `persistence.Store` semantics |
+| no stranded document | `persistence.CheckpointStore` semantics |
 | limits on every entry point | this service (single chokepoint) |
 | no room or goroutine leak | idle policy driving `Evict` |
 

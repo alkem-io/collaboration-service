@@ -46,7 +46,7 @@ server-only choices the epic deferred.
 - **Alternatives**: use `SyncHandler.HandleMessage` directly — rejected (it applies updates with the handler as origin, defeating per-connection echo filtering).
 
 ### D3 — Content-type source: `?type=` query first, metadata second (authzeval later)
-- **Decision**: a brand-new room's content type comes from the `?type=memo|whiteboard` connection query param (default `memo`); once a snapshot exists, the **persisted metadata content-type wins** at load (`loadSnapshot` overrides `r.content`).
+- **Decision**: a brand-new room's content type comes from the `?type=memo|whiteboard` connection query param (default `memo`); once a snapshot exists, the **persisted metadata content-type wins** at load (`loadMetadata` overrides `r.content`).
 - **Rationale**: a never-persisted document has no metadata to read; the query param lets the first client declare the convention so the right root shape is materialized (`applyConvention`). For any saved document the stored type is authoritative, so a wrong/absent query param can't corrupt an existing doc.
 - **Forward**: Wave 3 sources content-type (and `authorizationPolicyId`) from the metadata index / authzeval instead of the query param (`handler.go` `contentTypeFromRequest` TODO).
 - **Alternatives**: bake content-type into the id — rejected by the epic (single id namespace, FR-022).

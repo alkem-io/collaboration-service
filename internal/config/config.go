@@ -691,7 +691,7 @@ func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
 		// FAIL, never fall back. buildCheckpoint answers anything it does not
 		// recognise with the IN-PROCESS store, so an unrecognised selector would
 		// bring the service up healthy, serving normally, and losing every document
-		// on the next restart — exactly the silent default FR-022d forbids. The
+		// on the next restart — exactly the silent default FR-022f forbids. The
 		// error names the supported values so the fix travels with the message.
 		return "", fmt.Errorf("CHECKPOINT_STORE must be one of inline, file-service (got %q); inline is the non-durable in-process store used by tests and local development, file-service is the durable one", v)
 	}

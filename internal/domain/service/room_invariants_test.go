@@ -10,6 +10,7 @@ import (
 	"github.com/antst/go-yjs/backend/memory"
 	"go.uber.org/zap"
 
+	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -67,33 +68,27 @@ func TestUndurableForIsZeroUntilAFlushFails(t *testing.T) {
 	}
 }
 
-// TestRoomDoesNotClobberAPointerTheStoreJustRecorded is the regression for a
-// document-destroying interleaving found by independent review.
+// TestRoomSaveNeverOverwritesTheStoresPointer pins the single-writer rule for
+// ContentPointer: the checkpoint store records it via metapointer.Record, and the
+// room's own metadata save must omit it.
 //
-// ContentPointer belongs to the checkpoint store; the rest of the row belongs to
-// the room. Metadata.Save writes the WHOLE row, so a stale cached pointer in the
-// room overwrites one the store just recorded.
+// Metadata.Save writes a WHOLE row, so a room that sent a pointer could overwrite
+// one the store had just recorded — pointing the document at a missing file while
+// the file holding its content is orphaned under an id nothing references.
 //
-// The reachable path: the file behind the pointer vanishes out of band, so
-// SaveCheckpoint recreates it under a new id and records that id. If the room
-// then writes its cached OLD id back, the document resolves to a file that no
-// longer exists — which this adapter reports as ErrCorrupt, so the document will
-// not open at all — while the file holding its content is orphaned under an id
-// nothing references. Unrecoverable without manual repair.
-//
-// The room previously refreshed the pointer only on the first save of its
-// lifetime, which is precisely the window this misses: recreation happens later.
-//
-// Non-vacuity: restore the pointerChecked one-shot and this fails with the room
-// having written the stale pointer back.
-func TestRoomDoesNotClobberAPointerTheStoreJustRecorded(t *testing.T) {
+// The assertion is on the OUTBOUND metadata, not on what survives in the store: a
+// room that happens to hold no pointer writes a blank one and the store's id
+// survives for a reason unrelated to the rule. Capturing the Save shows the room
+// omitting the field by construction.
+func TestRoomSaveNeverOverwritesTheStoresPointer(t *testing.T) {
 	deps := newTestDeps()
+	spy := &capturingMetaStore{Store: deps.meta}
+	deps.Metadata = spy
 	room := newBareRoom(t)
 	room.deps = deps.Deps
 	room.id = "pointer-race"
-	room.pointer = "file-OLD" // what the room cached earlier
 
-	// The row as the STORE left it after recreating the file.
+	// The row as the store left it after recording the file id.
 	if err := deps.meta.Save(context.Background(), model.Metadata{
 		ID: "pointer-race", ContentType: model.ContentTypeMemo, ContentPointer: "file-NEW",
 	}); err != nil {
@@ -104,11 +99,36 @@ func TestRoomDoesNotClobberAPointerTheStoreJustRecorded(t *testing.T) {
 	room.dirty = true
 	room.persistNow()
 
+	if spy.calls == 0 {
+		t.Fatal("the room did not save at all")
+	}
+	if spy.saved.ContentPointer != "" {
+		t.Fatalf("the room's save carried ContentPointer %q; only the checkpoint store may write it", spy.saved.ContentPointer)
+	}
+	// Omitting the pointer must not suppress the fields the room does own.
+	if spy.saved.ContentType == "" {
+		t.Fatal("the room's save carried no content type")
+	}
 	got, err := deps.meta.Load(context.Background(), "pointer-race")
 	if err != nil {
 		t.Fatalf("load row: %v", err)
 	}
 	if got.ContentPointer != "file-NEW" {
-		t.Fatalf("the room wrote pointer %q over the store's %q; the document now resolves to a file that does not exist and the one holding its content is orphaned", got.ContentPointer, "file-NEW")
+		t.Fatalf("the store's pointer became %q, want file-NEW", got.ContentPointer)
 	}
+}
+
+// capturingMetaStore records the last Metadata.Save, so a test can assert what a
+// caller SENT rather than only what survived. persistNow is synchronous, so no
+// synchronisation is needed.
+type capturingMetaStore struct {
+	*metainmem.Store
+	saved model.Metadata
+	calls int
+}
+
+func (c *capturingMetaStore) Save(ctx context.Context, meta model.Metadata) error {
+	c.saved = meta
+	c.calls++
+	return c.Store.Save(ctx, meta)
 }

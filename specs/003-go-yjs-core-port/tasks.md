@@ -44,7 +44,7 @@ phase completes** — every story needs documents that exist on the new core.
 - [X] T005 Re-point the CRDT core across the four non-test domain files: `internal/domain/service/{room.go,sync.go,awareness_wire.go,convention.go}` — imports and types only, no behavioural change yet (FR-001)
 - [X] T006 Re-point the CRDT core across the test/e2e surface: `internal/domain/service/*_test.go`, `internal/adapter/inbound/ws/handler_test.go`, `internal/app/app_integration_test.go`, `test/e2e/*.go`
 - [X] T007 Adopt `memory.Registry` as the owner of document identity and lifetime in `internal/domain/service/manager.go`, replacing the hand-built registry and singleflight acquire (FR-005, D3)
-- [X] T008 Implement the registry open function in `internal/domain/service/manager.go`: load from the store, else seed from the metadata-delivered content; a session must never observe a partially initialised document (FR-004a)
+- [X] T008 Implement the registry open function in `internal/domain/service/manager.go`: restore the stored checkpoint, else initialise an empty document; a session must never observe a partially initialised document (FR-004a)
 - [X] T009 Rebuild `internal/domain/service/room.go` to hold a `memory.Handle` and observe its invalidation signal, ceasing to own document identity or teardown ordering (D3)
 - [X] T010 Retire the parts of `internal/domain/service/lifecycle_state.go` that duplicate registry semantics; keep only what the registry does not absorb (D3)
 - [X] T011 Keep the `002` idle-release policy driving `Evict` in `internal/domain/service/room.go` — the registry starts no goroutines and has no eviction policy of its own (contracts/registry-session.md)
@@ -92,15 +92,15 @@ completed flush.
 
 - [X] T020 [P] [US2] Add a kill/restart durability test in `internal/domain/service/durability_crash_test.go` asserting recovery to the last completed flush across repeated cycles (SC-004)
 - [X] T021 [P] [US2] Add a cold-load cost test in `internal/domain/service/durability_coldload_test.go` asserting cost tracks document size, not accumulated edit count (SC-012)
-- [X] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/seed_exactly_once_test.go` asserting seeding happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
+- [X] T022 [P] [US2] Add a concurrent first-open test in `internal/domain/service/restore_exactly_once_test.go` asserting materialization happens **exactly once**, with content identical to a single-session open (SC-015, FR-004b)
 - [X] T023 [P] [US2] Add a degraded-durability test in `internal/domain/service/durability_degraded_test.go`: with the backend failing, assert the session keeps serving, retries, and surfaces the not-yet-durable state **via metrics before anyone is disconnected** (SC-013)
 - [X] T024 [P] [US2] Add an escalation test in `internal/domain/service/durability_escalation_test.go` asserting a distinct counter, a log entry naming document and undurable duration, and a non-generic disconnect reason (SC-016, FR-028)
 
 ### Implementation for User Story 2
 
-- [X] T025 [US2] Implement the checkpoint-only `persistence.Store` over file-service in `internal/adapter/outbound/persistence/fileservice/` — `Appender` + `Loader` + `FenceMode`, deliberately no `Compactor` (D1, contracts/persistence-store.md)
-- [X] T026 [US2] Make the store in `internal/adapter/outbound/persistence/fileservice/` constructible in **both** fence modes, threading the epoch through the write path though it is always zero in deployment (FR-008a, D6)
-- [X] T027 [P] [US2] Implement the in-process `persistence.Store` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
+- [X] T025 [US2] Implement `persistence.CheckpointStore` over file-service in `internal/adapter/outbound/persistence/fileservice/` — one current state per document, replaced on every save (D1, contracts/persistence-store.md)
+- [X] T026 [US2] `internal/adapter/outbound/persistence/fileservice/` reports `Unfenced` and rejects a non-zero `Fence` with `ErrUnexpectedFence` before touching the network (FR-008a, D6)
+- [X] T027 [P] [US2] Implement the in-process `persistence.CheckpointStore` fixture in `internal/adapter/outbound/persistence/inprocess/` for the test/dev/smoke path (§III)
 - [X] T028 [US2] Implement flush batching **above** the store in a new `internal/domain/service/flush.go`: merge a window, call `Append` once, so `Append` never overstates durability (D2, FR-007a)
 - [X] T029 [US2] Make the flush interval operator-configurable in `internal/config/config.go` with a documented default, armed only when the document changed; shutdown flush unconditional (FR-010)
 - [X] T030 [US2] Implement the durability state machine (clean → dirty → undurable → escalated) in `internal/domain/service/flush.go` with retry/backoff and a configurable consecutive-failure threshold (FR-013, D10)
@@ -151,7 +151,7 @@ by this repo's tests.
 **Independent test**: conformance suites run in CI and pass.
 
 - [X] T045 [P] [US4] Wire `conformance.Persistence` against both store implementations (SC-006)
-- [X] T046 [US4] Wire `conformance.PersistenceFencing` against a **fenced** instance, though no deployment enables fencing (FR-008a, SC-017)
+- [X] T046 [US4] Assert every store rejects a non-zero `Fence` rather than accepting one it cannot honour (FR-008a, SC-017)
 - [X] T047 [P] [US4] Wire `conformance.Memory` against the registry usage (SC-006)
 - [X] T048 [US4] Record which suites apply and **why each non-applicable suite is not run** — notably compaction, since the store implements no `Compactor` (FR-008b)
 - [X] T049 [P] [US4] Assert in `internal/app/app.go` that the core's shipped single-process defaults are used **as shipped** in the in-process path, with no bespoke reimplementation (§X, §XI)
@@ -191,7 +191,6 @@ delivery.
 
 - [X] T059 Rename `MetadataStore` to the canonical spelling everywhere — port, config identifiers (`MetadataStore*`), and package path `metastore/` → `metadatastore/` (FR-009a, SC-008b)
 - [X] T060 Rename the backend-selection configuration keys in `internal/config/config.go` to match the adopted contracts, leaving the metadata key unchanged (FR-022c)
-- [X] T061 *(withdrawn — see FR-022d)* No tombstones for keys that never shipped; the rename lands with every consumer instead (T062)
 - [X] T062 Coordinate the rename across every consumer: this repo's `.env.example`, `README.md`, `CLAUDE.md`; `deploy/k8s/base/configmap.yaml` on the **unmerged** branch `feat/003-migration`; `server`'s 006 `quickstart-services.yml` (FR-022e)
 - [X] T063 [P] Verify zero translation shims by inspection across `internal/adapter/outbound/` — each adopted contract has exactly one implementation per backend, reaching infrastructure directly (SC-008a)
 - [X] T064 [P] Confirm the in-process path still serves all three roles per `specs/003-go-yjs-core-port/quickstart.md` §3: test suite, local development with real editors, and the zero-dependency smoke test (§III)

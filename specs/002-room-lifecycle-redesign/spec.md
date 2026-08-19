@@ -21,7 +21,7 @@ The coordination layer was grown feature-by-feature (and agent-by-agent) without
 - **Q**: Multi-pod fan-out subscription vs the run loop (the finish()/enqueue deadlock root)? → **A**: Decouple — the subscribe goroutine writes peer updates into a bounded queue the run loop drains; teardown closes the queue and never calls back into `enqueue` (removes the circular wait by construction).
 - **Q**: Command-channel backpressure on full? → **A**: Bounded-block — block until space OR `done` OR a deadline, never unbounded and never lossily shed a sync update; the loop is kept drained by bounding every handler (FR-008), so the block stays short and ordering is preserved.
 - **Q**: Multi-pod scope this iteration? → **A**: Solve single + multi-pod together — one coherent state-machine + decoupled-fan-out design covering both modes; the multi-pod HIGHs (teardown deadlock, lock-across-I/O) are prod-path load-bearing.
-- **Resolved (no question needed)**: `persist()` ordering → delete the predecessor blob AFTER the metadata commit (delete-after-commit), and `loadSnapshot` tolerates a pointer whose blob is missing (defense-in-depth, FR-002); a failed delete then leaks a benign orphan rather than stranding a fatal pointer.
+- **Resolved (no question needed)**: `persist()` ordering → delete the predecessor blob AFTER the metadata commit (delete-after-commit), and `loadMetadata` tolerates a pointer whose blob is missing (defense-in-depth, FR-002); a failed delete then leaks a benign orphan rather than stranding a fatal pointer.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -102,7 +102,7 @@ The redesign MUST structurally prevent each mode found by review (each maps to a
 
 **Safety**
 - **FR-001**: The service MUST persist a dirty room's final snapshot before any durable backend it writes to is closed (no edit loss on graceful shutdown). Shutdown bounds the drain: it blocks until every dirty room has persisted OR a configured shutdown-drain deadline elapses, then logs and proceeds (guaranteed termination over an unbounded hang).
-- **FR-002**: The service MUST NOT leave a persisted document referencing a non-existent blob; a partially-failed save MUST remain recoverable (the document stays openable). Achieved by delete-after-commit (the predecessor blob is deleted only after the new pointer commits) plus `loadSnapshot` tolerating a missing blob behind a pointer — a failed delete leaks a benign orphan, never a fatal stranded pointer.
+- **FR-002**: The service MUST NOT leave a persisted document referencing a non-existent blob; a partially-failed save MUST remain recoverable (the document stays openable). Achieved by delete-after-commit (the predecessor blob is deleted only after the new pointer commits) plus `loadMetadata` tolerating a missing blob behind a pointer — a failed delete leaks a benign orphan, never a fatal stranded pointer.
 - **FR-003**: A redelivered or blank lifecycle event MUST NOT clobber populated live metadata (idempotent lifecycle).
 - **FR-004**: The authoritative Y.Doc MUST have a single writer; no path may mutate it concurrently with the run loop (preserved from `001`, re-asserted as an invariant).
 - **FR-005**: Every configured limit (byte budget, update rate, connection cap) MUST be enforced on EVERY mutation entry point (local AND cross-pod) — the class, not one path.

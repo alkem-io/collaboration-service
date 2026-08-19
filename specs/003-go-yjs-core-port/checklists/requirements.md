@@ -39,8 +39,8 @@
 
 **Resolved this session:**
 
-- **Q1 (durability model)** — ✅ adopt the contract with flushing batched *above* the `Store`; one whole-document blob per flush, one blob read on load; checkpoint-only (`Appender` + `Loader` + `FenceMode`, no `Compactor`); flush interval is operator configuration, not specification. Governs FR-010/011/012, User Story 3, SC-004, SC-012.
-- **Q3 (cluster ownership)** — ✅ deferred; single-pod first makes `Fence` zero the normal mode, and unfenced data can be reopened as fenced with no history migration. The store is nonetheless built fence-capable so enabling it later is configuration, not a migration.
+- **Q1 (durability model)** — ✅ adopt the contract with flushing batched *above* the store; one whole-document blob per flush, one blob read on load; the `CheckpointStore` profile, not the log profile; flush interval is operator configuration, not specification. Governs FR-010/011/012, User Story 3, SC-004, SC-012.
+- **Q3 (cluster ownership)** — ✅ deferred; single-pod first makes `Fence` zero the normal mode, and unfenced data can be reopened as fenced with no history migration. No fenced path is built: every store reports `Unfenced` and rejects a non-zero `Fence` (FR-008a). Unfenced data reopens as fenced without a history migration, so fencing arrives with the coordinator that needs it.
 - **Redis fan-out** — ✅ ported in this feature (near-isomorphic to `hub.Hub`; §II requires it; §X forbids leaving it dead), but not load-bearing on day one.
 - **Blob semantics** — ✅ the contract is **store blob, read blob**. Retention, expiry, and reclamation are the backend's business; no history or restore surface exists or is pending.
 
@@ -54,10 +54,10 @@
 
 **Resolved in Session 2026-08-18 (second `/speckit-clarify` pass):**
 
-- **First-open seeding** — ✅ happens inside the registry's open path (store first, seed only when nothing is stored), making it exactly-once by construction rather than by a racing emptiness check. This behaviour existed in code (`room.seedFromContent`, `006`'s content-for-seed) but was **absent from the spec entirely**. FR-004a/b, SC-015.
+- **First-open materialization** — ✅ happens inside the registry's open path (restore the checkpoint, or initialise empty when nothing is stored), making it exactly-once by construction rather than by a racing emptiness check.
 - **Multi-pod durability** — ✅ declared **not supported** until `cluster.Coordinator` lands: fan-out is delivered, concurrent durable writers are not. Only the originating pod persists, so edits originating on several pods make several pods writers of one whole-document blob. FR-022a/b, plus a required startup warning.
 - **Escalation data loss** — ✅ accepted but never silent: distinct counter, log with document id and undurable duration, and a disconnect reason meaning *recent edits could not be saved*. No secondary storage fallback. FR-028/029, SC-016.
-- **Fencing** — ✅ tested now, while inert: the fencing conformance suite must pass against a fenced store instance, since untested capability would not deliver the migration-avoidance that justified building it. FR-008a/b, SC-017.
+- **Fencing** — ✅ not implemented; every store reports `Unfenced` and rejects a non-zero `Fence` rather than accepting one it cannot honour (FR-008a).
 - **Eviction policy** — recorded as an assumption, not asked: `InProcessRegistry` starts no goroutines and has no policy of its own, so the `002` idle-release policy remains this service's job. The library forces the answer.
 
 **Resolved in Session 2026-08-18 (third `/speckit-clarify` pass):**
@@ -70,8 +70,8 @@
 
 **Resolved in Session 2026-08-18 (fifth pass, opened by the deployment-reality correction):**
 
-- **Configuration-key naming** — ✅ renamed to match the adopted contracts; `METADATA_STORE` unaffected. Recorded as a **coordinated cross-repo change** spanning this repo, the k8s manifests on `feat/003-migration`, and `server`'s 006 quickstart. FR-022c/d/e, SC-021.
-- **Stale-key hazard** — the renamed keys have silent defaults, so an ignored old key would fall back to in-process storage and lose every document on restart while reporting healthy. Removed keys must now **fail startup with an error naming the replacement** (FR-022d). This requirement exists because of the rename; it was not needed before.
+- **Configuration-key naming** — ✅ renamed to match the adopted contracts; `METADATA_STORE` unaffected. Recorded as a **coordinated cross-repo change** spanning this repo, the k8s manifests on `feat/003-migration`, and `server`'s 006 quickstart. FR-022c/e/f, SC-021.
+- **Silent-default hazard** — a backend selector with a default means a deployment that says nothing, or misspells the key, runs on the non-durable in-process store and loses every document on restart while reporting healthy. `HUB_MODE` and `CHECKPOINT_STORE` are therefore **mandatory**, failing startup with an error naming the missing key (FR-022f).
 
 **No clarifications remain.** Governance gates are cleared — see Note 4.
 

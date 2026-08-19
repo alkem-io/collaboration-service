@@ -56,8 +56,11 @@ type PointerResolver interface {
 	// Pointer returns the document's stable file pointer and storage bucket.
 	// It MUST report ErrNoPointer when the document has no file yet.
 	Pointer(ctx context.Context, id backend.DocumentID) (pointer, bucket string, err error)
-	// Record persists a newly created pointer. It is called at most once per
-	// document, immediately after the file is created.
+	// Record persists a newly created pointer, immediately after the file is
+	// created. NOT once per document: SaveCheckpoint recreates the file under a new
+	// id if the old one has vanished out of band, and records that id too. Record
+	// is the SOLE writer of ContentPointer — nothing else may set it, or a stale
+	// value elsewhere would point the document at a missing file.
 	Record(ctx context.Context, id backend.DocumentID, pointer string) error
 }
 
@@ -132,8 +135,11 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	// cannot record the codec must support exactly one, or it is guessing on every
 	// read; the contract sanctions that and requires the other codec be refused.
 	//
-	// V2 is the one, because it is what this service writes (EncodeStateAsUpdateV2)
-	// and what every blob in existence contains.
+	// V2 is the one, because it is what this service writes
+	// (EncodeStateAsUpdateV2) and reads (ApplyUpdateV2). That is a statement about
+	// the required format, not about what happens to be stored: a V1 blob would be
+	// unreadable here, which is why it is refused at the boundary rather than
+	// accepted and discovered later.
 	switch req.Encoding {
 	case persistence.EncodingV2:
 	case persistence.EncodingUnspecified:
@@ -325,8 +331,8 @@ func (s *Store) fetch(ctx context.Context, pointer string) ([]byte, error) {
 		// carries a pointer — and the file behind that pointer is gone. That is a
 		// different situation from a document that was never saved, and the
 		// difference is load-bearing: a caller that treats it as "nothing stored"
-		// would seed create-time content over a document that had real content, and
-		// the next save would overwrite the last good state with it. ErrNotFound is
+		// initialises the document as if it were new — for this service, EMPTY — and
+		// the next save overwrites the last good state with that. ErrNotFound is
 		// reserved for a document with no pointer at all.
 		return nil, fmt.Errorf("%w: file %q behind the document pointer is missing", persistence.ErrCorrupt, pointer)
 	}

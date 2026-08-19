@@ -97,8 +97,8 @@ func TestPostgresRoundTrip(t *testing.T) {
 
 	// REDELIVERED document.created (pre-register) against a row that already has a
 	// live snapshot: PreRegister is a blind Save carrying owner_ref/content_type but
-	// a BLANK content_pointer + checkpoint_store. It MUST NOT clobber the live pointer back
-	// to '' (which would orphan the persisted blob) nor flip checkpoint_store away from the
+	// a BLANK content_pointer. It MUST NOT clobber the live pointer back
+	// to '' (which would orphan the persisted blob) nor flip the stored fields away from the
 	// snapshot's backend — a blank value on the snapshot columns means "unchanged".
 	// The version still bumps (any upsert does), but the pointer/backend survive.
 	preRegisterRedelivery := model.Metadata{

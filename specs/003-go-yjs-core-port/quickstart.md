@@ -56,8 +56,6 @@ go test -race ./internal/adapter/outbound/hub/...
 
 **Expected** (SC-006):
 - `conformance.Persistence` passes for every store implementation
-- `conformance.PersistenceFencing` passes **against a fenced instance**, even though no
-  deployment enables fencing (FR-008a, SC-017)
 - `conformance.Hub` passes — it injects reordering, duplication, and redelivery, so
   passing means documents converge under hostile delivery (SC-007)
 - `conformance.PersistenceCompaction` is **not run**; the store implements no
@@ -129,8 +127,9 @@ corruption and no manual intervention. Repeat across several kill/restart cycles
   no stored-format change (User Story 2, scenario 2)
 - Cold-load time for a long-lived, heavily-edited document tracks **document size**, not
   accumulated edit count (SC-012)
-- A never-before-saved document opened concurrently by many sessions is seeded **exactly
-  once**, with content identical to a single-session open (SC-015)
+- A document opened concurrently by many sessions materializes **exactly once** — one
+  checkpoint restore, or one empty initialisation — with content identical to a
+  single-session open (SC-015)
 
 ---
 
@@ -186,7 +185,7 @@ the pod by destroying the room.
 CHECKPOINT_STORE=file-service make run
 ```
 
-**Expected** (SC-021): startup **fails with an error naming the replacement key**. It
+**Expected** (SC-021): startup **fails with an error naming the missing key and its supported values**. It
 MUST NOT be ignored.
 
 **Why this scenario exists**: the renamed keys have silent defaults. An ignored stale

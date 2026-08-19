@@ -58,7 +58,7 @@ func TestSnapshotSaveDoesNotWipeLifecycleMetadata(t *testing.T) {
 		t.Fatalf("pre-register Save: %v", err)
 	}
 
-	// First snapshot persist: content_pointer/checkpoint_store set, lifecycle fields blank.
+	// First snapshot persist: content_pointer set, lifecycle fields blank.
 	if err := s.Save(ctx, model.Metadata{
 		ID:             "doc",
 		ContentType:    model.ContentTypeWhiteboard,
@@ -82,7 +82,7 @@ func TestSnapshotSaveDoesNotWipeLifecycleMetadata(t *testing.T) {
 // TestRedeliveredPreRegisterDoesNotOrphanBlob asserts that a REDELIVERED
 // document.created (a blind PreRegister with a blank content_pointer) against a
 // document that already has a live snapshot does NOT clobber content_pointer back
-// to "" (which would orphan the persisted blob) nor flip checkpoint_store away from the
+// to "" (which would orphan the persisted blob) nor flip the stored fields away from the
 // snapshot's backend — blank snapshot columns mean "unchanged".
 func TestRedeliveredPreRegisterDoesNotOrphanBlob(t *testing.T) {
 	s := New()

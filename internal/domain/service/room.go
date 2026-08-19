@@ -169,7 +169,6 @@ type Room struct {
 	flushFailures  int
 	undurableSince time.Time
 	version        int
-	pointer        string
 	// policyID is the document's Alkemio authorization policy id (OPEN-1),
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
@@ -723,7 +722,6 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	}
 
 	r.version = meta.Version
-	r.pointer = meta.ContentPointer
 	r.policyID = meta.AuthorizationPolicyID
 	r.ownerRef = meta.OwnerRef
 	r.bucketID = meta.StorageBucketID
@@ -748,9 +746,9 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 // against the room's own document, because the room does not have one yet.
 //
 // When no stored state exists, the document opens as a fresh EMPTY editable room
-// (FR-010) — not an error. There is no create-time seed: file-service holds the
-// document's only content, reached through its contentPointer, so a document with
-// no pointer has no content by definition.
+// (FR-010) — not an error. A document's only content lives in the checkpoint
+// store, reached through its contentPointer, so a document with no pointer has no
+// content by definition.
 // restoreBounded runs the checkpoint restore under a wall-clock bound of its own.
 // It is a named method, not an inline WithTimeout, so the bound can be exercised
 // against a context that carries no deadline — which is precisely what the core
@@ -1499,7 +1497,7 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 	// bytes (not the wire-framed message) so a peer pod can ApplyUpdate them
 	// directly. A peer-applied update is NOT re-published (it already crossed the
 	// bus once) — the ping-pong guard. The snapshot load (also peer-flagged via
-	// loadSnapshot's origin) likewise stays local.
+	// restoreInto's origin) likewise stays local.
 	if !origin.peer {
 		r.publishToPeers(update, false)
 	}
@@ -1617,34 +1615,15 @@ func (r *Room) persist(ctx context.Context) {
 		return
 	}
 
-	// Refresh the STORE-OWNED pointer before writing the row.
-	//
-	// ContentPointer belongs to the checkpoint store: it creates the file and
-	// records the id (metapointer.Record). Everything else on the row belongs to
-	// the room. But Metadata.Save writes a WHOLE row, so a stale cached pointer
-	// here silently overwrites one the store just recorded.
-	//
-	// That is reachable, not theoretical. If the file behind the pointer vanishes
-	// out of band, SaveCheckpoint recreates it under a NEW id and records it —
-	// then this save would put the old id back. The document would resolve to a
-	// file that no longer exists (ErrCorrupt, so it will not even open) while the
-	// file holding its content is orphaned under an id nothing references.
-	//
-	// An earlier version read the row only on the first save of a room's lifetime,
-	// which is exactly the window this misses: recreation happens on a later save.
-	// Unconditional: a store that never sets a pointer simply reads back a blank
-	// one and this is a no-op, which is cheaper than keeping a second copy of
-	// "which store is configured" in the room to decide whether to look.
-	if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
-		r.pointer = meta.ContentPointer
-	}
-
+	// ContentPointer is omitted: the room does not own it. metapointer.Record is
+	// its only non-blank writer, and MetadataStore.Save preserves a blank one
+	// rather than clearing it — so the room writes the fields it owns and cannot
+	// overwrite a pointer the store recorded.
 	newVersion := r.version + 1
 	meta := model.Metadata{
 		ID:                    r.id,
 		ContentType:           r.content,
 		Version:               newVersion,
-		ContentPointer:        r.pointer,
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,

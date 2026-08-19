@@ -38,14 +38,13 @@ stronger property, never weakened.
 | Failed flushes are retried | remove `armRetryTimer` | "timeout waiting for flush retried after a failure"; escalation never fires |
 | Restore happens inside the registry's `OpenFunc` | move `restoreInto` after `Acquire` | "LoadCheckpoint called 8 times for 8 concurrent first-opens" |
 | A room's teardown evicts its registry slot | remove `evictFromRegistry` | both eviction tests fail: the document is still resident after release |
-| A failed seed leaves the room clean | hoist `dirty`/`seededPending` above the error return | "a FAILED seed marked the room dirty" |
 | `metapointer.Record` creates a missing row | restore the "missing row is an error" branch | "Record on a document with no index row: no row" |
 | `statusWriter.Unwrap` | delete the method | "Hijack through the status-recording wrapper: feature not supported" |
 | Every metrics hook moves its series | empty `GenerationInvalidated`; empty `DocumentDurabilityRestored` | "left collaboration_generation_invalidations_total unchanged at 0"; "left collaboration_undurable_flush_failures unchanged at 7" |
 | A pre-rebuild metric still exists | drop `FanoutLagSeconds` from `InitMetrics` | "metric collaboration_fanout_lag_seconds existed before the persistence rebuild and is not exported now" |
 | Unsupported `CHECKPOINT_STORE` values fail startup | widen `parseCheckpointStore`'s accepted set | the startup error disappears |
 | An unknown checkpoint codec is refused, not stored | accept the `default:` branch | "saving an unknown encoding = <nil>, want ErrUnsupportedEncoding" |
-| A fence this store cannot honour is refused BEFORE erasure | drop `checkFence` from `Delete` | "Delete with a fence on an Unfenced store = <nil>, want ErrUnexpectedFence" |
+| A non-zero fence is refused BEFORE erasure | drop `checkFence` from `Delete` | "Delete with a fence on an Unfenced store = <nil>, want ErrUnexpectedFence" |
 | A blank `contentType` on upsert preserves the stored one | drop the preserve branch | "a blank contentType overwrote the stored one ... could materialize a memo root for a whiteboard" |
 | The index `Delete` removes the row and is idempotent | drop `delete(s.rows, id)` | "Load after Delete = <nil>, want ErrNotFound" |
 | A selected backend without its required settings fails at STARTUP | remove the `REDIS_URL` guard | "expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead" |
@@ -54,7 +53,7 @@ stronger property, never weakened.
 | Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
 | The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
 | The file-service store refuses a codec it cannot record | accept `EncodingV1` alongside V2 | "saving a V1 update = <nil>, want ErrUnsupportedEncoding" |
-| A deleted blob whose index row survives loads as CORRUPT, not missing (required by `ErrNotFound`'s own contract) | clear the pointer in `Delete` | load reports `ErrNotFound`, `restoreInto` seeds the row's create-time content, and the deleted document returns |
+| A deleted blob whose index row survives loads as CORRUPT, not missing (required by `ErrNotFound`'s own contract) | clear the pointer in `Delete` | load reports `ErrNotFound`, the room opens the document EMPTY, and the next save writes that over content whose blob was just erased |
 | `CHECKPOINT_STORE` is mandatory | restore `getenv("CHECKPOINT_STORE", inline)` | "expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart" |
 | `HUB_MODE` is mandatory | restore `getenv("HUB_MODE", inmemory)` | "HUB_MODE unset: expected startup to fail, got nil" |
 
@@ -91,54 +90,6 @@ reason other than the one it claimed.
 | `FuzzMalformedFramesAreOffenderOnly` (first version) | — | it checked the observer with `Ping`, and coder/websocket only processes pongs while a read is in flight, so it failed with **no offence at all** — it would have been reported as a server defect | the observer reads in the background, as a real client does |
 
 ## Deleted rather than restructured (SC-005a)
-
-**`blobKind` / `model.CheckpointStoreKind`** — the room's copy of "which
-checkpoint store is configured". Traced producer → consumer under the standing
-review rule: the producer was `CHECKPOINT_STORE` via `blobKindFor`, and there was
-exactly ONE consumer — a gate deciding whether to re-read the metadata row before
-a save.
-
-Removing the gate changed no observable behaviour: the whole suite passed with the
-refresh made unconditional, because a store that never sets a pointer simply reads
-back a blank one and the refresh is a no-op. So the type existed to skip one
-in-memory map lookup on the test/standalone path, at the cost of a SECOND
-representation of a fact the configured store instance already embodies.
-
-The guarantee it appeared to guard is unaffected and still defended: removing the
-pointer refresh itself still fails
-`TestRoomDoesNotClobberAPointerTheStoreJustRecorded`.
-
-
-The **first-open seed** — `Metadata.SeedContent`, `FetchReply.Content`, `seedInto`,
-`seededPending` and its arm-the-debounce-at-start branch, the in-memory
-preservation, and the seed-only tests.
-
-It was not merely obsolete, it was **structurally unreachable**. The server
-produced seed bytes only for a NON-EMPTY `contentPointer`; `restoreInto` consumed
-them only when `LoadCheckpoint` returned `ErrNotFound`; and the file-service store
-returns `ErrNotFound` only when there is NO pointer — a pointer whose blob is
-absent is `ErrCorrupt`. The producer and consumer conditions were mutually
-exclusive, so no metadata reply could ever reach `seedInto` with usable bytes.
-
-The seed tests passed by constructing `model.Metadata` states the server could not
-produce: another green-for-the-wrong-reason contract, and the first one found by
-reasoning across two repos rather than inside one.
-
-
-The **fenced variant of the in-process store** (`NewFenced`, the mode branching,
-the fence high-water map, `CheckpointPersistenceFencing`, and the two fenced-only
-tests). A fence exists to arbitrate between multiple owners of one document; this
-service never writes one, and the topology it would protect — multiple pods
-flushing the same document — is explicitly unsupported. It was a production
-adapter for a configuration we refuse to run, kept alive by the tests that
-exercised it. Those semantics belong to go-yjs's own conformance suite and its
-planted implementations, not to a consumer that has no fences.
-
-What REMAINS is the interface obligation: `FenceMode()` reports `Unfenced`, and a
-non-zero fence is rejected with `ErrUnexpectedFence` rather than silently
-accepted — a caller must not believe it has stale-owner protection it does not
-have.
-
 
 `TestPurgeDurableSurfacesMetadataLoadError`. `purgeDurable` no longer loads the
 metadata row — the pointer is resolved inside the store — so the error it induced

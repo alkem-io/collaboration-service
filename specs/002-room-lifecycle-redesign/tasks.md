@@ -59,7 +59,7 @@
 
 ## Phase 8: persist delete-after-commit (US5)
 
-- [ ] T023 [US5] `room.persist`: upload → commit metadata → THEN delete predecessor blob; `loadSnapshot` tolerates a pointer whose blob is `ErrNotFound`. Green **INV-PERSIST-NOSTRAND**.
+- [ ] T023 [US5] `room.persist`: upload → commit metadata → THEN delete predecessor blob; `loadMetadata` tolerates a pointer whose blob is `ErrNotFound`. Green **INV-PERSIST-NOSTRAND**.
 
 ## Phase 9: Polish & Validate
 

@@ -17,7 +17,7 @@ import (
 // integrity finding: Room.persist round-trips OwnerRef. A document pre-registered
 // with an OwnerRef (the delete cascade key, FR-023) must keep that owner_ref after
 // the room materializes and persists its first snapshot — the room loads it in
-// loadSnapshot and re-persists it, rather than rebuilding Metadata with a blank
+// loadMetadata and re-persists it, rather than rebuilding Metadata with a blank
 // OwnerRef and dropping it. This defends every MetadataStore backend (the
 // in-memory store does a wholesale row replace, so a dropped OwnerRef here would
 // be silently wiped to "").

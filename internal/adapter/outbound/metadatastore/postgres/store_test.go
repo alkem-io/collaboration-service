@@ -130,7 +130,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		!strings.Contains(q.lastExec, "ON CONFLICT") {
 		t.Errorf("unexpected upsert SQL: %s", q.lastExec)
 	}
-	// id, content_type, content_pointer, checkpoint_store, authorization_policy_id, owner_ref
+	// id, content_type, content_pointer, authorization_policy_id, owner_ref
 	want := []any{"doc-2", "memo", "ptr", "pol-9", "owner"}
 	if len(q.lastArgs) != len(want) {
 		t.Fatalf("save args = %v, want %v", q.lastArgs, want)

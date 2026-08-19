@@ -656,28 +656,6 @@ func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
 	}
 }
 
-// --- room.go: loadSnapshot blob-not-found (index row without a blob yet) ---
-
-// TestLoadSnapshotMissingBlobBehindPointerFailsMaterialization asserts that a
-// metadata row with a NON-EMPTY ContentPointer whose blob is absent fails
-// materialization rather than silently seeding an empty room. persist() always
-// writes the blob BEFORE upserting the pointer, so a populated pointer must have
-// a blob — a missing one is corruption, and seeding/blanking it would materialize
-// stale/empty content and let the next save overwrite the last good snapshot.
-// (The legitimate "no snapshot yet" case is an EMPTY ContentPointer, covered by
-// NOTE (FR-018a): "a populated pointer whose blob is missing must fail
-// materialization" moved to the file-service store's tests. The property is
-// unchanged and still defended — a document whose index says state EXISTS but
-// whose content is gone must NOT be treated as "nothing stored", or seeding would
-// resurrect stale content and the next save would overwrite the last good state.
-//
-// It cannot be expressed here any more: the distinction requires a store that
-// addresses content by POINTER, so that "pointer set, content missing" is
-// representable. The in-process store keeps state by document id and has no
-// pointer, so for it there is only "present" or "absent". The file-service store
-// returns ErrCorrupt (not ErrNotFound) for exactly this case, and loadSnapshot
-// only seeds on ErrNotFound.
-
 // --- room.go: handleLeave / dropMember absent member ---
 
 // TestHandleLeaveAbsentMemberEmitsNoControl asserts leaving a connection that is

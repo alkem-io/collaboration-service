@@ -1,8 +1,13 @@
 // Package model holds the domain types of the collaboration service: the
-// document metadata/index, the persisted snapshot, the live in-memory room,
-// and the ephemeral awareness/presence state. These are plain named structs
-// with zero infrastructure imports — the inward-pointing core of the hexagon
-// that the ports (internal/domain/port) and adapters are defined against.
+// document metadata/index, the document content type and its conventions, the
+// participant's collaborator mode, and the server→client control messages.
+// These are plain named structs with zero infrastructure imports — the
+// inward-pointing core of the hexagon that the ports (internal/domain/port) and
+// adapters are defined against.
+//
+// The live room and its awareness state are NOT here: they are service.Room and
+// the core's ycrdt.Awareness, which own behaviour rather than shape. Durable
+// document bytes are persistence.Checkpoint, owned by the core's contract.
 //
 // Shapes follow specs/003-unify-collab-yjs/data-model.md.
 package model
@@ -22,34 +27,6 @@ const (
 	// id-keyed Y.Map of per-element Y.Maps, giving per-property concurrent
 	// merge.
 	ContentTypeWhiteboard ContentType = "whiteboard"
-)
-
-// CheckpointStoreKind identifies this PROCESS's checkpoint-store adapter, derived
-// from CHECKPOINT_STORE. It is deliberately NOT part of the Alkemio metadata
-// contract: file-service is the storage abstraction for the whole stack, so a
-// contentPointer is always a file-service id, and `inline` is an internal
-// test/standalone mode that must never reach a server entity, column, or wire
-// field. It survives here only to tell a pointer-addressed store from one that
-// never sets a pointer.
-//
-// Historical note: this identified which adapter holds a document's encoded
-// snapshot. It is persisted in the metadata row so a document can be rehydrated
-// from the right backend regardless of the running configuration.
-type CheckpointStoreKind string
-
-const (
-	// CheckpointStoreInline keeps the blob in the main DB; the content pointer is
-	// the metadata row key (today's behavior).
-	CheckpointStoreInline CheckpointStoreKind = "inline"
-	// CheckpointStoreFileService offloads the blob to the existing file-service;
-	// the content pointer is a file-service object id.
-	CheckpointStoreFileService CheckpointStoreKind = "file-service"
-
-	// These two are the ONLY kinds. A metadata row naming any other backend is
-	// rejected at the adapter boundary rather than accepted: this service could
-	// only then read it through whichever store the process happens to be
-	// configured with, which is the wrong backend, silently, on the path where
-	// being wrong serves or overwrites the wrong document content.
 )
 
 // DocumentID is the single id namespace shared by memos and whiteboards.
@@ -85,15 +62,4 @@ type Metadata struct {
 	OwnerRef  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
-}
-
-// Snapshot is the encoded full Y.Doc state for a document. Live edits travel
-// the wire as y-protocols v1; the durable snapshot is encoded v2 (v1 remains
-// readable). Written debounced/throttled per room (R7); latest-only today.
-type Snapshot struct {
-	ID DocumentID
-	// Version matches the Metadata.Version the bytes were persisted at.
-	Version int
-	// Data is the encoded Y.Doc state (v2) handed to CheckpointStore.SaveCheckpoint.
-	Data []byte
 }
