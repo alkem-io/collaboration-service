@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -199,7 +200,20 @@ func (c *Consumer) consume(deliveries <-chan amqp.Delivery) {
 		case nackRequeue:
 			requeue := shouldRequeue(d.Redelivered)
 			if !requeue {
-				c.logger.Warn("lifecycle event still failing on redelivery; dropping to avoid a poison loop")
+				// ERROR, not Warn, and it names the event. Dropping a lifecycle event
+				// is not a routine retry outcome: a discarded document.deleted leaves
+				// the owner's content durable and joinable after they deleted it, and
+				// nothing downstream will ever notice — this log line is the ONLY
+				// record that it happened.
+				//
+				// The bound itself is a known limitation, not a design: two attempts is
+				// whatever a transient backend outage happens to outlast. Correct
+				// handling needs a dead-letter queue or a retry schedule, which is a
+				// broker-topology change shared with `server`. Until then this must at
+				// least be alertable.
+				c.logger.Error("DROPPING a lifecycle event after its redelivery also failed; if this was document.deleted, the owner's content is still stored and still joinable",
+					zap.String("pattern", patternOf(d.Body)),
+					zap.String("body", string(d.Body)))
 			}
 			if err := d.Nack(false, requeue); err != nil {
 				c.logger.Warn("lifecycle nack failed", zap.Error(err))
@@ -218,6 +232,17 @@ func (c *Consumer) handleDelivery(body []byte) ackAction {
 	ctx, cancel := context.WithTimeout(context.Background(), c.handlerTimeout)
 	defer cancel()
 	return c.handle(ctx, body)
+}
+
+// patternOf extracts an event's pattern for logging, so a dropped event can be
+// identified without reading the raw body. Best effort: an unparseable envelope
+// is why we are here in the first place.
+func patternOf(body []byte) string {
+	var env envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "<unparseable>"
+	}
+	return env.Pattern
 }
 
 // shouldRequeue implements the bounded-requeue rule for a failed lifecycle event:
