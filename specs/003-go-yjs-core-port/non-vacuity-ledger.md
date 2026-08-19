@@ -51,6 +51,8 @@ stronger property, never weakened.
 | The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
 | The file-service store refuses a codec it cannot record | accept `EncodingV1` alongside V2 | "saving a V1 update = <nil>, want ErrUnsupportedEncoding" |
 | A deleted blob whose index row survives loads as CORRUPT, not missing (required by `ErrNotFound`'s own contract) | clear the pointer in `Delete` | load reports `ErrNotFound`, `restoreInto` seeds the row's create-time content, and the deleted document returns |
+| `CHECKPOINT_STORE` is mandatory | restore `getenv("CHECKPOINT_STORE", inline)` | "expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart" |
+| `HUB_MODE` is mandatory | restore `getenv("HUB_MODE", inmemory)` | "HUB_MODE unset: expected startup to fail, got nil" |
 
 ### Why the room bounds its own restore
 

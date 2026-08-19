@@ -109,8 +109,8 @@ parallelize cleanly.
 ### Config-driven adapter selection (`internal/config/config.go`)
 
 `Load()` reads env and validates each enum, failing fast (§XV — no silent
-half-config): `PORT` (4006), `FANOUT_MODE` (`inmemory`|`redis`),
-`METADATA_STORE` (`rabbitmq`|`postgres`), `BLOB_STORE`
+half-config): `PORT` (4006), `HUB_MODE` (`inmemory`|`redis`, REQUIRED),
+`METADATA_STORE` (`rabbitmq`|`postgres`), `CHECKPOINT_STORE` (REQUIRED)
 (`inline`|`file-service`), `AUTH_MODE` (`header`|`oidc`|`open`),
 `AUTHZ_MODE` (`authzeval`|`open`). `cmd/server` maps each selection to a concrete
 adapter and constructs `service.Deps`; the core consumes only interfaces. Adding a

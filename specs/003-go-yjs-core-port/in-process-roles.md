@@ -51,6 +51,6 @@ No database connection is opened, no bus is dialled, no blob store is contacted.
 
 It is not a deployment option and must never be presented as one. The in-process
 store carries **no durability guarantee across a restart** — its package
-documentation says so, and `BLOB_STORE=inline` is documented in `.env.example` as
+documentation says so, and `CHECKPOINT_STORE=inline` is documented in `.env.example` as
 the non-durable test/development value. The startup log naming
 `blob_store=inline` is the operator-visible signal that a process is running on it.

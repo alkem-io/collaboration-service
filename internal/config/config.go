@@ -275,7 +275,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	fanout, err := parseFanout(getenv("HUB_MODE", string(FanoutInMemory)))
+	fanout, err := parseFanout(os.Getenv("HUB_MODE"))
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	blobStore, err := parseBlobStore(getenv("CHECKPOINT_STORE", string(BlobStoreInline)))
+	blobStore, err := parseBlobStore(os.Getenv("CHECKPOINT_STORE"))
 	if err != nil {
 		return nil, err
 	}
@@ -644,10 +644,16 @@ func postgresDSN() string {
 	return u.String()
 }
 
+// parseFanout resolves HUB_MODE. It is MANDATORY — see parseBlobStore for the
+// reasoning, which applies here for the same reason in a weaker form: an absent
+// HUB_MODE silently running single-pod is a correctness problem for a deployment
+// that believed it had cross-pod fan-out.
 func parseFanout(v string) (FanoutMode, error) {
 	switch FanoutMode(v) {
 	case FanoutInMemory, FanoutRedis:
 		return FanoutMode(v), nil
+	case "":
+		return "", fmt.Errorf("HUB_MODE must be set explicitly to one of inmemory, redis; there is no default")
 	default:
 		return "", fmt.Errorf("HUB_MODE must be one of inmemory, redis (got %q)", v)
 	}
@@ -666,6 +672,25 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 	switch BlobStoreMode(v) {
 	case BlobStoreInline, BlobStoreFileService:
 		return BlobStoreMode(v), nil
+	case "":
+		// MANDATORY, with no default, because the only safe default does not exist.
+		//
+		// Defaulting to inline means a deployment that omits the key — or sets a
+		// RENAMED one, which is the same thing to os.Getenv — boots healthy on the
+		// non-durable in-process store and loses every document on restart. That is
+		// silent data loss, and the omission is invisible: nothing in the logs
+		// distinguishes "chose inline" from "never said". Defaulting to file-service
+		// instead would break every test and local run, and would fail at the first
+		// save rather than at boot.
+		//
+		// So the key is required and local/test configuration says inline out loud.
+		// This deliberately gives up zero-CONFIG standalone; zero-DEPENDENCY
+		// standalone is unaffected (CHECKPOINT_STORE=inline needs nothing running).
+		//
+		// It also removes the need to know any abandoned key name: BLOB_STORE=... is
+		// rejected not because the old name is recognised, but because the canonical
+		// one is absent.
+		return "", fmt.Errorf("CHECKPOINT_STORE must be set explicitly to one of inline, file-service; there is no default (inline is the non-durable in-process store for tests and local development, file-service is the durable one)")
 	default:
 		// FAIL, never fall back. buildCheckpoint answers anything it does not
 		// recognise with the IN-PROCESS store, so an unrecognised selector would

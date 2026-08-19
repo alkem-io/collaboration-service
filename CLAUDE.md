@@ -71,13 +71,18 @@ ports. Adapters implement them:
 
 ## Configuration (env vars)
 
-See [.env.example](./.env.example). Defaults are standalone-friendly
-(single-pod, inline blob, open auth):
+See [.env.example](./.env.example). The two BACKEND SELECTORS are MANDATORY —
+they have no default, and startup fails naming the missing key and its supported
+values. Defaulting them would let an omitted (or renamed, which is the same thing
+to the process) key boot healthy on the non-durable in-process store and lose
+every document on restart, with nothing in the logs distinguishing "chose inline"
+from "never said". Everything else is standalone-friendly (open auth); a
+zero-dependency run costs one explicit line per selector:
 
 - `PORT` (default 4006)
-- `HUB_MODE` — `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
+- `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
-- `CHECKPOINT_STORE` — `inline` | `file-service`
+- `CHECKPOINT_STORE` — **required**; `inline` (non-durable, tests/local) | `file-service` (durable)
 - `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
   `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
   client-controllable `Authorization` default is rejected at startup.

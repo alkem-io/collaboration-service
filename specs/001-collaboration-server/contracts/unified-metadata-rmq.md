@@ -59,7 +59,7 @@ Reply: `{ "success": true }` or `{ "success": false, "error": "<reason>" }`.
 
 > **`server` must persist `contentPointer` + `blobStore`** so a fetch returns
 > them — the collab service rehydrates the snapshot from `blobStore` using
-> `contentPointer`, regardless of the collab service's running `BLOB_STORE`
+> `contentPointer`, regardless of the collab service's running `CHECKPOINT_STORE`
 > config.
 
 ### `collaboration-fetch` — request/reply

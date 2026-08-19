@@ -176,7 +176,7 @@ func idFromInt(n int) string {
 }
 
 // fileServiceConfig is the standalone config with the snapshot blob offloaded to
-// a file-service at baseURL (BLOB_STORE=file-service). The metadata index stays
+// a file-service at baseURL (CHECKPOINT_STORE=file-service). The metadata index stays
 // in-process, so the persisted metadata row carries only a content pointer — the
 // blob bytes live in file-service (SC-006/SC-012).
 func fileServiceConfig(baseURL string) *config.Config {
@@ -190,7 +190,7 @@ func fileServiceConfig(baseURL string) *config.Config {
 	return cfg
 }
 
-// TestFileServiceBlobOffloadRoundTrip persists a memo with BLOB_STORE=file-service
+// TestFileServiceBlobOffloadRoundTrip persists a memo with CHECKPOINT_STORE=file-service
 // (blob offloaded, metadata index inline), releases the room, and reconnects: the
 // reloaded document is identical, fetched back from file-service via the content
 // pointer (SC-006/SC-012). The stub file-service confirms the snapshot bytes

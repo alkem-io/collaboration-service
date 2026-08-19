@@ -18,7 +18,7 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
-// redisConfig is the standalone config with FANOUT_MODE=redis pointed at url.
+// redisConfig is the standalone config with HUB_MODE=redis pointed at url.
 // Two pods built from this share one Redis bus — the multi-pod topology (SC-007).
 func redisConfig(url string) *config.Config {
 	cfg := standaloneConfig()
@@ -48,7 +48,7 @@ func bootPod(t *testing.T, url string) string {
 // TestTwoPodCrossInstanceConvergence is the SC-011 two-pod e2e: two SEPARATE
 // service instances share one Redis fan-out bus; a client on pod A and a client
 // on pod B converge on both the document and awareness via the redis fan-out,
-// with NO code change vs single-pod (the only difference is FANOUT_MODE=redis).
+// with NO code change vs single-pod (the only difference is HUB_MODE=redis).
 // This is the full WS-level extension of the Wave-2 TestTwoInstancesConverge.
 func TestTwoPodCrossInstanceConvergence(t *testing.T) {
 	mr := miniredis.RunT(t) // in-process Redis shared by both pods (pub/sub).

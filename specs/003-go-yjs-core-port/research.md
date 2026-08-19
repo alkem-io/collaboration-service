@@ -303,7 +303,7 @@ complexity for a deployment nobody runs (§XI).
 consistency grounds — the configuration surface should not name a deleted port.
 
 **The hazard this creates, and its mitigation**: the affected keys have **silent
-defaults**. `BLOB_STORE` unset falls back to `inline`, an in-process map. A stale
+defaults**. `BLOB_STORE` unset used to fall back to `inline`, an in-process map. RESOLVED by making the canonical selectors mandatory (spec FR-022f). A stale
 manifest setting the old key after the rename would be ignored, blobs would go to
 memory, and every document would be lost on restart **while the service reported
 healthy**. FR-022d therefore requires a removed key to fail startup with an error
@@ -386,7 +386,7 @@ plus a stale Wave-2 code comment produced the opposite (wrong) conclusion:
   `quickstart-services.yml` runs it as `alkemio_dev_collaboration`
   (`ghcr.io/alkem-io/collaboration-service:pr-5`) behind Traefik, identity resolved at
   the gateway and forwarded as `X-Alkemio-Actor-Id`.
-- Real topology: `FANOUT_MODE=redis`, `METADATA_STORE=rabbitmq`,
+- Real topology: `HUB_MODE=redis`, `METADATA_STORE=rabbitmq`,
   `CHECKPOINT_STORE=file-service`, `AUTH_MODE=header` (AuthZ derives to `authzeval`).
 - k8s manifests exist on `feat/003-migration` and are **not in this branch's history**.
 

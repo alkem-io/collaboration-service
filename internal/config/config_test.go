@@ -7,24 +7,20 @@ import (
 	"testing"
 )
 
+// TestLoadDefaults asserts what still defaults once the BACKEND SELECTORS are
+// explicit. Port, AuthN mode and the token header have safe defaults; the
+// selectors that decide where data lives do not — see the four tests below.
 func TestLoadDefaults(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("PORT", "")
-	t.Setenv("HUB_MODE", "")
-	t.Setenv("METADATA_STORE", "")
-	t.Setenv("CHECKPOINT_STORE", "")
 	t.Setenv("AUTH_MODE", "")
 
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load() with no env: unexpected error %v", err)
+		t.Fatalf("Load(): unexpected error %v", err)
 	}
-
-	// Standalone-friendly defaults: single binary, zero external deps.
 	if cfg.Port != 4006 {
 		t.Errorf("default Port = %d, want 4006", cfg.Port)
-	}
-	if cfg.Fanout != FanoutInMemory {
-		t.Errorf("default Fanout = %q, want inmemory", cfg.Fanout)
 	}
 	if cfg.AuthMode != AuthModeOpen {
 		t.Errorf("default AuthMode = %q, want open", cfg.AuthMode)
@@ -34,11 +30,95 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+// TestCheckpointStoreIsMandatory is the one that matters most.
+//
+// Defaulting an absent CHECKPOINT_STORE to inline means a deployment that omits
+// the key boots healthy on the NON-DURABLE in-process store and loses every
+// document on restart, with nothing in the logs distinguishing "chose inline"
+// from "never said". The key is therefore required and has no default.
+func TestCheckpointStoreIsMandatory(t *testing.T) {
+	for _, value := range []string{"", " "} {
+		t.Setenv("HUB_MODE", "inmemory")
+		t.Setenv("METADATA_STORE", "inmemory")
+		t.Setenv("CHECKPOINT_STORE", value)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("CHECKPOINT_STORE=%q: expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart", value)
+		}
+		if !strings.Contains(err.Error(), "CHECKPOINT_STORE") {
+			t.Fatalf("the error must name the missing key, got %v", err)
+		}
+		for _, supported := range []string{"inline", "file-service"} {
+			if !strings.Contains(err.Error(), supported) {
+				t.Fatalf("the error must name the supported value %q so the fix travels with the message, got %v", supported, err)
+			}
+		}
+	}
+}
+
+// TestHubModeIsMandatory: an absent HUB_MODE silently running single-pod is a
+// correctness problem for a deployment that believed it had cross-pod fan-out.
+func TestHubModeIsMandatory(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	t.Setenv("HUB_MODE", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("HUB_MODE unset: expected startup to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "HUB_MODE") {
+		t.Fatalf("the error must name the missing key, got %v", err)
+	}
+	for _, supported := range []string{"inmemory", "redis"} {
+		if !strings.Contains(err.Error(), supported) {
+			t.Fatalf("the error must name the supported value %q, got %v", supported, err)
+		}
+	}
+}
+
+// TestRenamedKeysAloneStillFail is a REGRESSION FIXTURE, not compatibility
+// behaviour. It pins the property that makes the mandatory-selector design work:
+// a process carrying only the OLD key names fails because the CANONICAL selector
+// is absent, without the config knowing those names exist.
+//
+// This is the exact configuration that prompted the change — specs/001's
+// quickstart still exported these after the rename, and os.Getenv cannot tell a
+// renamed key from an omitted one. Under the old defaults it booted happily on
+// inmemory + inline while appearing to configure redis fan-out and durable
+// storage: a "durable" deployment that silently was not.
+func TestRenamedKeysAloneStillFail(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("FANOUT_MODE", "redis")
+	t.Setenv("CHECKPOINT_STORE", "")
+	t.Setenv("HUB_MODE", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("a process carrying only the pre-rename keys started successfully; it would serve on the non-durable in-process store while its configuration claims a durable one")
+	}
+}
+
+// TestExplicitLocalSelectorsRemainSupported: the standalone path costs one line
+// of configuration and still needs nothing running. Zero-DEPENDENCY standalone is
+// intact; only zero-CONFIG was given up.
+func TestExplicitLocalSelectorsRemainSupported(t *testing.T) {
+	t.Setenv("HUB_MODE", "inmemory")
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("explicit local selectors must load: %v", err)
+	}
+	if cfg.Fanout != FanoutInMemory || cfg.BlobStore != BlobStoreInline {
+		t.Fatalf("got Fanout=%q BlobStore=%q, want inmemory/inline", cfg.Fanout, cfg.BlobStore)
+	}
+}
+
 // TestAuthTokenHeaderOverride asserts AUTH_TOKEN_HEADER overrides the handshake
 // header the WS adapter reads the identity token from — the seam the Alkemio
 // deployment uses to point the handshake at the gateway's resolved actor-id
 // header (X-Alkemio-Actor-Id) while standalone/open mode keeps Authorization.
 func TestAuthTokenHeaderOverride(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "")
 	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 
@@ -99,6 +179,7 @@ func TestRedisRequiresURL(t *testing.T) {
 }
 
 func TestRedisLoadsURL(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("HUB_MODE", "redis")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	cfg, err := Load()
@@ -119,6 +200,7 @@ func TestRabbitMQRequiresQueue(t *testing.T) {
 }
 
 func TestRabbitMQAssemblesURL(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "rabbitmq")
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
@@ -141,6 +223,7 @@ func TestRabbitMQAssemblesURL(t *testing.T) {
 // its OWN queue by default — distinct from the metadata-store RPC queue — so it never
 // round-robin-steals fetch/save RPCs (the shared-queue bug).
 func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "rabbitmq")
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("LIFECYCLE_QUEUE", "")
@@ -158,6 +241,7 @@ func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
 
 // TestLifecycleQueueOverride proves LIFECYCLE_QUEUE overrides the default.
 func TestLifecycleQueueOverride(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "rabbitmq")
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("LIFECYCLE_QUEUE", "my-lifecycle-q")
@@ -183,6 +267,7 @@ func TestLifecycleQueueRejectsCollision(t *testing.T) {
 }
 
 func TestRabbitMQEscapesCredentials(t *testing.T) {
+	pinKnownGood(t)
 	// A password with reserved URL characters must be percent-escaped so the
 	// assembled amqp URL stays well-formed (and parseable by the amqp client).
 	t.Setenv("METADATA_STORE", "rabbitmq")
@@ -217,6 +302,7 @@ func TestPostgresRequiresDSNParts(t *testing.T) {
 }
 
 func TestPostgresAssemblesDSN(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "postgres")
 	t.Setenv("ALKEMIO_DATABASE_HOST", "db")
 	t.Setenv("ALKEMIO_DATABASE_NAME", "collab")
@@ -240,6 +326,7 @@ func TestFileServiceRequiresSettings(t *testing.T) {
 }
 
 func TestFileServiceLoadsSettings(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("CHECKPOINT_STORE", "file-service")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
@@ -305,6 +392,7 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 // error; drop the supported names from the message and it fails on the substring
 // checks.
 func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
+	pinKnownGood(t)
 	for _, unsupported := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(unsupported, func(t *testing.T) {
 			t.Setenv("CHECKPOINT_STORE", unsupported)
@@ -345,6 +433,7 @@ func TestAuthZEvalRequiresServiceURL(t *testing.T) {
 }
 
 func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "header")
 	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
@@ -358,6 +447,7 @@ func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
 }
 
 func TestLimitsDefaults(t *testing.T) {
+	pinKnownGood(t)
 	// Clear any ambient limit overrides so the test asserts the built-in defaults
 	// regardless of the runner's environment (getenv treats "" as unset).
 	for _, k := range []string{
@@ -386,6 +476,7 @@ func TestLimitsDefaults(t *testing.T) {
 }
 
 func TestLimitsOverridable(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("MAX_DOC_BYTES", "1048576")
 	t.Setenv("MAX_CONNS_PER_ROOM", "8")
 	t.Setenv("UPDATE_RATE_PER_SEC", "20")
@@ -735,6 +826,7 @@ func TestOIDCAudAllowListAllBlankIsEmpty(t *testing.T) {
 // contract — so renaming it would have been churn with a deployment cost and no
 // meaning behind it.
 func TestMetadataStoreKeyWasNotRenamed(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "inmemory")
 	cfg, err := Load()
 	if err != nil {
@@ -771,6 +863,7 @@ func TestRenamedKeysAreRead(t *testing.T) {
 // from empty component defaults would connect to localhost while the operator
 // believed they had pointed it at a managed broker or database.
 func TestURLOverridesTakePrecedenceOverComponentParts(t *testing.T) {
+	pinKnownGood(t)
 	t.Run("RABBITMQ_URL", func(t *testing.T) {
 		// Credential-shaped only because a real RABBITMQ_URL is; the point of the
 		// test is that the URL wins verbatim, not what it contains.
