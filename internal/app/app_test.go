@@ -196,12 +196,12 @@ func TestBuildDepsStandaloneSucceeds(t *testing.T) {
 	cleanup() // no-op for the standalone backends; must not panic
 }
 
-// TestLifecycleQueueIsDistinctFromMetastoreQueue asserts the lifecycle consumer
+// TestLifecycleQueueIsDistinctFromMetadataStoreQueue asserts the lifecycle consumer
 // binds its OWN queue — never the metadata-store RPC queue. A shared queue would let
 // RabbitMQ round-robin-steal metadata-store fetch/save RPCs to the lifecycle consumer
 // (memo joins then time out), so this separation is the core of the RMQ topology
 // fix.
-func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
+func TestLifecycleQueueIsDistinctFromMetadataStoreQueue(t *testing.T) {
 	cfg := &config.Config{
 		MetadataStore: config.MetadataStoreRabbitMQ,
 		RabbitMQ: config.RabbitMQConfig{

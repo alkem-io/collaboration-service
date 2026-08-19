@@ -43,7 +43,7 @@ func TestInvPersistRoundtrip(t *testing.T) {
 		t.Fatalf("state round-trip changed bytes: got %x want %x", got, data)
 	}
 
-	// Metastore: the index fields round-trip (version is store-managed, so not asserted).
+	// Metadata store: the index fields round-trip (version is store-managed, so not asserted).
 	meta := model.Metadata{
 		ID: "doc-rt", ContentType: model.ContentTypeWhiteboard, ContentPointer: "file-rt",
 		BlobStore: "inline", OwnerRef: "owner-9", AuthorizationPolicyID: "policy-3", StorageBucketID: "bucket-1",
