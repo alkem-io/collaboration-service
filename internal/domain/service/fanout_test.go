@@ -31,7 +31,7 @@ import (
 // over one hub behave as two pods.
 
 // newPodManager builds a Manager wired to the shared bus as pod `source`, with
-// its own in-process metastore/blobstore (separate per pod, as in production —
+// its own in-process metadata-store/blobstore (separate per pod, as in production —
 // only the fan-out bus and the durable stores are shared, and here we keep the
 // stores private to prove fan-out, not persistence, drives convergence).
 func newPodManager(t *testing.T, bus hub.Hub, _ string) *Manager {

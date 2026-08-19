@@ -178,14 +178,14 @@ type RedisConfig struct {
 type RabbitMQConfig struct {
 	// URL is the amqp:// connection string (assembled from RABBITMQ_*).
 	URL string
-	// Queue is the Alkemio server collaboration metastore RPC queue
-	// (RABBITMQ_QUEUE) — the save/fetch request queue the server's metastore
+	// Queue is the Alkemio server collaboration metadata-store RPC queue
+	// (RABBITMQ_QUEUE) — the save/fetch request queue the server's metadata-store
 	// responder consumes.
 	Queue string
 	// LifecycleQueue is the SEPARATE queue the document lifecycle consumer binds
 	// (LIFECYCLE_QUEUE, default alkemio-collaboration-lifecycle). It MUST NOT be the
-	// metastore RPC queue: RabbitMQ round-robins a queue across its consumers, so
-	// sharing one queue would let the lifecycle consumer steal metastore
+	// metadata-store RPC queue: RabbitMQ round-robins a queue across its consumers, so
+	// sharing one queue would let the lifecycle consumer steal metadata-store
 	// fetch/save RPCs and silently drop them (memo joins then time out). Giving the
 	// lifecycle consumer its own queue keeps the two consumers independent.
 	LifecycleQueue string
@@ -286,7 +286,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	metaStore, err := parseMetaStore(getenv("METADATA_STORE", string(MetadataStoreInMemory)))
+	metadataStore, err := parseMetadataStore(getenv("METADATA_STORE", string(MetadataStoreInMemory)))
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:          port,
 		Fanout:        fanout,
-		MetadataStore: metaStore,
+		MetadataStore: metadataStore,
 		BlobStore:     blobStore,
 		AuthMode:      authMode,
 		AuthZMode:     authZMode,
@@ -404,7 +404,7 @@ func loadAdapterConfig(cfg *Config) error {
 	if err := loadFanoutConfig(cfg); err != nil {
 		return err
 	}
-	if err := loadMetaStoreConfig(cfg); err != nil {
+	if err := loadMetadataStoreConfig(cfg); err != nil {
 		return err
 	}
 	if err := loadBlobStoreConfig(cfg); err != nil {
@@ -424,7 +424,7 @@ func loadFanoutConfig(cfg *Config) error {
 	return nil
 }
 
-func loadMetaStoreConfig(cfg *Config) error {
+func loadMetadataStoreConfig(cfg *Config) error {
 	switch cfg.MetadataStore {
 	case MetadataStoreRabbitMQ:
 		cfg.RabbitMQ.URL = rabbitURL()
@@ -438,7 +438,7 @@ func loadMetaStoreConfig(cfg *Config) error {
 		// re-introducing the shared-queue bug.
 		cfg.RabbitMQ.LifecycleQueue = getenv("LIFECYCLE_QUEUE", DefaultLifecycleQueue)
 		if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
-			return fmt.Errorf("LIFECYCLE_QUEUE must differ from RABBITMQ_QUEUE (%q) — a shared queue round-robin-steals metastore RPCs", cfg.RabbitMQ.Queue)
+			return fmt.Errorf("LIFECYCLE_QUEUE must differ from RABBITMQ_QUEUE (%q) — a shared queue round-robin-steals metadata-store RPCs", cfg.RabbitMQ.Queue)
 		}
 	case MetadataStorePostgres:
 		cfg.Postgres.DSN = postgresDSN()
@@ -660,7 +660,7 @@ func parseFanout(v string) (FanoutMode, error) {
 	}
 }
 
-func parseMetaStore(v string) (MetadataStoreMode, error) {
+func parseMetadataStore(v string) (MetadataStoreMode, error) {
 	switch MetadataStoreMode(v) {
 	case MetadataStoreInMemory, MetadataStoreRabbitMQ, MetadataStorePostgres:
 		return MetadataStoreMode(v), nil

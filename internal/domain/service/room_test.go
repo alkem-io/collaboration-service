@@ -192,7 +192,7 @@ func testManager(t *testing.T, cfg RoomConfig) (*Manager, testDeps) {
 	return NewManager(deps.Deps, cfg, nil, zap.NewNop()), deps
 }
 
-// testDeps is the bundle of shared adapters a test can inspect (metastore/blob).
+// testDeps is the bundle of shared adapters a test can inspect (metadata-store/blob).
 type testDeps struct {
 	Deps
 	meta *metainmem.Store

@@ -2,7 +2,7 @@
 // document index in a map so the service runs without RabbitMQ/Postgres. The
 // rabbitmq adapter (server save/fetch bus, Alkemio default) and the postgres
 // adapter (standalone) land with task T005; this skeleton stub keeps the
-// metastore layout real and lets the service boot zero-dependency.
+// metadata-store layout real and lets the service boot zero-dependency.
 package inmemory
 
 import (

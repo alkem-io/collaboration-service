@@ -152,7 +152,7 @@ func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
 		t.Errorf("RabbitMQ.LifecycleQueue = %q, want default %q", cfg.RabbitMQ.LifecycleQueue, DefaultLifecycleQueue)
 	}
 	if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
-		t.Errorf("lifecycle queue %q must differ from metastore queue %q", cfg.RabbitMQ.LifecycleQueue, cfg.RabbitMQ.Queue)
+		t.Errorf("lifecycle queue %q must differ from metadata-store queue %q", cfg.RabbitMQ.LifecycleQueue, cfg.RabbitMQ.Queue)
 	}
 }
 

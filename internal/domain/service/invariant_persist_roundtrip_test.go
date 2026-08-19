@@ -58,6 +58,6 @@ func TestInvPersistRoundtrip(t *testing.T) {
 	if loaded.ContentType != meta.ContentType || loaded.ContentPointer != meta.ContentPointer ||
 		loaded.BlobStore != meta.BlobStore || loaded.OwnerRef != meta.OwnerRef ||
 		loaded.AuthorizationPolicyID != meta.AuthorizationPolicyID || loaded.StorageBucketID != meta.StorageBucketID {
-		t.Fatalf("metastore round-trip lost fields:\n got  %+v\n want %+v", loaded, meta)
+		t.Fatalf("metadata-store round-trip lost fields:\n got  %+v\n want %+v", loaded, meta)
 	}
 }

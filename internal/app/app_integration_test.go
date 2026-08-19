@@ -110,7 +110,7 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 		BlobStore:     config.BlobStoreInline,
 		AuthMode:      config.AuthModeOpen,
 		// Per-run unique queues so concurrent/previous runs cannot leak state. The
-		// lifecycle consumer binds its OWN queue, distinct from the metastore RPC
+		// lifecycle consumer binds its OWN queue, distinct from the metadata-store RPC
 		// queue (a shared queue round-robin-steals fetch/save RPCs).
 		RabbitMQ: config.RabbitMQConfig{
 			URL:            url,

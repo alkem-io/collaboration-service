@@ -29,7 +29,7 @@ func (a fixedAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.Docume
 	return a.update, nil
 }
 
-// authZDeps wires the in-memory metastore/blob with a custom AuthZ + open authN.
+// authZDeps wires the in-memory metadata-store/blob with a custom AuthZ + open authN.
 func authZDeps(t *testing.T, authz fixedAuthZ) testDeps {
 	t.Helper()
 	d := newTestDeps()

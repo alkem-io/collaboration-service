@@ -33,11 +33,11 @@ const DefaultHandlerTimeout = 30 * time.Second
 
 // Config carries the RabbitMQ lifecycle-consumer settings.
 type Config struct {
-	// URL is the amqp:// connection string (shared with the metastore bus).
+	// URL is the amqp:// connection string (shared with the metadata-store bus).
 	URL string
 	// Queue is the DEDICATED lifecycle queue the consumer binds — its own queue,
 	// distinct from the metadata-store RPC queue (config.RabbitMQ.LifecycleQueue,
-	// default alkemio-collaboration-lifecycle). It MUST NOT be the metastore RPC
+	// default alkemio-collaboration-lifecycle). It MUST NOT be the metadata-store RPC
 	// queue: RabbitMQ round-robins a queue across its consumers, so sharing one
 	// queue would let this consumer steal metadata-store fetch/save RPCs and drop them.
 	Queue string

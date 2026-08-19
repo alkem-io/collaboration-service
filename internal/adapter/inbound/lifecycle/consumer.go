@@ -51,7 +51,7 @@ type AccessChangedEvent struct {
 }
 
 // envelope is the NestJS event envelope { pattern, data, id } the server
-// publishes (identical framing to the metastore RPC requests).
+// publishes (identical framing to the metadata-store RPC requests).
 type envelope struct {
 	Pattern string          `json:"pattern"`
 	Data    json.RawMessage `json:"data"`
@@ -87,7 +87,7 @@ const (
 
 // handle decodes one event body and routes it to the Manager, returning how the
 // delivery should be acknowledged. An unparseable body or an unrelated pattern is
-// acked (it shares the bus with metastore RPC replies and other traffic — there is
+// acked (it shares the bus with metadata-store RPC replies and other traffic — there is
 // nothing to retry). A genuine cascade/pre-register failure returns nackRequeue so
 // the event is redelivered (bounded by consume) rather than silently lost — the
 // cascade is a correctness requirement, idempotent on redelivery.

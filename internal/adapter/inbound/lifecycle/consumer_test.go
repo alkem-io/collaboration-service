@@ -50,7 +50,7 @@ func (f *fakeManager) purgedIDs() []model.DocumentID {
 }
 
 // eventBody builds the NestJS event envelope { pattern, data, id } the consumer
-// decodes (the same shape the metastore RPC uses).
+// decodes (the same shape the metadata-store RPC uses).
 func eventBody(t *testing.T, pattern string, data any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(data)
@@ -159,7 +159,7 @@ func TestDocumentAccessChangedReEvaluates(t *testing.T) {
 }
 
 // TestUnknownPatternIgnored asserts an unrelated pattern is ignored without error
-// (the consumer shares the bus with the metastore RPC replies).
+// (the consumer shares the bus with the metadata-store RPC replies).
 func TestUnknownPatternIgnored(t *testing.T) {
 	mgr := &fakeManager{}
 	c := newConsumer(mgr)
