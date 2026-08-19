@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -205,5 +206,58 @@ func TestMaterializationIsBoundedWhenTheCheckpointStoreHangs(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("materialization never returned: the checkpoint restore has no deadline, and nothing else can cancel a room that is not yet registered")
+	}
+}
+
+// TestRestoreIsBoundedWithoutAnyCallerDeadline pins the wall-clock bound the room
+// imposes on its OWN checkpoint restore, independent of the context the CRDT core
+// hands the open function.
+//
+// That context belongs to the REGISTRY, not to any single acquirer: the core
+// cancels it when the LAST waiter stops waiting. It therefore bounds an open that
+// nobody wants any more, but NOT an open somebody is still waiting for — a
+// document that keeps attracting joiners renews the clock on every arrival, so a
+// wedged LoadCheckpoint can outlive every deadline the acquirers themselves
+// carry. A fixed bound has to originate here.
+//
+// The parent is context.Background(): no deadline, no cancellation. Nothing but
+// the room's own bound can end this call, so the assertion cannot be satisfied by
+// a deadline inherited from elsewhere — which is exactly what makes it meaningful
+// against a core that still propagates the acquirer's context.
+//
+// Non-vacuity: drop the WithTimeout inside restoreBounded and this never returns.
+func TestRestoreIsBoundedWithoutAnyCallerDeadline(t *testing.T) {
+	deps := newTestDeps()
+	hanging := &hangingLoadStore{Store: persistinprocess.New(), entered: make(chan struct{})}
+	deps.Checkpoint = hanging
+
+	r := &Room{
+		id:   "no-caller-deadline",
+		cfg:  RoomConfig{SendBuffer: 16, BackendTimeout: 150 * time.Millisecond},
+		deps: deps.Deps,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.restoreBounded(context.Background(), newRoomDoc("no-caller-deadline"),
+			model.Metadata{ID: "no-caller-deadline", ContentType: model.ContentTypeMemo, ContentPointer: "ptr"})
+	}()
+
+	select {
+	case <-hanging.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("LoadCheckpoint was never reached")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a hung checkpoint store must fail the restore, not succeed")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the restore must end on the room's own deadline; got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore never returned: with a deadline-free open context, only the room's own bound can stop a wedged store")
 	}
 }

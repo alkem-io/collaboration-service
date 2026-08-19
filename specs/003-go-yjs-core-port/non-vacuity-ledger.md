@@ -46,6 +46,24 @@ stronger property, never weakened.
 | Every metrics hook moves its series | empty `GenerationInvalidated`; empty `DocumentDurabilityRestored` | "left collaboration_generation_invalidations_total unchanged at 0"; "left collaboration_undurable_flush_failures unchanged at 7" |
 | A pre-rebuild metric still exists | drop `FanoutLagSeconds` from `InitMetrics` | "metric collaboration_fanout_lag_seconds existed before the persistence rebuild and is not exported now" |
 | Removed `BLOB_STORE` values fail startup | widen `parseBlobStore`'s accepted set | the startup error disappears |
+| The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
+
+### Why the room bounds its own restore
+
+The core hands `OpenFunc` a context owned by the **registry**, not by any one
+acquirer: it is cancelled when the *last* waiter stops waiting. That bounds an
+open nobody wants any more; it does **not** bound an open somebody is still
+waiting for. A document that keeps attracting joiners renews the clock on every
+arrival, so a wedged `LoadCheckpoint` can outlive every deadline the acquirers
+themselves carry.
+
+`TestMaterializationIsBoundedWhenTheCheckpointStoreHangs` (the F7 regression)
+cannot detect that gap: under a core that still propagates the acquirer's
+context, the inherited deadline satisfies it either way. The added test therefore
+passes `context.Background()` — no deadline, no cancellation — so **only** the
+room's own bound can end the call. That is what makes it non-vacuous against the
+pinned core rather than only against a future one.
+
 
 ## Probes that did NOT go RED — and what changed as a result
 

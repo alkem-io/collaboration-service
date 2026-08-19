@@ -237,16 +237,22 @@ type Room struct {
 	lc lifecycle
 }
 
+// backendTimeout is the wall-clock bound for one backend call, falling back to
+// defaultBackendTimeout when unset.
+func (r *Room) backendTimeout() time.Duration {
+	if r.cfg.BackendTimeout > 0 {
+		return r.cfg.BackendTimeout
+	}
+	return defaultBackendTimeout
+}
+
 // opCtx returns a timeout-bounded context for a single backend call made on the
 // run loop (authZ eval, persist, purge, publish), derived from the room-lifetime
 // context. The returned cancel MUST be called (defer) to release the timer. The
 // timeout bounds a slow/hung backend so it cannot stall the single-writer loop;
 // the parent ctx cancellation unblocks the call immediately on room release.
 func (r *Room) opCtx() (context.Context, context.CancelFunc) {
-	timeout := r.cfg.BackendTimeout
-	if timeout <= 0 {
-		timeout = defaultBackendTimeout
-	}
+	timeout := r.backendTimeout()
 	// A room built by newRoom always has r.ctx; tolerate a nil parent (a bare Room
 	// constructed directly in a unit test) by rooting at Background so opCtx never
 	// panics.
@@ -565,21 +571,31 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// created but not yet restored — the half-built state FR-004a forbids. Loading
 	// after Acquire would publish an empty document first and fill it in afterwards.
 	opened := false
-	// loadCtx, NOT ctx. The open function calls LoadCheckpoint, so the restore is
-	// backend I/O that must carry the same materialization deadline the metadata
-	// read does — otherwise a hung checkpoint store parks the whole first-connect
-	// cohort with nothing able to free it. The room is not in the Manager's map
-	// yet, so shutdown cannot find it to cancel, and Registry.Close sees an
-	// initializing entry and reports ErrInUse.
+	// loadCtx, NOT ctx. It bounds how long THIS acquirer waits for materialization:
+	// a hung checkpoint store must not park the first-connect cohort with nothing
+	// able to free it. The room is not in the Manager's map yet, so shutdown cannot
+	// find it to cancel, and Registry.Close reports ErrInUse for an initializing
+	// entry. loadCtx derives from the room-lifetime context, which the Manager
+	// already built with context.WithoutCancel — so this bounds materialization
+	// without making it cancellable by the connecting request.
 	//
-	// loadCtx derives from the room-lifetime context, which the Manager already
-	// built with context.WithoutCancel — so this bounds materialization without
-	// making it cancellable by the connecting request.
+	// It does NOT bound the open itself; see the open function below.
 	handle, err := registry.Acquire(loadCtx, backend.DocumentID(id), func(openCtx context.Context) (*ycrdt.Doc, error) {
 		opened = true
 		doc := newRoomDoc(string(id))
 		if found {
-			if err := r.restoreInto(openCtx, doc, meta); err != nil {
+			// openCtx is the REGISTRY's context, not this acquirer's: the core
+			// cancels it when the LAST waiter stops waiting, so it bounds an open
+			// nobody wants any more — not an open somebody is still waiting for.
+			// A document that keeps attracting joiners therefore renews that clock
+			// indefinitely, and a wedged LoadCheckpoint would hold the generation
+			// open with it. The fixed bound has to come from here, so apply the
+			// same BackendTimeout every other backend call on this room gets.
+			//
+			// Derived FROM openCtx rather than a fresh root: the core preserves
+			// request-scoped VALUES on it (only cancellation and the deadline are
+			// dropped), and a checkpoint store may key off them.
+			if err := r.restoreBounded(openCtx, doc, meta); err != nil {
 				return nil, err
 			}
 		}
@@ -766,6 +782,16 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 // collaboration-fetch (Metadata.SeedContent, R4/US1) so the first opener sees the
 // creation content rather than an empty editor (FR-003). Neither state nor seed
 // is a fresh empty room (FR-010), not an error.
+// restoreBounded runs the checkpoint restore under a wall-clock bound of its own.
+// It is a named method, not an inline WithTimeout, so the bound can be exercised
+// against a context that carries no deadline — which is precisely what the core
+// hands the open function once the last-waiter semantics apply.
+func (r *Room) restoreBounded(openCtx context.Context, doc *ycrdt.Doc, meta model.Metadata) error {
+	restoreCtx, cancel := context.WithTimeout(openCtx, r.backendTimeout())
+	defer cancel()
+	return r.restoreInto(restoreCtx, doc, meta)
+}
+
 func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc, meta model.Metadata) error {
 	// ErrNotFound means the document has never been saved — seed from the row's
 	// create-time content if any. ErrCorrupt means the index says state EXISTS but
