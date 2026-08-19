@@ -979,3 +979,58 @@ func TestNegativeLimitIsRejected(t *testing.T) {
 		t.Fatalf("error must name the setting, got %v", err)
 	}
 }
+
+// TestUnsupportedTopologyFailsStartup pins the refusal of multi-pod fan-out with a
+// durable store.
+//
+// The pair has no ownership mechanism: every pod flushes the whole document on its
+// own schedule and nothing decides which flush wins, so two pods that diverge
+// overwrite each other and the later writer silently discards edits it never
+// received. A warning would not prevent that write — the failure needs no unusual
+// operator behaviour, just two pods and one divergence.
+//
+// The error must name BOTH keys and the supported alternative, because an operator
+// who reaches this has a working intent (durable, multi-pod) and needs to know
+// which half is unavailable.
+func TestUnsupportedTopologyFailsStartup(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("HUB_MODE", "redis")
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
+	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("HUB_MODE=redis with CHECKPOINT_STORE=file-service must fail startup; the service would serve happily while two pods overwrote each other's flushes")
+	}
+	for _, want := range []string{"HUB_MODE=redis", "CHECKPOINT_STORE=file-service", "HUB_MODE=inmemory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error must name %q so the operator knows which half is unavailable and what is supported; got %v", want, err)
+		}
+	}
+}
+
+// TestSupportedTopologiesStillLoad guards the other side: rejecting one pair must
+// not reject the combinations that ARE supported. Without this, a check that
+// refused everything would pass the test above.
+func TestSupportedTopologiesStillLoad(t *testing.T) {
+	cases := []struct{ name, hub, checkpoint string }{
+		{"single-pod durable", "inmemory", "file-service"},
+		{"multi-pod non-durable", "redis", "inline"},
+		{"single-pod non-durable", "inmemory", "inline"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("METADATA_STORE", "inmemory")
+			t.Setenv("HUB_MODE", c.hub)
+			t.Setenv("REDIS_URL", "redis://localhost:6379")
+			t.Setenv("CHECKPOINT_STORE", c.checkpoint)
+			t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
+			t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
+			if _, err := Load(); err != nil {
+				t.Fatalf("%s must still load: %v", c.name, err)
+			}
+		})
+	}
+}

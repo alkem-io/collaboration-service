@@ -393,6 +393,9 @@ func loadLimitsConfig() (LimitsConfig, error) {
 // selected adapters, dispatching to one loader per port so each stays small and
 // independently testable.
 func loadAdapterConfig(cfg *Config) error {
+	if err := rejectUnsupportedTopology(cfg); err != nil {
+		return err
+	}
 	if err := loadHubConfig(cfg); err != nil {
 		return err
 	}
@@ -403,6 +406,33 @@ func loadAdapterConfig(cfg *Config) error {
 		return err
 	}
 	return loadAuthConfig(cfg)
+}
+
+// rejectUnsupportedTopology refuses multi-pod fan-out with a durable store.
+//
+// Every pod serving a document holds its own authoritative copy and flushes the
+// WHOLE document on its own schedule. The hub carries edits between them, but
+// nothing decides which pod's flush wins: there is no ownership, no fence, and the
+// checkpoint store replaces rather than merges. Two pods that briefly diverge — a
+// dropped pub/sub message, a partition, a restart — each write a complete state
+// over the other's, and the later writer silently discards whatever the earlier
+// one had that it never received.
+//
+// Rejected at startup rather than warned about, because the configuration does not
+// prevent the write that loses the data: "read-heavy" is an expectation about
+// traffic, not a read-only contract, and one write is enough. A single-pod
+// deployment has the supported equivalent (HUB_MODE=inmemory with the same durable
+// store), so refusing this pair removes no capability. Multi-pod durable operation
+// returns when an ownership mechanism does.
+func rejectUnsupportedTopology(cfg *Config) error {
+	if cfg.HubMode != HubRedis || cfg.CheckpointStore != CheckpointStoreFileService {
+		return nil
+	}
+	return fmt.Errorf(
+		"unsupported topology: HUB_MODE=redis with CHECKPOINT_STORE=file-service has no document ownership mechanism, " +
+			"so every pod flushes the whole document and two pods that diverge overwrite each other, " +
+			"silently discarding edits the later writer never received; " +
+			"supported: a single pod (HUB_MODE=inmemory) with CHECKPOINT_STORE=file-service")
 }
 
 func loadHubConfig(cfg *Config) error {

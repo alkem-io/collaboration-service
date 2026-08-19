@@ -64,8 +64,6 @@ type App struct {
 // A wiring failure (bad backend config, unreachable bus) returns an error and
 // leaves nothing started.
 func New(cfg *config.Config, logger *zap.Logger) (*App, error) {
-	warnUnsupportedTopology(cfg, logger)
-
 	deps, depsCleanup, err := buildDeps(cfg, logger)
 	if err != nil {
 		return nil, err
@@ -103,33 +101,6 @@ func (a *App) Close() {
 // on shutdown. The standalone defaults (inmemory / inline / open) keep the
 // service a single zero-dependency binary (SC-012); any other selection wires the
 // matching durable adapter, failing fast if its config is incomplete.
-// warnUnsupportedTopology reports the one configuration combination this service
-// does not support (FR-022b): multi-pod fan-out with a DURABLE store.
-//
-// Why it is unsupported. Every pod serving a document holds its own authoritative
-// copy and flushes the WHOLE document on its own schedule. The hub carries edits
-// between them, but nothing decides which pod's flush wins — so two pods that
-// briefly diverge (a dropped pub/sub message, a partition, a restart) will each
-// write a complete state over the other's, and the later writer silently discards
-// whatever the earlier one had that it never received. There is no ownership
-// mechanism, no fence, and the checkpoint store replaces rather than merges.
-//
-// It is a WARNING rather than a startup failure on purpose: the combination is
-// legitimate for a read-heavy or short-lived deployment where an operator
-// understands the tradeoff, and refusing to boot would strand them. But it must
-// be said out loud, before serving, naming both keys — the failure mode is silent
-// data loss that appears only under conditions nobody reproduces on purpose.
-func warnUnsupportedTopology(cfg *config.Config, logger *zap.Logger) {
-	if cfg.HubMode != config.HubRedis || cfg.CheckpointStore != config.CheckpointStoreFileService {
-		return
-	}
-	logger.Warn("UNSUPPORTED CONFIGURATION: multi-pod fan-out with a durable store and no document ownership mechanism",
-		zap.String("HUB_MODE", string(cfg.HubMode)),
-		zap.String("CHECKPOINT_STORE", string(cfg.CheckpointStore)),
-		zap.String("consequence", "every pod flushes the whole document on its own schedule with nothing deciding which write wins; two pods that diverge will overwrite each other and the later writer silently discards edits it never received"),
-		zap.String("supported", "run a single pod (HUB_MODE=inmemory) with CHECKPOINT_STORE=file-service"),
-	)
-}
 
 func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), error) {
 	var closers []func()

@@ -56,6 +56,8 @@ stronger property, never weakened.
 | A deleted blob whose index row survives loads as CORRUPT, not missing (required by `ErrNotFound`'s own contract) | clear the pointer in `Delete` | load reports `ErrNotFound`, the room opens the document EMPTY, and the next save writes that over content whose blob was just erased |
 | `CHECKPOINT_STORE` is mandatory | restore `getenv("CHECKPOINT_STORE", inline)` | "expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart" |
 | `HUB_MODE` is mandatory | restore `getenv("HUB_MODE", inmemory)` | "HUB_MODE unset: expected startup to fail, got nil" |
+| redis + file-service is REJECTED at startup | remove the pair check | "must fail startup; the service would serve happily while two pods overwrote each other's flushes" |
+| ...and the supported combinations still load | make the check reject everything | "single-pod durable must still load" |
 
 ### Why the room bounds its own restore
 

@@ -55,7 +55,7 @@
 **Resolved in Session 2026-08-18 (second `/speckit-clarify` pass):**
 
 - **First-open materialization** — ✅ happens inside the registry's open path (restore the checkpoint, or initialise empty when nothing is stored), making it exactly-once by construction rather than by a racing emptiness check.
-- **Multi-pod durability** — ✅ declared **not supported** until `cluster.Coordinator` lands: fan-out is delivered, concurrent durable writers are not. Only the originating pod persists, so edits originating on several pods make several pods writers of one whole-document blob. FR-022a/b, plus a required startup warning.
+- **Multi-pod durability** — ✅ declared **not supported** until `cluster.Coordinator` lands: fan-out is delivered, concurrent durable writers are not. Only the originating pod persists, so edits originating on several pods make several pods writers of one whole-document blob. The combination is rejected at startup rather than warned about, because the configuration does not prevent the write that loses the data.
 - **Escalation data loss** — ✅ accepted but never silent: distinct counter, log with document id and undurable duration, and a disconnect reason meaning *recent edits could not be saved*. No secondary storage fallback. FR-028/029, SC-016.
 - **Fencing** — ✅ not implemented; every store reports `Unfenced` and rejects a non-zero `Fence` rather than accepting one it cannot honour (FR-008a).
 - **Eviction policy** — recorded as an assumption, not asked: `InProcessRegistry` starts no goroutines and has no policy of its own, so the `002` idle-release policy remains this service's job. The library forces the answer.

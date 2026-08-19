@@ -51,8 +51,8 @@ initial deployment is single-pod.
 **Durable multi-pod is NOT supported** until ownership leases land (FR-022a). Only the
 originating pod persists on the flush timer, but edits originating on different pods
 make several pods writers of one whole-document blob; the later write supersedes the
-earlier and self-heals only if a live pod flushes again. When configured for multi-pod
-fan-out with a durable store and no ownership mechanism, the service MUST emit a
-startup warning naming the unsupported combination — **logged at WARN or above, during
-startup and before the service begins serving, naming both configuration keys and the
-combination** (FR-022b). Stated concretely so it is verifiable; "prominent" is not.
+earlier and self-heals only if a live pod flushes again. Multi-pod fan-out with a durable
+store and no ownership mechanism MUST therefore be REJECTED at startup — the
+configuration fails to load, before any backend is built or served, with an error
+naming both configuration keys, the consequence, and the supported single-pod
+alternative (FR-022b). There is no override.

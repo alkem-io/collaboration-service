@@ -179,7 +179,7 @@ delivery.
 - [X] T054 [US5] Answer the backpressure delta: `Handler` returns an error and an implementation must not silently discard on a full queue, while Redis pub/sub is fire-and-forget (contracts/hub.md)
 - [X] T055 [US5] Remove any reliance on pub/sub ordering in `internal/domain/service/room.go`; completeness comes from persistence and state-vector catch-up (contracts/hub.md)
 - [X] T056 [US5] Keep durable and ephemeral traffic separated in `internal/domain/service/awareness_wire.go` — awareness must never reach durable storage (FR-009)
-- [X] T057 [US5] Emit the unsupported-combination startup warning in `internal/app/app.go` when multi-pod fan-out is configured with a durable store and no ownership mechanism: **logged at WARN or above, during startup and before the service begins serving, naming both configuration keys and the unsupported combination in the message** (FR-022b)
+- [X] T057 [US5] Reject the unsupported combination in `internal/config`: `HUB_MODE=redis` with `CHECKPOINT_STORE=file-service` fails configuration load, before any backend is built or served, naming both keys and the supported single-pod alternative; no override (FR-022b).
 - [X] T070 [US5] Document durable multi-pod as **unsupported** wherever multi-pod configuration is described — `.env.example`, `README.md`, `CLAUDE.md`, and `deploy/k8s/base/configmap.yaml` on `feat/003-migration`. The runtime warning (T057) is not sufficient on its own: FR-022a requires the precondition be documented, so an operator learns it before enabling multi-pod rather than after (FR-022a)
 - [X] T058 [US5] Delete `internal/adapter/outbound/fanout/` and the `ClusterBroadcaster` port — removed, not wrapped (FR-007, SC-008a)
 

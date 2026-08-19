@@ -53,8 +53,9 @@ ports. Adapters implement them:
 **Outbound** (`internal/adapter/outbound/`) — one subpackage per adapter:
 - `hub/redis` — `hub.Hub` (cross-pod fan-out, R4). The single-pod default is the
   core's shipped `hub.NewInProcess()`, used directly rather than re-implemented.
-  **Multi-pod with a durable store is unsupported**: no ownership mechanism, so
-  two pods flushing the same document overwrite each other (startup warns).
+  **Multi-pod with a durable store is REJECTED at startup**: no ownership
+  mechanism, so two pods flushing the same document overwrite each other. Use a
+  single pod (`HUB_MODE=inmemory`) with the durable store.
 - `metadatastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
@@ -80,7 +81,7 @@ from "never said". Everything else is standalone-friendly (open auth); a
 zero-dependency run costs one explicit line per selector:
 
 - `PORT` (default 4006)
-- `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
+- `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is rejected at startup)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
 - `CHECKPOINT_STORE` — **required**; `inline` (non-durable, tests/local) | `file-service` (durable)
 - `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
