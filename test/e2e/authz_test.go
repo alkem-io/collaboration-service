@@ -61,7 +61,7 @@ func authzevalConfig(authURL string) *config.Config {
 	cfg := standaloneConfig()
 	// header AuthN (the gateway-stamped actor id arrives in the Authorization
 	// handshake header here) + authzeval AuthZ — the Wave-5 split of the former
-	// single AUTH_MODE=authzeval. The `header` adapter reads cfg.Auth.TokenHeader,
+	// single AUTH_MODE that bundled both (since removed). The `header` adapter reads cfg.Auth.TokenHeader,
 	// which standaloneConfig leaves empty ⇒ the Authorization default.
 	cfg.AuthMode = config.AuthModeHeader
 	cfg.AuthZMode = config.AuthZModeEval

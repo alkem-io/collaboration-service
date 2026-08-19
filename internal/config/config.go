@@ -290,9 +290,8 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	// AuthN mode (with the retired `authzeval` value handled as a backward-compat
-	// alias) and the independently-selected AuthZ mode (derived from AuthN when
-	// AUTHZ_MODE is unset). OPEN-5.
+	// AuthN mode and the independently-selected AuthZ mode (derived from AuthN
+	// when AUTHZ_MODE is unset). OPEN-5.
 	authMode, authZMode, err := parseAuthModes(
 		getenv("AUTH_MODE", string(AuthModeOpen)),
 		os.Getenv("AUTHZ_MODE"),
@@ -497,7 +496,7 @@ func loadAuthConfig(cfg *Config) error {
 }
 
 // loadHeaderAuthConfig fail-fast-validates the gateway-terminated `header` AuthN
-// mode (AUTH_MODE=header, and the legacy AUTH_MODE=authzeval alias). The header
+// mode (AUTH_MODE=header). The header
 // adapter TRUSTS AUTH_TOKEN_HEADER verbatim as the actor id, so that header MUST
 // be a dedicated gateway-owned header the client cannot set. The bearer-style
 // default ("Authorization") is client-controllable — accepting it would let any
@@ -519,8 +518,8 @@ func loadHeaderAuthConfig(cfg *Config) error {
 }
 
 // loadAuthZEvalConfig populates the authzeval settings when AuthZ delegates to
-// the authorization-evaluation-service (AUTHZ_MODE=authzeval, including via the
-// legacy AUTH_MODE=authzeval alias). Keyed off AuthZMode so AuthZ config is
+// the authorization-evaluation-service (AUTHZ_MODE=authzeval). Keyed off
+// AuthZMode so AuthZ config is
 // independent of the AuthN mode (Wave 5).
 func loadAuthZEvalConfig(cfg *Config) error {
 	if cfg.AuthZMode != AuthZModeEval {
@@ -680,8 +679,6 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 // parseAuthModes resolves the AuthN mode (AUTH_MODE) and the AuthZ mode
 // (AUTHZ_MODE) together, applying the Wave-5 split rules (OPEN-5):
 //
-//   - The retired AUTH_MODE=authzeval value is a backward-compat ALIAS for
-//     header AuthN + authzeval AuthZ.
 //   - When AUTHZ_MODE is unset it is DERIVED from the AuthN mode: open→open,
 //     header/oidc→authzeval.
 //   - An explicit AUTHZ_MODE always wins (AuthN and AuthZ select independently).
@@ -694,7 +691,7 @@ func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
 		return "", "", fmt.Errorf("AUTH_MODE must be one of header, oidc, open (got %q)", authRaw)
 	}
 
-	// Explicit AUTHZ_MODE wins over both the alias and the derivation.
+	// Explicit AUTHZ_MODE wins over the derivation.
 	if authZRaw != "" {
 		switch AuthZMode(authZRaw) {
 		case AuthZModeEval, AuthZModeOpen:

@@ -387,7 +387,7 @@ plus a stale Wave-2 code comment produced the opposite (wrong) conclusion:
   (`ghcr.io/alkem-io/collaboration-service:pr-5`) behind Traefik, identity resolved at
   the gateway and forwarded as `X-Alkemio-Actor-Id`.
 - Real topology: `FANOUT_MODE=redis`, `METADATA_STORE=rabbitmq`,
-  `BLOB_STORE=file-service`, `AUTH_MODE=authzeval`.
+  `CHECKPOINT_STORE=file-service`, `AUTH_MODE=header` (AuthZ derives to `authzeval`).
 - k8s manifests exist on `feat/003-migration` and are **not in this branch's history**.
 
 The stale comments in `metastore/rabbitmq/contract.go` and `003`'s task file have been

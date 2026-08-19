@@ -122,9 +122,12 @@ The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized b
   Redis-unreachable on a cookie-bearing handshake → reject (503-equivalent), never a
   silent anonymous downgrade. The bearer is read **only** from `Authorization:` (the
   `?access_token=` query fallback is DROPPED, OPEN-7).
-- **Backward compatibility:** the retired `AUTH_MODE=authzeval` value aliases to
-  `header` AuthN + `authzeval` AuthZ (OPEN-5), so existing deployments are
-  unchanged.
+- **No compatibility alias.** A single `AUTH_MODE=authzeval` value that bundled
+  AuthN and AuthZ existed transiently during the Wave-5 split and was removed
+  before this service shipped anything: with no deployments in existence there was
+  nothing to keep unchanged, and the alias was a second way to express what
+  `AUTH_MODE=header` + `AUTHZ_MODE=authzeval` already says. The retired value is
+  rejected at startup by the ordinary unknown-value path.
 
 ### Awareness / Presence (ephemeral) — `model.{Awareness,CollaboratorMode}` (`model/room.go`)
 Per-participant: `ClientID` (y awareness client id), `ActorID`, `Mode`

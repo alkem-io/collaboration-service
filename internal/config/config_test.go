@@ -320,11 +320,27 @@ func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
 	}
 }
 
+// TestAuthZEvalRequiresServiceURL covers the DERIVED path: header AuthN with
+// AUTHZ_MODE unset resolves AuthZ to authzeval, which cannot run without
+// AUTH_SERVICE_URL. The sibling ...ViaAuthZMode covers the EXPLICIT selection.
+//
+// The error is matched by content, not merely by being non-nil. This test
+// previously set AUTH_MODE=authzeval and asserted only err != nil; once that
+// retired value was removed, parseAuthModes rejected the mode before the
+// service-URL check was ever reached, so it stayed green while proving nothing
+// about the requirement it names.
 func TestAuthZEvalRequiresServiceURL(t *testing.T) {
-	t.Setenv("AUTH_MODE", "authzeval")
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
 	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
-	if _, err := Load(); err == nil {
-		t.Fatal("AUTH_MODE=authzeval without AUTH_SERVICE_URL: expected error")
+	t.Setenv("AUTHZ_MODE", "")
+	t.Setenv("AUTH_SERVICE_URL", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("derived authzeval AuthZ without AUTH_SERVICE_URL: expected error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_SERVICE_URL") {
+		t.Fatalf("error must name the missing setting, got %v", err)
 	}
 }
 

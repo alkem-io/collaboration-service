@@ -41,8 +41,8 @@ real editors, and the smoke test below.
 ```bash
 # Defaults already select the zero-dep adapters; explicit for clarity:
 export PORT=4006
-export FANOUT_MODE=inmemory
-export BLOB_STORE=inline
+export HUB_MODE=inmemory
+export CHECKPOINT_STORE=inline
 export AUTH_MODE=open
 export METADATA_STORE=inmemory        # this is also the default
 
@@ -76,21 +76,22 @@ Wave 2 wires the durable adapters; the env keys below are stubbed in
 `.env.example` and activate as T004–T006 land.
 
 ```bash
-export AUTH_MODE=authzeval
+export AUTH_MODE=header                # AuthN; AUTHZ_MODE derives to authzeval
+export AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id   # gateway-owned; the Authorization default is rejected
 export AUTH_SERVICE_URL=http://authorization-evaluation-service:6060   # h2c HTTP/2
 # or NATS fallback: export NATS_URL=nats://nats:4222
 
 export METADATA_STORE=rabbitmq        # the server save/fetch bus (OPEN-3)
-export BLOB_STORE=inline              # or file-service (OPEN-2)
+export CHECKPOINT_STORE=inline        # or file-service (OPEN-2)
 
-export FANOUT_MODE=redis              # multi-pod; inmemory for single-pod
+export HUB_MODE=redis                 # multi-pod; inmemory for single-pod
 export REDIS_URL=redis://redis:6379
 ```
 
 - AuthN is the Alkemio token/cookie at the WS handshake (401 on failure).
 - AuthZ is delegated to the authorization-evaluation-service (per-document
   read/collaborator), guarded by a circuit breaker, **failing closed**.
-- Enabling `FANOUT_MODE=redis` makes a multi-pod deployment converge
+- Enabling `HUB_MODE=redis` makes a multi-pod deployment converge
   cross-instance **with no code change** (SC-007/SC-011).
 
 ## Test the server behaviors

@@ -84,7 +84,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 - [X] **T006.1** [W2] Tests first: granted → `{Allowed:true}`; clean denial → `{Allowed:false}`; transport / 503-degraded / open-breaker / unresolvable-policy → **error** (caller fails closed); handshake token resolves an `Identity`; empty token rejected. Stub h2c auth-eval server.
 - [X] **T006.2** [W2] **authN**: resolve `model.Identity{ActorID}` from the handshake token (gateway-authenticated actor id, Oathkeeper/Kratos). Satisfies `port.Auth`.
 - [X] **T006.3** [W2] **authZ** over **h2c HTTP/2** `POST {AUTH_SERVICE_URL}/internal/auth/evaluate` (`{actorId, privilege, authorizationPolicyId}` → `{allowed, reason, error?}`), `sony/gobreaker/v2@v2.4.0`, **failing closed** — **reusing the file-service h2c+gobreaker client pattern verbatim**. **OPEN-1 resolved**: the policy id is resolved from `MetadataStore` (`PolicyResolver`), privileges `read`/`update-content`. Satisfies `port.AuthZ`.
-- [X] **T006.4** [W2] `cmd/server` selects `authzeval` on `AUTH_MODE=authzeval` (`open` default); env `AUTH_SERVICE_URL` + breaker tunables. The authzeval adapter is wired with a `policyResolver` over the configured MetadataStore.
+- [X] **T006.4** [W2] `cmd/server` selects `authzeval` AuthZ (historical: then keyed off `AUTH_MODE`; now `AUTHZ_MODE`, derived from `AUTH_MODE=header|oidc`); env `AUTH_SERVICE_URL` + breaker tunables. The authzeval adapter is wired with a `policyResolver` over the configured MetadataStore.
 
 ---
 
@@ -175,7 +175,7 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   split `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) from a new `AUTHZ_MODE`
   (`authzeval`|`open`); derive `AUTHZ_MODE` from `AUTH_MODE` when unset
   (`open`→`open`; `header`/`oidc`→`authzeval`); accept the retired
-  `AUTH_MODE=authzeval` as an alias (`header` AuthN + `authzeval` AuthZ); fail-fast
+  the transitional `AUTH_MODE=authzeval` bundle was later REMOVED; fail-fast
   validate each enum and the `oidc`/`authzeval` required settings (OPEN-5). Tests:
   `config_test.go` cases for the new enums, the alias, the derivation, and
   fail-fast on bad/missing required config. **Tests first.**

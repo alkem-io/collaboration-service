@@ -122,7 +122,7 @@ backend is a new adapter package + one switch arm — no domain change.
 > selects the **per-doc-AuthZ** adapter (`authzeval`|`open`), independently. When
 > `AUTHZ_MODE` is unset it is **derived** from `AUTH_MODE` for backward-compat
 > (`open`→`open`; `header`/`oidc`→`authzeval`), and the retired
-> `AUTH_MODE=authzeval` value is accepted as an **alias** for `header` AuthN +
+> `AUTH_MODE=authzeval` value was REMOVED, superseded by `header` AuthN +
 > `authzeval` AuthZ (OPEN-5). Validation stays fail-fast: `oidc` requires its
 > session-store/JWKS config (whichever paths are enabled); `authzeval` AuthZ
 > requires `AUTH_SERVICE_URL`.
