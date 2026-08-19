@@ -91,8 +91,7 @@ func TestRoomDoesNotClobberAPointerTheStoreJustRecorded(t *testing.T) {
 	room := newBareRoom(t)
 	room.deps = deps.Deps
 	room.id = "pointer-race"
-	room.blobKind = model.CheckpointStoreFileService // pointer-addressed
-	room.pointer = "file-OLD"                        // what the room cached earlier
+	room.pointer = "file-OLD" // what the room cached earlier
 
 	// The row as the STORE left it after recreating the file.
 	if err := deps.meta.Save(context.Background(), model.Metadata{

@@ -376,22 +376,10 @@ func (p policyResolver) PolicyID(ctx context.Context, id model.DocumentID) (stri
 	return m.AuthorizationPolicyID, nil
 }
 
-// blobKindFor maps the configured blob store to the kind persisted in each saved
-// metadata row, so a document rehydrates from the right backend (T005.6).
-func blobKindFor(mode config.CheckpointStoreMode) model.CheckpointStoreKind {
-	switch mode {
-	case config.CheckpointStoreFileService:
-		return model.CheckpointStoreFileService
-	default:
-		return model.CheckpointStoreInline
-	}
-}
-
 func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (http.Handler, *service.Manager) {
 	httpAdapter.InitMetrics()
 
 	roomCfg := service.DefaultRoomConfig()
-	roomCfg.BlobKind = blobKindFor(cfg.CheckpointStore)
 	roomCfg.Limits = service.Limits{
 		MaxDocBytes:      cfg.Limits.MaxDocBytes,
 		MaxConnsPerRoom:  cfg.Limits.MaxConnsPerRoom,

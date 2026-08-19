@@ -170,10 +170,6 @@ type Room struct {
 	undurableSince time.Time
 	version        int
 	pointer        string
-	// blobKind is the configured blob backend persisted in the metadata row so a
-	// document rehydrates from the right backend regardless of running config
-	// (data-model.md checkpoint store; T005.6).
-	blobKind model.CheckpointStoreKind
 	// policyID is the document's Alkemio authorization policy id (OPEN-1),
 	// loaded from metadata and re-persisted on save so the authzeval adapter can
 	// evaluate against it (T006).
@@ -360,10 +356,6 @@ type RoomConfig struct {
 	IdleTimeout time.Duration
 	// SendBuffer is the per-connection outbound queue depth the adapter uses.
 	SendBuffer int
-	// BlobKind is the configured blob backend, persisted in each saved metadata
-	// row so a document rehydrates from the right backend (T005.6). Empty
-	// defaults to inline.
-	BlobKind model.CheckpointStoreKind
 
 	// Limits carries the configurable enforcement bounds (FR-024, epic R9).
 	Limits Limits
@@ -466,7 +458,6 @@ func DefaultRoomConfig() RoomConfig {
 		SaveDebounce:           500 * time.Millisecond,
 		IdleTimeout:            30 * time.Second,
 		SendBuffer:             64,
-		BlobKind:               model.CheckpointStoreInline,
 		Limits:                 DefaultLimits(),
 		CollaboratorInactivity: defaultCollaboratorInactivity,
 		ContributionWindow:     defaultContributionWindowEvery,
@@ -508,10 +499,6 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	if metrics == nil {
 		metrics = NopMetrics{}
 	}
-	blobKind := cfg.BlobKind
-	if blobKind == "" {
-		blobKind = model.CheckpointStoreInline
-	}
 	if cfg.BackendTimeout <= 0 {
 		cfg.BackendTimeout = defaultBackendTimeout
 	}
@@ -533,7 +520,6 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		peerUpdates:  make(chan peerUpdate, 256),
 		done:         make(chan struct{}),
 		members:      make(map[connID]roomMember),
-		blobKind:     blobKind,
 		maxConns:     cfg.Limits.MaxConnsPerRoom,
 		contributors: make(map[string]struct{}),
 		ctx:          roomCtx,
@@ -1646,12 +1632,11 @@ func (r *Room) persist(ctx context.Context) {
 	//
 	// An earlier version read the row only on the first save of a room's lifetime,
 	// which is exactly the window this misses: recreation happens on a later save.
-	// Gated on the store actually being pointer-addressed, so the in-process path
-	// — which never sets a pointer — pays nothing.
-	if r.blobKind == model.CheckpointStoreFileService {
-		if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
-			r.pointer = meta.ContentPointer
-		}
+	// Unconditional: a store that never sets a pointer simply reads back a blank
+	// one and this is a no-op, which is cheaper than keeping a second copy of
+	// "which store is configured" in the room to decide whether to look.
+	if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
+		r.pointer = meta.ContentPointer
 	}
 
 	newVersion := r.version + 1

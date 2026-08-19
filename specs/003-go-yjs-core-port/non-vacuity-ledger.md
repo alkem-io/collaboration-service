@@ -92,6 +92,23 @@ reason other than the one it claimed.
 
 ## Deleted rather than restructured (SC-005a)
 
+**`blobKind` / `model.CheckpointStoreKind`** — the room's copy of "which
+checkpoint store is configured". Traced producer → consumer under the standing
+review rule: the producer was `CHECKPOINT_STORE` via `blobKindFor`, and there was
+exactly ONE consumer — a gate deciding whether to re-read the metadata row before
+a save.
+
+Removing the gate changed no observable behaviour: the whole suite passed with the
+refresh made unconditional, because a store that never sets a pointer simply reads
+back a blank one and the refresh is a no-op. So the type existed to skip one
+in-memory map lookup on the test/standalone path, at the cost of a SECOND
+representation of a fact the configured store instance already embodies.
+
+The guarantee it appeared to guard is unaffected and still defended: removing the
+pointer refresh itself still fails
+`TestRoomDoesNotClobberAPointerTheStoreJustRecorded`.
+
+
 The **first-open seed** — `Metadata.SeedContent`, `FetchReply.Content`, `seedInto`,
 `seededPending` and its arm-the-debounce-at-start branch, the in-memory
 preservation, and the seed-only tests.

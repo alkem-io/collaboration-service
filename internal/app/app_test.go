@@ -121,26 +121,6 @@ func TestBuildCheckpointFallsBackToInProcess(t *testing.T) {
 	}
 }
 
-// TestBlobKindForMapsEverySelection asserts blobKindFor maps each configured blob
-// backend to the kind persisted in the metadata row — the value a document
-// rehydrates from regardless of the running config (T005.6). A wrong mapping would
-// rehydrate from the wrong backend, so this is a real persistence invariant.
-func TestBlobKindForMapsEverySelection(t *testing.T) {
-	cases := []struct {
-		mode config.CheckpointStoreMode
-		want model.CheckpointStoreKind
-	}{
-		{config.CheckpointStoreFileService, model.CheckpointStoreFileService},
-		{config.CheckpointStoreInline, model.CheckpointStoreInline},
-		{config.CheckpointStoreMode("unknown"), model.CheckpointStoreInline}, // default → inline
-	}
-	for _, c := range cases {
-		if got := blobKindFor(c.mode); got != c.want {
-			t.Errorf("blobKindFor(%q) = %q, want %q", c.mode, got, c.want)
-		}
-	}
-}
-
 // erroringMeta is a MetadataStore whose Load errors, to drive policyResolver's
 // load-error branch.
 type erroringMeta struct{ port.MetadataStore }
