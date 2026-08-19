@@ -5,7 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -51,19 +52,18 @@ func (f *fakeRPC) Emit(_ context.Context, pattern string, data any) error {
 	return f.emitErr
 }
 
-// TestSaveOmitsAnyStoreSelectorFromTheWire pins a DELETION, which is the kind of
-// property that silently regresses.
+// TestSavePayloadHasExactlyTheContractKeys pins the save payload's SHAPE.
 //
-// `inline` is this service's INTERNAL non-durable mode for tests and standalone
-// runs. file-service is the storage abstraction for the whole Alkemio stack, so a
-// contentPointer is always a file-service id and there is no "which store"
-// question at the Alkemio boundary. A store selector on this contract would be a
-// test-only concept leaking into server entities, columns, and wire payloads —
-// and nothing on either side ever branched on it.
+// An exact-shape assertion rather than a list of forbidden names: naming the
+// fields we do not want would keep abandoned vocabulary alive in this file and
+// would only catch the specific names someone thought to forbid. Comparing the
+// whole key set catches ANY field that appears — a re-added store selector, a
+// debug field, an embedded struct that starts marshalling — which is the class of
+// regression that otherwise ships silently, because adding a tagged field to a
+// DTO breaks no existing assertion.
 //
-// Asserting its absence rather than trusting the struct: a field re-added to
-// SaveData with a json tag would serialize again with nothing else complaining.
-func TestSaveOmitsAnyStoreSelectorFromTheWire(t *testing.T) {
+// The Alkemio contract is index-only: a locator, never the bytes.
+func TestSavePayloadHasExactlyTheContractKeys(t *testing.T) {
 	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
 	store := newWithRPC(f)
 	if err := store.Save(context.Background(), model.Metadata{
@@ -76,10 +76,18 @@ func TestSaveOmitsAnyStoreSelectorFromTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, forbidden := range []string{"checkpointStore", "blobStore", "inline"} {
-		if strings.Contains(string(raw), forbidden) {
-			t.Errorf("the save payload carries %q; the Alkemio contract has no store selector: %s", forbidden, raw)
-		}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	keys := make([]string, 0, len(got))
+	for k := range got {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	want := []string{"authorizationPolicyId", "contentPointer", "contentType", "id", "ownerRef", "version"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("save payload keys = %v, want exactly %v\npayload: %s", keys, want, raw)
 	}
 }
 

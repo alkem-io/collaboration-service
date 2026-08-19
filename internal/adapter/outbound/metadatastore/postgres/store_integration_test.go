@@ -57,7 +57,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 		t.Fatalf("Load v1: %v", err)
 	}
 	if got.Version != 1 || got.ContentPointer != "ptr-1" ||
-		got.CheckpointStore != model.CheckpointStoreFileService || got.AuthorizationPolicyID != "pol-1" {
+		got.AuthorizationPolicyID != "pol-1" {
 		t.Fatalf("v1 row = %+v", got)
 	}
 
@@ -105,7 +105,7 @@ func TestPostgresRoundTrip(t *testing.T) {
 		ID:          id,
 		ContentType: model.ContentTypeWhiteboard,
 		OwnerRef:    "owner-1",
-		// ContentPointer + CheckpointStore intentionally blank (pre-register path).
+		// ContentPointer intentionally blank (pre-register path).
 	}
 	if err := store.Save(ctx, preRegisterRedelivery); err != nil {
 		t.Fatalf("Save pre-register redelivery: %v", err)
@@ -113,9 +113,6 @@ func TestPostgresRoundTrip(t *testing.T) {
 	got, _ = store.Load(ctx, id)
 	if got.ContentPointer != "ptr-3" {
 		t.Fatalf("redelivered pre-register orphaned the blob: content_pointer = %q, want preserved %q", got.ContentPointer, "ptr-3")
-	}
-	if got.CheckpointStore != model.CheckpointStoreFileService {
-		t.Fatalf("redelivered pre-register flipped checkpoint_store: got %q, want preserved %q", got.CheckpointStore, model.CheckpointStoreFileService)
 	}
 	if got.Version != 4 {
 		t.Fatalf("redelivered pre-register version = %d, want 4 (upsert still bumps)", got.Version)
