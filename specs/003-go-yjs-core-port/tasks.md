@@ -198,7 +198,7 @@ delivery.
 - [ ] T065 [P] Verify unit coverage ≥95% across `internal/...`, with no coverage-padding tests (SC-011, §XII)
 - [ ] T066 Run the full gate set — `go build`, `go vet`, `go vet -tags integration`, `golangci-lint run` at zero, `go test -race ./...` (§IX)
 - [ ] T067 Run a full adversarial review of the rebuilt service (`internal/...`, `cmd/...`) and drive it to zero findings (SC-010)
-- [ ] T068 Update `specs/001-collaboration-server/quickstart.md`, which is stale on the metadata-store default and predates the standalone withdrawal
+- [X] T068 Update `specs/001-collaboration-server/quickstart.md`, which is stale on the metadata-store default and predates the standalone withdrawal
 
 ---
 

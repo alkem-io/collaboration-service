@@ -1,7 +1,16 @@
 # Quickstart — collaboration-server
 
-Run and test the unified collaboration server in both modes: **standalone**
-(single binary, zero external dependencies) and **Alkemio** (durable adapters).
+> **Superseded in two places by `003-go-yjs-core-port`.** Constitution v3.0.0
+> withdrew the standalone *product* promise: the in-process path is retained for
+> the test suite, local development with real editors, and a zero-dependency
+> smoke test, and is **never a deployment option** (see
+> `specs/003-go-yjs-core-port/in-process-roles.md`). And `METADATA_STORE` now
+> defaults to `inmemory`, not `rabbitmq`. The sections below are corrected; the
+> rest of this document remains the `001` record.
+
+Run and test the unified collaboration server in two configurations: the
+**in-process** path (single binary, zero external dependencies — tests, local
+development, smoke test) and **Alkemio** (durable adapters, the deployed one).
 Module: `github.com/alkem-io/collaboration-service`. Default port: **4006**.
 
 ## Build / lint / test
@@ -19,10 +28,15 @@ Wave-1 gates (all green on `57b79db`): `go build`/`vet`/`gofmt`/`goimports`,
 `golangci-lint` (0 issues), `go test -race ./...` (31 tests). New-code coverage:
 service 91.3%, ws 85.5%, http 97.4% (the ≥95% gate is Wave 4, T017).
 
-## Standalone mode (zero external dependencies) — Wave 1 ✅
+## In-process path (zero external dependencies)
 
-The defaults are standalone-friendly: `open` auth, `inmemory` fan-out, `inline`
-blob. No database, bus, Redis, or auth service required.
+The defaults select it: `open` auth, `inmemory` fan-out, `inmemory` metadata,
+`inline` (in-process) content store. No database, bus, Redis, or auth service
+required.
+
+**Not a deployment option.** The in-process content store carries no durability
+guarantee across a restart. This path exists for tests, local development against
+real editors, and the smoke test below.
 
 ```bash
 # Defaults already select the zero-dep adapters; explicit for clarity:
@@ -30,8 +44,7 @@ export PORT=4006
 export FANOUT_MODE=inmemory
 export BLOB_STORE=inline
 export AUTH_MODE=open
-# METADATA_STORE defaults to rabbitmq; for a pure-standalone run use the
-# in-process metastore via the standalone build path (postgres lands T005).
+export METADATA_STORE=inmemory        # this is also the default
 
 make run
 ```
