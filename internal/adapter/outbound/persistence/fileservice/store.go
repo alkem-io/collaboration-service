@@ -333,12 +333,27 @@ func readErrBody(r io.Reader) string {
 // has nothing from any client" — a confident wrong answer, which is worse than a
 // decode error because nothing downstream can detect it.
 //
-// V2 first because that is what this service writes (Room.persist encodes
-// V2). The V1 fallback exists for updates this service did not write — the
-// migration path, and the conformance suite, whose fixtures are V1-encoded. An
-// empty result from one decoder is treated as "wrong codec" rather than as an
-// empty document: a genuinely empty document yields an empty vector from BOTH,
-// so the fallback returns the same answer and the ambiguity is harmless.
+// V2 first because that is what this service writes (Room.persist encodes V2).
+// The V1 fallback exists for updates this service did not write — the migration
+// path, and the conformance suite, whose fixtures are V1-encoded.
+//
+// "Empty means wrong codec" is safe because of a measured asymmetry in the core,
+// verified here in both directions at several document sizes:
+//
+//	              V1 bytes    V2 bytes
+//	V1 decoder    correct     00
+//	V2 decoder    00          correct
+//
+// The wrong decoder ALWAYS returns the empty vector — never an error, and never
+// a plausible-but-wrong non-empty value. So a non-empty result can only come
+// from the right decoder, and empty from both means the document is genuinely
+// empty, where either answer is identical anyway.
+//
+// Note what this does NOT give us: with nothing declaring the encoding, empty is
+// indistinguishable from wrong for a single decode. There is no reference to
+// check against, which is why guessing was unfixable rather than merely
+// unreliable — and why the declared encoding replaces this rather than
+// refining it.
 //
 // TEMPORARY. The go-yjs owners are making the encoding explicit in the
 // persistence contract rather than inferred, and extending the conformance suite
