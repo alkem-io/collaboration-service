@@ -124,6 +124,24 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	if req.Fence != 0 {
 		return 0, persistence.ErrUnexpectedFence
 	}
+	// V2 ONLY, and rejected loudly rather than decoded anyway.
+	//
+	// The stored blob is a BARE Yjs update — no envelope — because other systems
+	// read and write these files directly. That is the whole point of the medium,
+	// and it leaves nowhere to record which codec produced the bytes. A store that
+	// cannot record the codec must support exactly one, or it is guessing on every
+	// read; the contract sanctions that and requires the other codec be refused.
+	//
+	// V2 is the one, because it is what this service writes (EncodeStateAsUpdateV2)
+	// and what every blob in existence contains.
+	switch req.Encoding {
+	case persistence.EncodingV2:
+	case persistence.EncodingUnspecified:
+		return 0, persistence.ErrEncodingRequired
+	default:
+		return 0, fmt.Errorf("%w: this store records no codec alongside the blob and so accepts V2 only, got %d",
+			persistence.ErrUnsupportedEncoding, req.Encoding)
+	}
 	if limit := s.cfg.MaxUploadSize; limit > 0 && int64(len(req.Update)) > limit {
 		return 0, fmt.Errorf("snapshot %d bytes exceeds the configured limit %d", len(req.Update), limit)
 	}
@@ -180,7 +198,9 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 	if err != nil {
 		return persistence.Checkpoint{}, err
 	}
-	vector, err := deriveStateVector(blob)
+	// One decoder, no sniffing: SaveCheckpoint accepts V2 only, so every blob this
+	// store can have written is V2 and the codec is known rather than guessed.
+	vector, err := crdt.EncodeStateVectorFromUpdateV2(blob)
 	if err != nil {
 		// Stored bytes that will not parse cannot form the state a successful
 		// load promises.
@@ -188,6 +208,7 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 	}
 	return persistence.Checkpoint{
 		Revision:    s.revisions.current(),
+		Encoding:    persistence.EncodingV2,
 		Update:      blob,
 		StateVector: vector,
 	}, nil
@@ -319,62 +340,6 @@ func readErrBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, 2<<10))
 	return strings.TrimSpace(string(b))
 }
-
-// deriveStateVector extracts the state vector from a stored update.
-//
-// This store CANNOT keep the vector the writer computed: its blob is a bare Yjs
-// update by cross-repo contract — `server` writes the same shape on create and in
-// the T009 migration — so there is nowhere to put a second value without
-// changing a format two other repos read.
-//
-// Deriving means choosing a decoder, and the update carries no V1/V2
-// discriminator. Choosing wrong does not fail: EncodeStateVectorFromUpdate on V2
-// bytes returns err == nil and an EMPTY vector, which reads as "this document
-// has nothing from any client" — a confident wrong answer, which is worse than a
-// decode error because nothing downstream can detect it.
-//
-// V2 first because that is what this service writes (Room.persist encodes V2).
-// The V1 fallback exists for updates this service did not write — the migration
-// path, and the conformance suite, whose fixtures are V1-encoded.
-//
-// "Empty means wrong codec" is safe because of a measured asymmetry in the core,
-// verified here in both directions at several document sizes:
-//
-//	              V1 bytes    V2 bytes
-//	V1 decoder    correct     00
-//	V2 decoder    00          correct
-//
-// The wrong decoder ALWAYS returns the empty vector — never an error, and never
-// a plausible-but-wrong non-empty value. So a non-empty result can only come
-// from the right decoder, and empty from both means the document is genuinely
-// empty, where either answer is identical anyway.
-//
-// Note what this does NOT give us: with nothing declaring the encoding, empty is
-// indistinguishable from wrong for a single decode. There is no reference to
-// check against, which is why guessing was unfixable rather than merely
-// unreliable — and why the declared encoding replaces this rather than
-// refining it.
-//
-// TEMPORARY. The go-yjs owners are making the encoding explicit in the
-// persistence contract rather than inferred, and extending the conformance suite
-// to cover both codecs so a store handling only one cannot pass. When that
-// lands, this sniffing is deleted in favour of the declared encoding.
-func deriveStateVector(update []byte) ([]byte, error) {
-	if v2, err := crdt.EncodeStateVectorFromUpdateV2(update); err == nil && !isEmptyStateVector(v2) {
-		return v2, nil
-	}
-	v1, err := crdt.EncodeStateVectorFromUpdate(update)
-	if err == nil && !isEmptyStateVector(v1) {
-		return v1, nil
-	}
-	// Neither decoder found any client state. Re-run the V2 decoder so a genuinely
-	// unparseable update surfaces its error rather than an empty vector.
-	return crdt.EncodeStateVectorFromUpdateV2(update)
-}
-
-// isEmptyStateVector reports the encoding of "no client state": a single
-// zero-valued length prefix.
-func isEmptyStateVector(v []byte) bool { return len(v) <= 1 }
 
 var _ persistence.DeletingCheckpointStore = (*Store)(nil)
 

@@ -1678,7 +1678,13 @@ func (r *Room) persist(ctx context.Context) {
 	// and silently. EncodeStateAsUpdateV2 over the live doc gives that property by
 	// construction — never narrow it to a delta here.
 	if _, err := r.deps.Checkpoint.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID:  backend.DocumentID(r.id),
+		DocumentID: backend.DocumentID(r.id),
+		// Declared, never inferred. The snapshot above is EncodeStateAsUpdateV2 and
+		// the vector is EncodeStateVectorFromUpdateV2, so this is a statement of
+		// fact about the bytes rather than a preference. It matters because the
+		// wrong decoder does not fail: it returns an empty state vector with a nil
+		// error, which reads as "this document has nothing from any client".
+		Encoding:    persistence.EncodingV2,
 		Update:      snapshot,
 		StateVector: vector,
 	}); err != nil {

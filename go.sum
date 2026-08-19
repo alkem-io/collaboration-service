@@ -6,6 +6,8 @@ github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e
 github.com/alicebob/miniredis/v2 v2.38.0/go.mod h1:TcL7YfarKPGDAthEtl5NBeHZfeUQj6OXMm/+iu5cLMM=
 github.com/antst/go-yjs v0.0.3 h1:OHM4m7U5cqyl8kkCMcFi/N90Y+I9PCUYK6DkaTzBz/k=
 github.com/antst/go-yjs v0.0.3/go.mod h1:U3lPrx8tm3WztmIb3j4RT6gkUR2o7QS0fGbEbLCG1/0=
+github.com/antst/go-yjs v0.0.5 h1:MOkH62raN8+4GJ4UYoN+Ujlga9hxVP2fhPC+1FzIch0=
+github.com/antst/go-yjs v0.0.5/go.mod h1:U3lPrx8tm3WztmIb3j4RT6gkUR2o7QS0fGbEbLCG1/0=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=

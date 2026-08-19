@@ -255,7 +255,7 @@ func (d testDeps) storedState(ctx context.Context, id string) ([]byte, error) {
 // to exist without driving a room.
 func (d testDeps) putState(ctx context.Context, id string, update []byte) error {
 	_, err := d.store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: backend.DocumentID(id), Update: update, StateVector: []byte("derived-on-read"),
+		DocumentID: backend.DocumentID(id), Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"),
 	})
 	return err
 }

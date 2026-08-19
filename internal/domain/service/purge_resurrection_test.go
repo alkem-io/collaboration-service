@@ -101,7 +101,7 @@ func TestJoinRacingTheCascadeCannotResurrectDurableContent(t *testing.T) {
 		t.Fatalf("encode seed state: %v", err)
 	}
 	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID:  backend.DocumentID(doc),
+		DocumentID: backend.DocumentID(doc), Encoding: persistence.EncodingV2,
 		Update:      update,
 		StateVector: []byte("derived-on-read"),
 	}); err != nil {

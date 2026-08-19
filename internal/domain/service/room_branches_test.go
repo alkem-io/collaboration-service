@@ -170,7 +170,7 @@ func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
 
 	// Seed a durable document with stored state, but never materialize a room.
 	if _, err := blob.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "orphan", Update: []byte("snapshot"), StateVector: []byte("sv"),
+		DocumentID: "orphan", Encoding: persistence.EncodingV2, Update: []byte("snapshot"), StateVector: []byte("sv"),
 	}); err != nil {
 		t.Fatalf("seed stored state: %v", err)
 	}

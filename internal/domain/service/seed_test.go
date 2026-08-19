@@ -190,7 +190,7 @@ func TestRoomDoesNotSeedWhenLiveSnapshotExists(t *testing.T) {
 		t.Fatalf("encode live snapshot: %v", err)
 	}
 	if _, err := blob.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: backend.DocumentID(docID), Update: liveSnap, StateVector: []byte("sv"),
+		DocumentID: backend.DocumentID(docID), Encoding: persistence.EncodingV2, Update: liveSnap, StateVector: []byte("sv"),
 	}); err != nil {
 		t.Fatalf("seed stored state: %v", err)
 	}

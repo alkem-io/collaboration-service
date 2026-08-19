@@ -218,7 +218,7 @@ func realUpdate(t *testing.T, text string) []byte {
 func save(t *testing.T, s *Store, id string, update []byte) persistence.Revision {
 	t.Helper()
 	rev, err := s.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: backend.DocumentID(id), Update: update, StateVector: []byte("sv"),
+		DocumentID: backend.DocumentID(id), Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("sv"),
 	})
 	if err != nil {
 		t.Fatalf("SaveCheckpoint(%s): %v", id, err)
@@ -266,7 +266,7 @@ func TestSaveSurfacesDedupConflict(t *testing.T) {
 	save(t, store, "doc-b", realUpdate(t, "distinct-content"))
 
 	_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc-b", Update: realUpdate(t, "shared-content"), StateVector: []byte("sv"),
+		DocumentID: "doc-b", Encoding: persistence.EncodingV2, Update: realUpdate(t, "shared-content"), StateVector: []byte("sv"),
 	})
 	if err == nil {
 		t.Fatal("a dedup conflict must surface, not be silently accepted")
@@ -301,7 +301,7 @@ func TestSaveDoesNotForkOnServerError(t *testing.T) {
 	}
 
 	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc-1", Update: []byte("x"), StateVector: []byte("sv"),
+		DocumentID: "doc-1", Encoding: persistence.EncodingV2, Update: []byte("x"), StateVector: []byte("sv"),
 	}); err == nil {
 		t.Fatal("a server error on rewrite must surface, not fall back to creating a second file")
 	}
@@ -354,7 +354,7 @@ func TestSaveFailsWhenThePointerCannotBeRecorded(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc-1", Update: []byte("x"), StateVector: []byte("sv"),
+		DocumentID: "doc-1", Encoding: persistence.EncodingV2, Update: []byte("x"), StateVector: []byte("sv"),
 	}); err == nil {
 		t.Fatal("a save whose pointer could not be recorded must fail: the bytes are durable but unreachable")
 	}
@@ -434,7 +434,7 @@ func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
 
 	update := realUpdate(t, "delete-me")
 	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"),
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"),
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestDeleteRejectsAFenceWithoutTouchingTheNetwork(t *testing.T) {
 
 	update := realUpdate(t, "fenced-delete")
 	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"),
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"),
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestUnexpectedStatusesAreSurfacedNotSwallowed(t *testing.T) {
 		}, map[backend.DocumentID]string{})
 
 		_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-			DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+			DocumentID: "doc", Encoding: persistence.EncodingV2, Update: realUpdate(t, "x"), StateVector: []byte("v"),
 		})
 		if err == nil {
 			t.Fatal("a 502 on create must surface; swallowing it means the save silently did not persist")
@@ -568,7 +568,7 @@ func TestCreateRejectsAResponseWithNoID(t *testing.T) {
 	}, map[backend.DocumentID]string{})
 
 	_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: realUpdate(t, "x"), StateVector: []byte("v"),
 	})
 	if err == nil {
 		t.Fatal("a create response with an empty id must fail; the bytes are stored but nothing could ever address them again")
@@ -583,7 +583,7 @@ func TestCreateRejectsAnUndecodableResponse(t *testing.T) {
 	}, map[backend.DocumentID]string{})
 
 	_, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: realUpdate(t, "x"), StateVector: []byte("v"),
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: realUpdate(t, "x"), StateVector: []byte("v"),
 	})
 	if err == nil {
 		t.Fatal("an undecodable create response must fail rather than yield a zero-value pointer")
@@ -607,7 +607,7 @@ func TestSaveRejectsAnOversizeSnapshotBeforeUploading(t *testing.T) {
 	}
 
 	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: realUpdate(t, "well over eight bytes"), StateVector: []byte("v"),
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: realUpdate(t, "well over eight bytes"), StateVector: []byte("v"),
 	}); err == nil {
 		t.Fatal("a snapshot over MaxUploadSize must be refused")
 	}
@@ -633,8 +633,8 @@ func TestSaveRejectsAnOversizeSnapshotBeforeUploading(t *testing.T) {
 // The assertion here is against the document's OWN state vector, so it cannot
 // pass by agreeing with whichever decoder the store happens to call.
 //
-// Non-vacuity: switch deriveStateVector back to the V1 decoder and this fails
-// with an empty vector.
+// Non-vacuity: switch the load path back to the V1 decoder and this fails with
+// an empty vector.
 func TestLoadReturnsAStateVectorThatDescribesTheDocument(t *testing.T) {
 	store, _ := newStoreForTest(t)
 	ctx := context.Background()
@@ -649,7 +649,7 @@ func TestLoadReturnsAStateVectorThatDescribesTheDocument(t *testing.T) {
 	truth := crdt.EncodeStateVector(doc)
 
 	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: truth,
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: truth,
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -658,7 +658,8 @@ func TestLoadReturnsAStateVectorThatDescribesTheDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if isEmptyStateVector(cp.StateVector) {
+	// len <= 1 is the encoding of "no client state" — a single zero length prefix.
+	if len(cp.StateVector) <= 1 {
 		t.Fatalf("LoadCheckpoint returned an EMPTY state vector (%v) for a document with content; a caller diffing against it would conclude the server holds nothing and resend everything", cp.StateVector)
 	}
 	if !bytes.Equal(cp.StateVector, truth) {
@@ -666,30 +667,38 @@ func TestLoadReturnsAStateVectorThatDescribesTheDocument(t *testing.T) {
 	}
 }
 
-// TestLoadStillDescribesAV1EncodedUpdate covers the other codec, which reaches
-// this store from the migration path and from the conformance fixtures.
-func TestLoadStillDescribesAV1EncodedUpdate(t *testing.T) {
+// TestSaveRefusesAV1UpdateRatherThanStoringIt pins the single-codec decision.
+//
+// The blob is a BARE Yjs update — no envelope, because other systems read these
+// files directly — so there is nowhere to record which codec produced it. A store
+// that cannot record the codec must accept exactly one and refuse the other
+// LOUDLY; decoding whatever arrives is the defect the declared encoding exists to
+// remove.
+//
+// V2 is that one codec, and this is not a new restriction: Room.persist writes
+// EncodeStateAsUpdateV2 and restoreInto reads with ApplyUpdateV2, so the durable
+// path has always been V2 end to end. A V1 blob could never have been restored.
+// The refusal makes that explicit at the boundary instead of leaving it to fail
+// later as corruption.
+func TestSaveRefusesAV1UpdateRatherThanStoringIt(t *testing.T) {
 	store, _ := newStoreForTest(t)
-	ctx := context.Background()
 
 	doc := crdt.NewDoc("v1-fixture")
-	doc.GetText("content").Insert(0, "written by an older writer", crdt.Object{})
+	doc.GetText("content").Insert(0, "written by a V1 writer", crdt.Object{})
 	update, err := crdt.EncodeStateAsUpdate(doc, nil)
 	if err != nil {
 		t.Fatalf("encode V1 update: %v", err)
 	}
-	truth := crdt.EncodeStateVector(doc)
 
-	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: truth,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
+	_, err = store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Encoding: persistence.EncodingV1,
+		Update: update, StateVector: crdt.EncodeStateVector(doc),
+	})
+	if !errors.Is(err, persistence.ErrUnsupportedEncoding) {
+		t.Fatalf("saving a V1 update = %v, want ErrUnsupportedEncoding; storing it would leave a blob this store can only read as V2, and reading V1 bytes with the V2 decoder returns an EMPTY vector with no error", err)
 	}
-	cp, err := store.LoadCheckpoint(ctx, "doc")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if !bytes.Equal(cp.StateVector, truth) {
-		t.Fatalf("state vector for a V1 update = %v, want %v", cp.StateVector, truth)
+	// Refused before the network, so nothing was written.
+	if _, err := store.LoadCheckpoint(context.Background(), "doc"); !errors.Is(err, persistence.ErrNotFound) {
+		t.Fatalf("a refused save left state behind: load = %v, want ErrNotFound", err)
 	}
 }

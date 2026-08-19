@@ -7,14 +7,19 @@
 // restart and must never be presented as a deployment option.
 //
 // It deliberately mirrors the SHAPE of the file-service store rather than being
-// a convenient in-memory log: one blob per document, no envelope, no stored
-// state vector, derived on read. If the fixture had a different shape from
-// production, every test would be exercising a persistence model the deployed
-// service does not use.
+// a convenient in-memory log: one blob per document, no envelope, replaced on
+// every save. If the fixture had a different shape from production, every test
+// would be exercising a persistence model the deployed service does not use.
+//
+// It does differ from the file-service store in one respect, deliberately: this
+// medium can record the state vector and the codec alongside the bytes, so it
+// accepts either V1 or V2. The file-service blob is a bare Yjs update that other
+// systems read, with nowhere to put that metadata, so it supports V2 only.
 package inprocess
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/antst/go-yjs/backend"
@@ -26,6 +31,7 @@ type Store struct {
 	mu        sync.Mutex
 	blobs     map[backend.DocumentID][]byte
 	vectors   map[backend.DocumentID][]byte
+	encodings map[backend.DocumentID]persistence.CheckpointEncoding
 	revisions map[backend.DocumentID]persistence.Revision
 	revision  persistence.Revision
 	mode      persistence.FenceMode
@@ -48,6 +54,7 @@ func newStore(mode persistence.FenceMode) *Store {
 	return &Store{
 		blobs:     map[backend.DocumentID][]byte{},
 		vectors:   map[backend.DocumentID][]byte{},
+		encodings: map[backend.DocumentID]persistence.CheckpointEncoding{},
 		revisions: map[backend.DocumentID]persistence.Revision{},
 		fences:    map[backend.DocumentID]backend.Fence{},
 		mode:      mode,
@@ -88,6 +95,19 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	// Checked BEFORE the lock and before any mutation: a rejected save must leave
+	// the store untouched. This medium records the codec alongside the bytes, so
+	// it accepts either — but never an unstated one, because the zero value would
+	// otherwise silently become whichever codec this store happens to prefer.
+	// That is the confident-wrong-answer the field exists to remove.
+	switch req.Encoding {
+	case persistence.EncodingV1, persistence.EncodingV2:
+	case persistence.EncodingUnspecified:
+		return 0, persistence.ErrEncodingRequired
+	default:
+		return 0, fmt.Errorf("%w: %d", persistence.ErrUnsupportedEncoding, req.Encoding)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -100,6 +120,7 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	s.revision++
 	s.blobs[req.DocumentID] = append([]byte(nil), req.Update...)
 	s.vectors[req.DocumentID] = append([]byte(nil), req.StateVector...)
+	s.encodings[req.DocumentID] = req.Encoding
 	s.revisions[req.DocumentID] = s.revision
 	return s.revision, nil
 }
@@ -117,20 +138,19 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 	if !ok {
 		return persistence.Checkpoint{}, persistence.ErrNotFound
 	}
-	// The vector is RETURNED AS STORED, never re-derived.
-	//
-	// Deriving it means choosing a decoder, and SaveCheckpointRequest.Update
-	// carries no V1/V2 discriminator — so the store must guess which codec its
-	// caller used. Guessing wrong is not an error: EncodeStateVectorFromUpdate on
-	// V2 bytes returns a confident, EMPTY vector with err == nil, which reads as
-	// "this document has nothing from any client". This store keeps what the
-	// writer computed instead, so the codec question never arises here.
+	// The vector is RETURNED AS STORED, never re-derived. Deriving it means
+	// choosing a decoder, and picking the wrong one is not an error:
+	// EncodeStateVectorFromUpdate on V2 bytes returns a confident, EMPTY vector
+	// with err == nil, which reads as "this document has nothing from any client".
+	// This store keeps what the writer computed, alongside the codec the writer
+	// declared, so the question never arises here.
 	// Copied on the way OUT as well as in: the contract says both returned slices
 	// are caller-owned, so handing back the stored backing array would let a
 	// caller's mutation reach into this store's state.
 	vector := append([]byte(nil), s.vectors[id]...)
 	return persistence.Checkpoint{
 		Revision:    s.revisions[id],
+		Encoding:    s.encodings[id],
 		Update:      append([]byte(nil), blob...),
 		StateVector: vector,
 	}, nil

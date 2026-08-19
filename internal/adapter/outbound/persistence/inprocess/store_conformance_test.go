@@ -81,7 +81,7 @@ func TestFencedDeleteRejectsAStaleOwnerAndLeavesStateIntact(t *testing.T) {
 
 	update := realUpdate(t, "fenced-delete")
 	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"), Fence: 7,
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"), Fence: 7,
 	}); err != nil {
 		t.Fatalf("save under the current fence: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFencedDeleteRejectsAStaleOwnerAndLeavesStateIntact(t *testing.T) {
 	// a stale node is most likely to still be trying. The document would come back
 	// under an epoch that was already retired.
 	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Update: update, StateVector: []byte("derived-on-read"), Fence: 3,
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"), Fence: 3,
 	}); !errors.Is(err, persistence.ErrStaleFence) {
 		t.Fatalf("save from a stale owner AFTER a delete = %v, want ErrStaleFence; deleting the state must not reset the fence high-water mark", err)
 	}

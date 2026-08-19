@@ -48,6 +48,8 @@ stronger property, never weakened.
 | Removed `BLOB_STORE` values fail startup | widen `parseBlobStore`'s accepted set | the startup error disappears |
 | The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
 | Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
+| The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
+| The file-service store refuses a codec it cannot record | accept `EncodingV1` alongside V2 | "saving a V1 update = <nil>, want ErrUnsupportedEncoding" |
 
 ### Why the room bounds its own restore
 
