@@ -50,6 +50,7 @@ stronger property, never weakened.
 | Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
 | The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
 | The file-service store refuses a codec it cannot record | accept `EncodingV1` alongside V2 | "saving a V1 update = <nil>, want ErrUnsupportedEncoding" |
+| A deleted blob whose index row survives loads as CORRUPT, not missing | clear the pointer in `Delete` (what the upstream suite would require) | load reports `ErrNotFound`, `restoreInto` seeds the row's create-time content, and the deleted document returns |
 
 ### Why the room bounds its own restore
 

@@ -456,6 +456,83 @@ func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
 	}
 }
 
+// TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives pins a DELIBERATE
+// divergence from the core's CheckpointPersistenceDeletion suite, which requires
+// load-after-delete to report ErrNotFound.
+//
+// This store cannot satisfy that without creating a resurrection path, because it
+// does not own everything that makes a document findable. The blob is its own; the
+// POINTER lives in the metadata row, which belongs to `server`. Delete erases the
+// blob and leaves the row alone.
+//
+// Follow the two options through the cascade. purgeDurable deletes the content
+// FIRST and the index row second, so there is a window — a broker failure between
+// the two steps — where the row outlives the blob:
+//
+//   - Pointer left in place (what this store does): the next load sees a pointer
+//     resolving to a missing file and reports ErrCorrupt. Materialization fails
+//     and the join is refused. Unfriendly, but nothing is invented, and the state
+//     self-heals when the cascade is retried.
+//
+//   - Pointer cleared (what the upstream suite would require): the next load sees
+//     no pointer, reports ErrNotFound, and restoreInto treats that as "never
+//     saved" — seeding meta.SeedContent, the row's create-time bootstrap. The
+//     deleted document comes back as its original content, and the next save makes
+//     that durable. A deleted whiteboard reappearing with its starting content is
+//     worse than a load error by every measure.
+//
+// So ErrCorrupt here is the safe answer for this medium, and ErrNotFound stays
+// reserved for a document with no row at all — which is what the completed cascade
+// produces, and where the suite's property does hold end to end.
+//
+// Reported upstream rather than worked around: the deletion contract assumes the
+// store owns every artefact that makes a document disappear, which is not true of
+// a store whose pointer lives in another system's row.
+func TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives(t *testing.T) {
+	store, _ := newStoreForTest(t)
+	ctx := context.Background()
+
+	update := realUpdate(t, "delete-then-load")
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, err := store.LoadCheckpoint(ctx, "doc")
+	if errors.Is(err, persistence.ErrNotFound) {
+		t.Fatal("load reported ErrNotFound while the index row still carries a pointer; restoreInto treats that as 'never saved' and seeds the row's create-time content, resurrecting a document whose blob was just erased")
+	}
+	if !errors.Is(err, persistence.ErrCorrupt) {
+		t.Fatalf("load after Delete with the row still present = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestDeleteHonoursACancelledContext pins the last deletion property: a cancelled
+// caller must not have its erasure carried out anyway.
+func TestDeleteHonoursACancelledContext(t *testing.T) {
+	store, stub := newStoreForTest(t)
+
+	update := realUpdate(t, "keep-me")
+	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete with a cancelled context = %v, want context.Canceled", err)
+	}
+	if stub.count() != 1 {
+		t.Fatalf("a cancelled Delete erased the file anyway: %d stored", stub.count())
+	}
+}
+
 // TestDeleteSucceedsForADocumentThatNeverHadAFile is the other idempotence case:
 // the document has no pointer at all, so there is nothing to erase. A cascade
 // over a document that was created and deleted without ever being saved must not
