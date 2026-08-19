@@ -903,3 +903,81 @@ func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
 		})
 	}
 }
+
+// TestSelectedBackendsRequireTheirSettings asserts the fail-fast rule for every
+// backend that needs configuration beyond its selector.
+//
+// This is the same invariant the mandatory selectors enforce, one level down:
+// choosing a backend without the settings it needs must fail at STARTUP, naming
+// what is missing — not at the first save, where the failure surfaces as a
+// document that will not persist while the pod reports healthy. Each case here
+// is a distinct required setting, and the assertion is on the error naming it so
+// the operator's fix travels with the message.
+func TestSelectedBackendsRequireTheirSettings(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "redis hub without a URL",
+			env:     map[string]string{"HUB_MODE": "redis", "REDIS_URL": ""},
+			wantErr: "REDIS_URL",
+		},
+		{
+			name:    "rabbitmq metadata store without a queue",
+			env:     map[string]string{"METADATA_STORE": "rabbitmq", "RABBITMQ_QUEUE": "", "RABBITMQ_HOST": "mq"},
+			wantErr: "RABBITMQ_QUEUE",
+		},
+		{
+			// A shared queue round-robin-steals metadata RPCs between the two
+			// consumers, so one of them silently loses half its replies.
+			name: "lifecycle queue equal to the metadata queue",
+			env: map[string]string{
+				"METADATA_STORE": "rabbitmq", "RABBITMQ_HOST": "mq",
+				"RABBITMQ_QUEUE": "shared", "LIFECYCLE_QUEUE": "shared",
+			},
+			wantErr: "LIFECYCLE_QUEUE",
+		},
+		{
+			name:    "postgres metadata store without connection details",
+			env:     map[string]string{"METADATA_STORE": "postgres", "ALKEMIO_DATABASE_HOST": ""},
+			wantErr: "METADATA_STORE=postgres",
+		},
+		{
+			name:    "file-service checkpoint store without its URL",
+			env:     map[string]string{"CHECKPOINT_STORE": "file-service", "FILE_SERVICE_URL": ""},
+			wantErr: "FILE_SERVICE_URL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pinKnownGood(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error must name %q so the fix travels with the message, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestNegativeLimitIsRejected covers the limits guard: 0 disables a limit, but a
+// NEGATIVE value is a typo that would otherwise be accepted and disable it too —
+// silently removing a bound the operator believed they had set.
+func TestNegativeLimitIsRejected(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("MAX_DOC_BYTES", "-1")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("a negative MAX_DOC_BYTES must fail; accepting it would silently disable the limit")
+	}
+	if !strings.Contains(err.Error(), "MAX_DOC_BYTES") {
+		t.Fatalf("error must name the setting, got %v", err)
+	}
+}

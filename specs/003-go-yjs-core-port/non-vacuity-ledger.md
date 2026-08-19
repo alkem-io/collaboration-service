@@ -48,6 +48,7 @@ stronger property, never weakened.
 | A fence this store cannot honour is refused BEFORE erasure | drop `checkFence` from `Delete` | "Delete with a fence on an Unfenced store = <nil>, want ErrUnexpectedFence" |
 | A blank `contentType` on upsert preserves the stored one | drop the preserve branch | "a blank contentType overwrote the stored one ... could materialize a memo root for a whiteboard" |
 | The index `Delete` removes the row and is idempotent | drop `delete(s.rows, id)` | "Load after Delete = <nil>, want ErrNotFound" |
+| A selected backend without its required settings fails at STARTUP | remove the `REDIS_URL` guard | "expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead" |
 | The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
 | Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
 | The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
