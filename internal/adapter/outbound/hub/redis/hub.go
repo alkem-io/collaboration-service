@@ -157,14 +157,37 @@ func (h *Hub) Subscribe(ctx context.Context, doc backend.DocumentID, source back
 		p.stop()
 		return nil, yhub.ErrClosed
 	}
+	// refs is DERIVED from the live subscriber count, never assumed.
+	//
+	// startPump runs off the lock (it does I/O), and in that window this
+	// subscriber may already have been closed — removeSubscriber found no pump to
+	// decrement, because there was none yet. Installing a pump with refs=1 then
+	// registers a Redis subscription whose only subscriber is gone, and because
+	// refs never reaches zero afterwards no later Close can tear it down either:
+	// the pod holds that subscription and its goroutine for the rest of its life.
+	//
+	// Counting the map is also what removeSubscriber's arithmetic already assumes,
+	// so deriving it here makes the invariant hold by construction rather than by
+	// the two sites happening to agree.
+	live := len(h.subs[doc])
+
 	if raced := h.pumps[doc]; raced != nil {
 		// Another Subscribe for the same document won; keep theirs.
-		raced.refs++
+		raced.refs = live
+		h.mu.Unlock()
+		p.stop()
+		if live == 0 {
+			h.removeSubscriber(doc, sub.id)
+		}
+		return sub, nil
+	}
+	if live == 0 {
+		// Every subscriber for this document went away while the pump was starting.
 		h.mu.Unlock()
 		p.stop()
 		return sub, nil
 	}
-	p.refs = 1
+	p.refs = live
 	h.pumps[doc] = p
 	h.mu.Unlock()
 	return sub, nil

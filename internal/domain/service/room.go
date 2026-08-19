@@ -645,6 +645,13 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		}
 	})
 	if err != nil {
+		// Release what we already took. The handle was acquired several steps ago,
+		// and a held handle makes Evict return ErrInUse FOREVER — so a room that
+		// failed here would leave its document permanently un-evictable and
+		// un-invalidatable, with every later open handed the same stale in-memory
+		// copy. Nothing else can clean it up: the room never entered the Manager's
+		// map, so no teardown will ever run for it.
+		r.releaseHandle()
 		cancel()
 		return nil, err
 	}
@@ -878,6 +885,15 @@ func (r *Room) run() {
 
 		case <-saveTimer.C:
 			r.persistNow()
+			// persistNow can tear this room down: a flush failing past the threshold
+			// escalates, and escalation IS a teardown. Leave the loop when that has
+			// happened — every other branch that tears down returns, and this one
+			// falling through instead would re-arm the retry timer on a dead room and
+			// spin: fail, escalate again, log again, count another data-loss event,
+			// forever, with the goroutine never released.
+			if !r.lc.is(stateActive) {
+				return
+			}
 			// A failed flush leaves the document dirty, and the save timer is armed
 			// only on the CLEAN→DIRTY transition — so without this the room would
 			// never try again: further edits find it already dirty, the threshold is
@@ -1785,15 +1801,28 @@ func (r *Room) teardown(flush func()) {
 	// Release the registry acquisition LAST, after the flush and the auxiliary
 	// teardown above: the document must stay valid for the save-on-release path.
 	// Release is idempotent.
-	if r.handle != nil {
-		r.handle.Release()
-		r.evictFromRegistry()
-	}
+	r.releaseHandle()
 	close(r.done)
 	if r.onReleased != nil {
 		r.onReleased()
 	}
 	r.lc.finishDraining()
+}
+
+// releaseHandle relinquishes this room's registry acquisition and evicts the
+// document once no other room holds it.
+//
+// One helper for both callers — normal teardown and a failed materialization —
+// because the failure path is the one that gets forgotten, and forgetting it
+// costs a permanently un-evictable document rather than a leaked object.
+// Idempotent: Release is safe to call twice and Evict treats an absent entry as
+// success.
+func (r *Room) releaseHandle() {
+	if r.handle == nil {
+		return
+	}
+	r.handle.Release()
+	r.evictFromRegistry()
 }
 
 // evictFromRegistry destroys the document's registry entry once this room has

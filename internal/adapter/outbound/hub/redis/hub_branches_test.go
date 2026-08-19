@@ -3,7 +3,9 @@ package redis
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -225,5 +227,103 @@ func TestSecondSubscriberSharesTheDocumentsRedisSubscription(t *testing.T) {
 	h.mu.Unlock()
 	if gone != 0 {
 		t.Fatal("the shared subscription outlived its last subscriber")
+	}
+}
+
+// TestPumpDoesNotOutliveItsSubscribersUnderRace is the regression for a leak
+// found in adversarial review (T067).
+//
+// Subscribe registers the subscriber, then starts the document's Redis
+// subscription OFF the lock (it does I/O), then installs it. A Close landing in
+// that window found no pump to decrement — so nothing was stopped — and the
+// install then registered a pump whose only subscriber was already gone.
+//
+// The leak is permanent and self-concealing: refs is stuck above zero, so no
+// later Close can ever reach zero either. The pod holds a Redis subscription and
+// a goroutine per affected document for the rest of its life, and the only
+// symptom is connection count on the Redis side.
+//
+// Driven by opening and immediately closing many subscriptions, which is exactly
+// the shape of a room that materializes and is torn down at once — a shutdown
+// race, or the purge tombstone refusing a room mid-build.
+//
+// Non-vacuity: restore `p.refs = 1` and this fails with pumps left behind.
+func TestPumpDoesNotOutliveItsSubscribersUnderRace(t *testing.T) {
+	h := newTestHub(t)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := range 600 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			doc := backend.DocumentID("doc-" + strconv.Itoa(i%2))
+			sub, err := h.Subscribe(ctx, doc, backend.SourceID(strconv.Itoa(i)), func(context.Context, yhub.Message) error { return nil })
+			if err != nil {
+				return
+			}
+			_ = sub.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	h.mu.Lock()
+	pumps, subs := len(h.pumps), len(h.subs)
+	h.mu.Unlock()
+
+	if subs != 0 {
+		t.Fatalf("%d documents still have subscribers after every subscription was closed", subs)
+	}
+	if pumps != 0 {
+		t.Fatalf("%d Redis subscriptions outlived their last subscriber; refs is stuck above zero so no later Close can reach it either, and the pod holds a subscription and a goroutine per document for the rest of its life", pumps)
+	}
+}
+
+// TestPumpRefsAlwaysMatchTheLiveSubscriberCount pins the invariant the leak
+// above violated.
+//
+// removeSubscriber decrements refs and tears the pump down at zero, so its
+// arithmetic only works if refs equals the number of live subscribers for that
+// document. Deriving refs from the map rather than assuming a value is what
+// makes the two sites agree by construction instead of by coincidence.
+func TestPumpRefsAlwaysMatchTheLiveSubscriberCount(t *testing.T) {
+	h := newTestHub(t)
+	ctx := context.Background()
+
+	subs := make([]yhub.Subscription, 0, 3)
+	for i := range 3 {
+		s, err := h.Subscribe(ctx, "doc", backend.SourceID(strconv.Itoa(i)), func(context.Context, yhub.Message) error { return nil })
+		if err != nil {
+			t.Fatalf("subscribe %d: %v", i, err)
+		}
+		subs = append(subs, s)
+
+		h.mu.Lock()
+		refs, live := h.pumps["doc"].refs, len(h.subs["doc"])
+		h.mu.Unlock()
+		if refs != live {
+			t.Fatalf("after %d subscribes: refs=%d live=%d", i+1, refs, live)
+		}
+	}
+
+	for i, s := range subs {
+		_ = s.Close()
+		h.mu.Lock()
+		live := len(h.subs["doc"])
+		p := h.pumps["doc"]
+		h.mu.Unlock()
+
+		if live == 0 {
+			if p != nil {
+				t.Fatalf("after closing subscription %d the last subscriber was gone but the pump remained", i)
+			}
+			continue
+		}
+		if p == nil {
+			t.Fatalf("after closing subscription %d the pump was torn down with %d subscribers still live", i, live)
+		}
+		if p.refs != live {
+			t.Fatalf("after closing subscription %d: refs=%d live=%d", i, p.refs, live)
+		}
 	}
 }
