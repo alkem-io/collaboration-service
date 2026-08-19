@@ -47,6 +47,7 @@ stronger property, never weakened.
 | A pre-rebuild metric still exists | drop `FanoutLagSeconds` from `InitMetrics` | "metric collaboration_fanout_lag_seconds existed before the persistence rebuild and is not exported now" |
 | Removed `BLOB_STORE` values fail startup | widen `parseBlobStore`'s accepted set | the startup error disappears |
 | The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
+| Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
 
 ### Why the room bounds its own restore
 
@@ -77,6 +78,7 @@ reason other than the one it claimed.
 | `TestColdLoadCostTracksDocumentSize` | make the store append rather than replace | the debounce coalesced both documents into a single flush, so a log-shaped store was indistinguishable | flush after every edit, which is also the honest model of accumulated history |
 | `TestNoPersistenceSignalWasLostInTheRebuild` | empty a `PrometheusMetrics` method body | an unlabelled counter is exported at zero whether or not anything increments it | added `TestEveryMetricsHookMovesItsSeries`, which asserts movement rather than presence |
 | `TestReleasedRoomsDoNotAccumulate` (first version) | remove `evictFromRegistry` | it inspected a registry of its own, but `NewManager` overwrites `Deps.Registry` with its own — so it reported a clean registry no room had ever touched | observe `mgr.registry` |
+| `TestRejoinRacingAnIdleReleaseLosesNoWrites` (first version) | remove the flush before teardown | 40 concurrent joiners all coalesced onto ONE room: the document materialized **exactly once**, never evicted, and the release/rejoin cycle it claimed to stress never happened. The probe stayed green because the debounce had already flushed, and the test would have stayed green against any registry lifetime bug whatsoever | rounds made sequential, each waiting for release so the next must rebuild from the checkpoint; the materialization count is now **asserted in-test**, so the test fails if it ever decays back into the coalesced shape |
 | `FuzzMalformedFramesAreOffenderOnly` (first version) | — | it checked the observer with `Ping`, and coder/websocket only processes pongs while a read is in flight, so it failed with **no offence at all** — it would have been reported as a server defect | the observer reads in the background, as a real client does |
 
 ## Deleted rather than restructured (SC-005a)
