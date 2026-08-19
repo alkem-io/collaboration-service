@@ -233,8 +233,8 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 // cascade is a correctness requirement: no orphan documents).
 //
 // The consumer binds the DEDICATED lifecycle queue (cfg.RabbitMQ.LifecycleQueue),
-// NOT the metastore RPC queue. RabbitMQ round-robins a queue across its consumers,
-// so binding the metastore queue here would let the lifecycle consumer steal a
+// NOT the metadata-store RPC queue. RabbitMQ round-robins a queue across its consumers,
+// so binding the metadata-store queue here would let the lifecycle consumer steal a
 // fraction of collaboration-fetch/-save RPCs and drop them — memo joins then time
 // out. The two consumers must never share a queue.
 func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Logger, closers *[]func()) error {
@@ -254,9 +254,9 @@ func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Lo
 }
 
 // lifecycleQueue is the queue the lifecycle consumer binds: the dedicated
-// LifecycleQueue, NEVER the metastore RPC queue. RabbitMQ round-robins a queue
-// across its consumers, so binding the metastore queue would let the lifecycle
-// consumer steal metastore fetch/save RPCs. config.Load already defaults and
+// LifecycleQueue, NEVER the metadata-store RPC queue. RabbitMQ round-robins a queue
+// across its consumers, so binding the metadata-store queue would let the lifecycle
+// consumer steal metadata-store fetch/save RPCs. config.Load already defaults and
 // validates LifecycleQueue (distinct from Queue); this falls back to the package
 // default only as a belt-and-suspenders guard for a hand-built Config.
 func lifecycleQueue(cfg *config.Config) string {

@@ -197,8 +197,8 @@ func TestBuildDepsStandaloneSucceeds(t *testing.T) {
 }
 
 // TestLifecycleQueueIsDistinctFromMetastoreQueue asserts the lifecycle consumer
-// binds its OWN queue — never the metastore RPC queue. A shared queue would let
-// RabbitMQ round-robin-steal metastore fetch/save RPCs to the lifecycle consumer
+// binds its OWN queue — never the metadata-store RPC queue. A shared queue would let
+// RabbitMQ round-robin-steal metadata-store fetch/save RPCs to the lifecycle consumer
 // (memo joins then time out), so this separation is the core of the RMQ topology
 // fix.
 func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
@@ -211,14 +211,14 @@ func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
 	}
 	got := lifecycleQueue(cfg)
 	if got == cfg.RabbitMQ.Queue {
-		t.Fatalf("lifecycle consumer queue %q must differ from the metastore RPC queue %q", got, cfg.RabbitMQ.Queue)
+		t.Fatalf("lifecycle consumer queue %q must differ from the metadata-store RPC queue %q", got, cfg.RabbitMQ.Queue)
 	}
 	if got != "alkemio-collaboration-lifecycle" {
 		t.Fatalf("lifecycleQueue = %q, want the configured LifecycleQueue", got)
 	}
 
 	// Belt-and-suspenders: an empty LifecycleQueue falls back to the package
-	// default, still distinct from the metastore queue.
+	// default, still distinct from the metadata-store queue.
 	cfg.RabbitMQ.LifecycleQueue = ""
 	if fallback := lifecycleQueue(cfg); fallback != config.DefaultLifecycleQueue || fallback == cfg.RabbitMQ.Queue {
 		t.Fatalf("empty LifecycleQueue fallback = %q, want default %q (distinct from %q)", fallback, config.DefaultLifecycleQueue, cfg.RabbitMQ.Queue)

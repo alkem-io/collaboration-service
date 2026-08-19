@@ -192,7 +192,7 @@ type RabbitMQConfig struct {
 }
 
 // DefaultLifecycleQueue is the default queue name the document lifecycle consumer
-// binds when LIFECYCLE_QUEUE is unset — distinct from the metastore RPC queue so
+// binds when LIFECYCLE_QUEUE is unset — distinct from the metadata-store RPC queue so
 // the two consumers never share (and round-robin-steal) a queue.
 const DefaultLifecycleQueue = "alkemio-collaboration-lifecycle"
 
@@ -432,7 +432,7 @@ func loadMetaStoreConfig(cfg *Config) error {
 		if cfg.RabbitMQ.Queue == "" {
 			return fmt.Errorf("METADATA_STORE=rabbitmq requires RABBITMQ_QUEUE")
 		}
-		// The lifecycle consumer gets its OWN queue, never the metastore RPC queue
+		// The lifecycle consumer gets its OWN queue, never the metadata-store RPC queue
 		// (sharing one queue round-robin-steals fetch/save RPCs). Reject an explicit
 		// LIFECYCLE_QUEUE that collides with RABBITMQ_QUEUE rather than silently
 		// re-introducing the shared-queue bug.

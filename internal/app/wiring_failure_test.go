@@ -115,7 +115,7 @@ func TestStartLifecycleSurfacesABrokerFailure(t *testing.T) {
 // TestLifecycleQueueFallsBackToTheDedicatedDefault covers the belt-and-braces
 // guard on a hand-built Config.
 //
-// It must never fall back to the metastore RPC queue: RabbitMQ round-robins a
+// It must never fall back to the metadata-store RPC queue: RabbitMQ round-robins a
 // queue across its consumers, so a lifecycle consumer bound there would steal
 // fetch/save RPCs from the metadata store and drop them.
 func TestLifecycleQueueFallsBackToTheDedicatedDefault(t *testing.T) {
@@ -124,7 +124,7 @@ func TestLifecycleQueueFallsBackToTheDedicatedDefault(t *testing.T) {
 		t.Fatalf("lifecycleQueue = %q, want the dedicated default %q", got, config.DefaultLifecycleQueue)
 	}
 	if got == "alkemio-collaboration" {
-		t.Fatal("the lifecycle consumer must never bind the metastore RPC queue; it would round-robin-steal fetch/save RPCs")
+		t.Fatal("the lifecycle consumer must never bind the metadata-store RPC queue; it would round-robin-steal fetch/save RPCs")
 	}
 
 	explicit := lifecycleQueue(&config.Config{RabbitMQ: config.RabbitMQConfig{LifecycleQueue: "custom-lifecycle"}})

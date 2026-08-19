@@ -138,7 +138,7 @@ func TestRabbitMQAssemblesURL(t *testing.T) {
 }
 
 // TestLifecycleQueueDefaultsToDedicatedQueue proves the lifecycle consumer gets
-// its OWN queue by default — distinct from the metastore RPC queue — so it never
+// its OWN queue by default — distinct from the metadata-store RPC queue — so it never
 // round-robin-steals fetch/save RPCs (the shared-queue bug).
 func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
 	t.Setenv("METADATA_STORE", "rabbitmq")

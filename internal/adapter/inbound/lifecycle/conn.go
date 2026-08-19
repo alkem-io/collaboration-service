@@ -36,10 +36,10 @@ type Config struct {
 	// URL is the amqp:// connection string (shared with the metastore bus).
 	URL string
 	// Queue is the DEDICATED lifecycle queue the consumer binds — its own queue,
-	// distinct from the metastore RPC queue (config.RabbitMQ.LifecycleQueue,
+	// distinct from the metadata-store RPC queue (config.RabbitMQ.LifecycleQueue,
 	// default alkemio-collaboration-lifecycle). It MUST NOT be the metastore RPC
 	// queue: RabbitMQ round-robins a queue across its consumers, so sharing one
-	// queue would let this consumer steal metastore fetch/save RPCs and drop them.
+	// queue would let this consumer steal metadata-store fetch/save RPCs and drop them.
 	Queue string
 	// HandlerTimeout bounds the per-delivery processing context so one stuck event
 	// cannot freeze the single-threaded consumer. Zero falls back to
