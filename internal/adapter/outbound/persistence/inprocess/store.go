@@ -34,52 +34,34 @@ type Store struct {
 	encodings map[backend.DocumentID]persistence.CheckpointEncoding
 	revisions map[backend.DocumentID]persistence.Revision
 	revision  persistence.Revision
-	mode      persistence.FenceMode
-	// fences records the highest epoch accepted per document. Only a fenced
-	// store consults it; an unfenced one never populates it.
-	fences map[backend.DocumentID]backend.Fence
 }
 
-// New constructs an empty unfenced store — the ordinary non-clustered mode, and
-// the one the file-service store also reports (research.md D6a).
-func New() *Store { return newStore(persistence.Unfenced) }
+// New constructs an empty store. It is UNFENCED, like the file-service store
+// (research.md D6a): this service never writes a fence, and the one topology a
+// fence would protect — multiple pods owning one document — is explicitly
+// unsupported. There is no fenced variant; a mutation-authority mechanism for a
+// topology we do not support would be machinery with no caller.
+func New() *Store { return newStore() }
 
-// NewFenced constructs a store requiring a fence on every save. It exists so the
-// fenced path is exercised by conformance (FR-008a); no deployment uses it, and
-// the file-service store cannot support it — a file row has nowhere to persist
-// the epoch.
-func NewFenced() *Store { return newStore(persistence.Fenced) }
-
-func newStore(mode persistence.FenceMode) *Store {
+func newStore() *Store {
 	return &Store{
 		blobs:     map[backend.DocumentID][]byte{},
 		vectors:   map[backend.DocumentID][]byte{},
 		encodings: map[backend.DocumentID]persistence.CheckpointEncoding{},
 		revisions: map[backend.DocumentID]persistence.Revision{},
-		fences:    map[backend.DocumentID]backend.Fence{},
-		mode:      mode,
 	}
 }
 
-// FenceMode reports the fixed mutation-authority mode. It is a property of the
-// store, never inferred per write, so one omitted fence cannot silently disable
-// stale-owner protection.
-func (s *Store) FenceMode() persistence.FenceMode { return s.mode }
+// FenceMode reports the fixed mutation-authority mode: always Unfenced. It is a
+// property of the store, never inferred per write.
+func (s *Store) FenceMode() persistence.FenceMode { return persistence.Unfenced }
 
-// checkFence validates a save's epoch against the store's mode. Callers hold mu.
-func (s *Store) checkFence(id backend.DocumentID, fence backend.Fence) error {
-	switch s.mode {
-	case persistence.Unfenced:
-		if fence != 0 {
-			return persistence.ErrUnexpectedFence
-		}
-	case persistence.Fenced:
-		if fence == 0 {
-			return persistence.ErrFenceRequired
-		}
-		if fence < s.fences[id] {
-			return persistence.ErrStaleFence
-		}
+// checkFence rejects a fence this store cannot honour. An Unfenced store that
+// silently accepted an epoch would let a caller believe it had stale-owner
+// protection it does not have.
+func (s *Store) checkFence(_ backend.DocumentID, fence backend.Fence) error {
+	if fence != 0 {
+		return persistence.ErrUnexpectedFence
 	}
 	return nil
 }
@@ -126,9 +108,6 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 
 	if err := s.checkFence(req.DocumentID, req.Fence); err != nil {
 		return 0, err
-	}
-	if req.Fence > s.fences[req.DocumentID] {
-		s.fences[req.DocumentID] = req.Fence
 	}
 	s.revision++
 	s.blobs[req.DocumentID] = append([]byte(nil), req.Update...)
@@ -188,11 +167,6 @@ func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error
 
 	if err := s.checkFence(req.DocumentID, req.Fence); err != nil {
 		return err
-	}
-	// The fence high-water mark is retained across the delete: a stale owner must
-	// not be able to erase, then re-save under its old epoch as if it were current.
-	if req.Fence > s.fences[req.DocumentID] {
-		s.fences[req.DocumentID] = req.Fence
 	}
 	delete(s.blobs, req.DocumentID)
 	delete(s.vectors, req.DocumentID)

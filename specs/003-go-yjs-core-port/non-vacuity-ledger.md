@@ -34,8 +34,6 @@ stronger property, never weakened.
 | Guarantee | Revert applied | Observed RED |
 |---|---|---|
 | Handshake frames are never shed (`sendInitial`) | replace `sendInitial` with `Send` | "second handshake frame returned ws: connection closed instead of waiting for queue space" |
-| A rejected fenced delete leaves state intact | delete the blob before checking the fence | "a REJECTED delete must leave the state intact, but the load failed: document not found" |
-| Fence high-water mark survives a delete | `delete(s.fences, id)` in `Delete` | "save from a stale owner AFTER a delete = <nil>, want ErrStaleFence" |
 | The purge tombstone prevents resurrection | remove the three `acquire` guards | "a Join admitted inside the cascade wrote durable content back for a deleted document" |
 | Failed flushes are retried | remove `armRetryTimer` | "timeout waiting for flush retried after a failure"; escalation never fires |
 | Restore happens inside the registry's `OpenFunc` | move `restoreInto` after `Acquire` | "LoadCheckpoint called 8 times for 8 concurrent first-opens" |
@@ -87,6 +85,21 @@ reason other than the one it claimed.
 | `FuzzMalformedFramesAreOffenderOnly` (first version) | — | it checked the observer with `Ping`, and coder/websocket only processes pongs while a read is in flight, so it failed with **no offence at all** — it would have been reported as a server defect | the observer reads in the background, as a real client does |
 
 ## Deleted rather than restructured (SC-005a)
+
+The **fenced variant of the in-process store** (`NewFenced`, the mode branching,
+the fence high-water map, `CheckpointPersistenceFencing`, and the two fenced-only
+tests). A fence exists to arbitrate between multiple owners of one document; this
+service never writes one, and the topology it would protect — multiple pods
+flushing the same document — is explicitly unsupported. It was a production
+adapter for a configuration we refuse to run, kept alive by the tests that
+exercised it. Those semantics belong to go-yjs's own conformance suite and its
+planted implementations, not to a consumer that has no fences.
+
+What REMAINS is the interface obligation: `FenceMode()` reports `Unfenced`, and a
+non-zero fence is rejected with `ErrUnexpectedFence` rather than silently
+accepted — a caller must not believe it has stale-owner protection it does not
+have.
+
 
 `TestPurgeDurableSurfacesMetadataLoadError`. `purgeDurable` no longer loads the
 metadata row — the pointer is resolved inside the store — so the error it induced
