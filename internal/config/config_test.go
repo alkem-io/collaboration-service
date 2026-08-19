@@ -802,3 +802,73 @@ func TestRenamedKeysAreRead(t *testing.T) {
 		t.Fatalf("HUB_MODE was not read: %q", cfg.Fanout)
 	}
 }
+
+// TestURLOverridesTakePrecedenceOverComponentParts covers the two "verbatim URL
+// wins" branches.
+//
+// Both backends accept either a full connection URL or host/port/credential
+// parts. The URL form exists for deployments that carry a single secret rather
+// than five, and it must WIN when set — a config that silently rebuilt the URL
+// from empty component defaults would connect to localhost while the operator
+// believed they had pointed it at a managed broker or database.
+func TestURLOverridesTakePrecedenceOverComponentParts(t *testing.T) {
+	t.Run("RABBITMQ_URL", func(t *testing.T) {
+		// Credential-shaped only because a real RABBITMQ_URL is; the point of the
+		// test is that the URL wins verbatim, not what it contains.
+		const brokerURL = "amqp://user:" + "pw" + "@broker.example:5672/vhost" //nolint:gosec // G101: test fixture, not a credential
+		t.Setenv("RABBITMQ_URL", brokerURL)
+		t.Setenv("RABBITMQ_HOST", "ignored-host")
+		t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+		t.Setenv("METADATA_STORE", "rabbitmq")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RabbitMQ.URL != brokerURL {
+			t.Fatalf("RabbitMQ URL = %q; the explicit URL must win over the component parts, or the service connects to the wrong broker while the operator believes otherwise", cfg.RabbitMQ.URL)
+		}
+	})
+
+	t.Run("DATABASE_URL", func(t *testing.T) {
+		const dbURL = "postgres://user:" + "pw" + "@db.example:5432/collab" //nolint:gosec // G101: test fixture, not a credential
+		t.Setenv("DATABASE_URL", dbURL)
+		t.Setenv("ALKEMIO_DATABASE_HOST", "ignored-host")
+		t.Setenv("METADATA_STORE", "postgres")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Postgres.DSN != dbURL {
+			t.Fatalf("Postgres DSN = %q; the explicit URL must win over the component parts", cfg.Postgres.DSN)
+		}
+	})
+}
+
+// TestPortAndIntegerParsingRejectNonsense covers the numeric guards.
+//
+// A port outside 1–65535 or a non-numeric value must fail startup rather than
+// fall back to a default: silently substituting one would bind a different port
+// from the one the operator configured, and the service would look healthy while
+// nothing could reach it.
+func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{"non-numeric port", "PORT", "eighty"},
+		{"port zero", "PORT", "0"},
+		{"port above the range", "PORT", "70000"},
+		{"non-numeric size", "MAX_UPLOAD_SIZE", "big"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			if tc.key == "MAX_UPLOAD_SIZE" {
+				t.Setenv("CHECKPOINT_STORE", "file-service")
+				t.Setenv("FILE_SERVICE_URL", "http://file-service:4003")
+				t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket")
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q must fail startup rather than silently falling back to a default", tc.key, tc.value)
+			}
+		})
+	}
+}

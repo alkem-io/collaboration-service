@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -115,5 +116,44 @@ func TestAcquireReturnsTheLiveRoomToASecondCaller(t *testing.T) {
 	}
 	if second != first {
 		t.Fatal("a second acquire materialized a DIFFERENT room for the same document; two rooms would hold two live copies of one document and diverge")
+	}
+}
+
+// TestConcurrentAcquiresOfOnePurgingDocumentAllRefuse covers the tombstone check
+// INSIDE the singleflight, which the fast-path check cannot reach.
+//
+// The two are not redundant. Materialization runs off the registry lock, so a
+// cascade can raise the tombstone after a caller passed the fast path and while
+// it waits on the singleflight. Without the inner check that caller would be
+// handed a freshly materialized room for a document being deleted — and its
+// first flush would write the content back.
+//
+// Driven with many concurrent acquires so the singleflight genuinely has
+// followers rather than a single winner taking the fast path.
+func TestConcurrentAcquiresOfOnePurgingDocumentAllRefuse(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	const doc model.DocumentID = "purging-race"
+
+	mgr.beginPurge(doc)
+	t.Cleanup(func() { mgr.endPurge(doc) })
+
+	var wg sync.WaitGroup
+	errs := make([]error, 16)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = mgr.acquire(context.Background(), doc, model.ContentTypeMemo)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if !errors.Is(err, ErrDocumentPurging) {
+			t.Fatalf("concurrent acquire %d during a cascade = %v, want ErrDocumentPurging; a room handed out here would flush content back for a deleted document", i, err)
+		}
+	}
+	if mgr.RoomCount() != 0 {
+		t.Fatalf("%d rooms were materialized for a document being purged", mgr.RoomCount())
 	}
 }
