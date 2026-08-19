@@ -25,19 +25,18 @@
 //	  pattern "collaboration-contribution"  data ContributionData
 //
 // The metadata/blob split (persistence-ports.md) is honoured: SaveData carries
-// only the index — contentPointer + checkpointStore locate the blob in the checkpoint store;
+// only the index — contentPointer locates the blob in file-service;
 // the snapshot bytes NEVER cross this bus.
 package rabbitmq
 
 // SaveData is the collaboration-save request payload: the index row only.
 // (carries forward nothing of the legacy binaryStateInBase64 / content fields —
-// the blob lives in the checkpoint store, located by ContentPointer + CheckpointStore.)
+// the blob lives in file-service, located by ContentPointer.)
 type SaveData struct {
 	ID                    string `json:"id"`
 	ContentType           string `json:"contentType"`
 	Version               int    `json:"version"`
 	ContentPointer        string `json:"contentPointer"`
-	CheckpointStore       string `json:"checkpointStore"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	OwnerRef              string `json:"ownerRef,omitempty"`
 }
@@ -62,7 +61,6 @@ type FetchReply struct {
 	ContentType           string `json:"contentType,omitempty"`
 	Version               int    `json:"version,omitempty"`
 	ContentPointer        string `json:"contentPointer,omitempty"`
-	CheckpointStore       string `json:"checkpointStore,omitempty"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
 	// the server FetchOutputData.storageBucketId). The file-service checkpoint store

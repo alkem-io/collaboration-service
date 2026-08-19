@@ -51,7 +51,7 @@ Detail and rationale live in `research.md`.
 
 - **OPEN-1 (T006 authzeval): RESOLVED →** `MetadataStore` carries the document's `authorizationPolicyId` (returned on `Load`); the `authzeval` adapter calls `evaluate(actorId, "read" | "update-content", policyId)`, reusing the file-service/wopi h2c+gobreaker client.
 - **OPEN-2 (T005 fileservice blob): RESOLVED →** implement against file-service's existing `/internal/file` API as-is; **no expansion for v1**; mirror its content-addressed convention (fixed `storageBucketId` per deployment; size ceiling via `MAX_UPLOAD_SIZE`).
-- **OPEN-3 (T005 rabbitmq metastore): RESOLVED →** target a **new unified contract** (`collaboration-save`/`collaboration-fetch`, index-only `{id, contentType, version, contentPointer, checkpointStore}` + `info`/`contribution`). **Cross-repo dependency:** the `server` owner must add the matching consumer — tracked as a follow-up; the rest of Wave 2 proceeds in parallel and the collab adapter is built to this contract.
+- **OPEN-3 (T005 rabbitmq metastore): RESOLVED →** target a **new unified contract** (`collaboration-save`/`collaboration-fetch`, index-only `{id, contentType, version, contentPointer}` + `info`/`contribution`). **Cross-repo dependency:** the `server` owner must add the matching consumer — tracked as a follow-up; the rest of Wave 2 proceeds in parallel and the collab adapter is built to this contract.
 - **OPEN-4 (T013/T014 limits + metric): RESOLVED →** epic **R9 limit defaults** (config-tunable); the FR-014 contribution metric ships **both** as a Prometheus gauge (always) and a RabbitMQ `contribution` event (Alkemio mode).
 
 ### Session 2026-06-20 (Wave 5 — dual-adapter handshake AuthN, option (c))
@@ -275,7 +275,7 @@ tasks in `tasks.md`. **[Wave N]** marks the wave that delivers it.
 - **FR-008** [Wave 1 ✅]: The server MUST support **offline→reconnect** convergence via the `SyncStep1`-driven catch-up, with no lost edits on either side (epic FR-009; US5).
 - **FR-009** [Wave 1 ✅]: The server MUST define its outbound dependencies as ports — `ClusterBroadcaster`, `MetadataStore`, `BlobStore`, `Auth`, `AuthZ` — plus the additive `service.Metrics` and `service.Conn` ports, with zero-dep default adapters (`inmemory`, `inline`, `open`) wired by config (epic FR-019/020/021/022; `port/ports.go`, `service/{doc,manager,room}.go`).
 - **FR-010** [Wave 2]: The server MUST provide a **`redis`** `ClusterBroadcaster` that publishes updates on `doc:{id}` and ephemeral/awareness on `awareness:{id}`, and subscribes to deliver peer-pod payloads to local members — selected by `HUB_MODE=redis`. `HUB_MODE` is MANDATORY (003 FR-022f), so `inmemory` is chosen explicitly rather than defaulted (epic FR-020/R4; T004).
-- **FR-011** [Wave 2]: The server MUST provide **durable MetadataStore adapters** — `rabbitmq` (the Alkemio `server` save/fetch dialect extended with `content_pointer`/`checkpoint_store`) and `postgres` (sqlc/pgx, golang-migrate) for standalone — selected by `METADATA_STORE` (epic FR-022/R7; T005; OPEN-3).
+- **FR-011** [Wave 2]: The server MUST provide **durable MetadataStore adapters** — `rabbitmq` (the Alkemio `server` save/fetch dialect extended with `content_pointer`) and `postgres` (sqlc/pgx, golang-migrate) for standalone — selected by `METADATA_STORE` (epic FR-022/R7; T005; OPEN-3).
 - **FR-012** [Wave 2]: The server MUST provide a **durable content adapter** — `file-service` (offload via the existing file-service API) — alongside `inline`, selected by `CHECKPOINT_STORE`, which is MANDATORY (003 FR-022f) so `inline` is chosen explicitly rather than defaulted; the content pointer shape is the adapter's concern (epic FR-022/R7; T005; OPEN-2).
 - **FR-013** [Wave 2 ✅ → split in Wave 5]: The server MUST provide an **`authzeval`** Auth+AuthZ adapter — handshake **header-trusting** authN (option (a), gateway-terminated: `model.Identity{ActorID}` from the gateway-stamped header) and per-document authZ via the authorization-evaluation-service (h2c HTTP/2 `POST /internal/auth/evaluate`, or NATS `auth.evaluate`), guarded by a sony/gobreaker circuit breaker and **failing closed** — alongside the `open` default. **[Wave 5]** the header-trusting AuthN half is promoted to a named **`header`** AuthN mode and the AuthZ half is selected independently of AuthN (`AUTHZ_MODE`); see FR-021–FR-023 (epic FR-021/R13; T006; OPEN-1).
 - **FR-014** [Wave 3]: The server MUST manage **presence/collaborator mode** — viewer vs. collaborator, inactivity downgrade — and emit a **north-star contribution metric** (per-window contributing actors) equivalent to today's, including **server-forced awareness eviction** of a departed connection (epic FR-007/FR-014; T013; OPEN-4).
@@ -413,13 +413,13 @@ snapshot) for **both** content types, but the two legacy dialects differ in patt
 names, id field, and payload (binary-v2 vs. JSON). *Does the unified server speak
 **both** legacy dialects (route by content-type), or does `server` expose a **new
 unified `save`/`fetch`** the collab service targets — extended per the epic with
-`content_pointer` + `checkpoint_store` so `server` stores the index, not the blob?* The
+`content_pointer` so `server` stores the index, not the blob?* The
 consumer side lives in `server` (not in these repos), so the wire shape `server`
 will accept is not determinable from the collab side alone.
 
 **Recommendation:** Target a **new unified contract** — patterns
 `collaboration-save` / `collaboration-fetch`, payload
-`{id, contentType, version, contentPointer, checkpointStore}` (index only; the blob goes
+`{id, contentType, version, contentPointer}` (index only; the blob goes
 to the BlobStore), with `info`/`contribution` carried forward. This matches
 `persistence-ports.md` (metadata/blob split) and avoids baking two legacy dialects
 into the new service (constitution §X, no-legacy). **Resolved & built (T005.1):**

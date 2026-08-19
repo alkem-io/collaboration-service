@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -50,6 +51,38 @@ func (f *fakeRPC) Emit(_ context.Context, pattern string, data any) error {
 	return f.emitErr
 }
 
+// TestSaveOmitsAnyStoreSelectorFromTheWire pins a DELETION, which is the kind of
+// property that silently regresses.
+//
+// `inline` is this service's INTERNAL non-durable mode for tests and standalone
+// runs. file-service is the storage abstraction for the whole Alkemio stack, so a
+// contentPointer is always a file-service id and there is no "which store"
+// question at the Alkemio boundary. A store selector on this contract would be a
+// test-only concept leaking into server entities, columns, and wire payloads —
+// and nothing on either side ever branched on it.
+//
+// Asserting its absence rather than trusting the struct: a field re-added to
+// SaveData with a json tag would serialize again with nothing else complaining.
+func TestSaveOmitsAnyStoreSelectorFromTheWire(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
+	store := newWithRPC(f)
+	if err := store.Save(context.Background(), model.Metadata{
+		ID: "doc-1", ContentType: model.ContentTypeWhiteboard, Version: 4,
+		ContentPointer: "file-uuid", AuthorizationPolicyID: "pol-7", OwnerRef: "owner-1",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := json.Marshal(f.calls[0].data)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, forbidden := range []string{"checkpointStore", "blobStore", "inline"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("the save payload carries %q; the Alkemio contract has no store selector: %s", forbidden, raw)
+		}
+	}
+}
+
 func TestSavePublishesUnifiedContract(t *testing.T) {
 	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
 	store := newWithRPC(f)
@@ -59,7 +92,6 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 		ContentType:           model.ContentTypeWhiteboard,
 		Version:               4,
 		ContentPointer:        "file-uuid",
-		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-7",
 		OwnerRef:              "owner-1",
 	})
@@ -79,7 +111,6 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 		ContentType:           "whiteboard",
 		Version:               4,
 		ContentPointer:        "file-uuid",
-		CheckpointStore:       "file-service",
 		AuthorizationPolicyID: "pol-7",
 		OwnerRef:              "owner-1",
 	}
@@ -91,7 +122,7 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 	raw, _ := json.Marshal(data)
 	for _, field := range []string{
 		`"id":"doc-1"`, `"contentType":"whiteboard"`, `"version":4`,
-		`"contentPointer":"file-uuid"`, `"checkpointStore":"file-service"`,
+		`"contentPointer":"file-uuid"`,
 		`"authorizationPolicyId":"pol-7"`,
 	} {
 		if !contains(string(raw), field) {
@@ -101,18 +132,6 @@ func TestSavePublishesUnifiedContract(t *testing.T) {
 	// The blob bytes must never appear on this bus (index-only contract).
 	if contains(string(raw), "binaryStateInBase64") || contains(string(raw), "content\":") {
 		t.Errorf("save payload leaked blob content: %s", raw)
-	}
-}
-
-func TestSaveDefaultsCheckpointStore(t *testing.T) {
-	f := &fakeRPC{replies: map[string]any{PatternSave: SaveReply{Success: true}}}
-	store := newWithRPC(f)
-	if err := store.Save(context.Background(), model.Metadata{ID: "d", ContentType: model.ContentTypeMemo}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	data := f.calls[0].data.(SaveData)
-	if data.CheckpointStore != string(model.CheckpointStoreInline) {
-		t.Errorf("default checkpointStore = %q, want inline", data.CheckpointStore)
 	}
 }
 
@@ -139,7 +158,6 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		ContentType:           "memo",
 		Version:               2,
 		ContentPointer:        "ptr",
-		CheckpointStore:       "file-service",
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
 		Content:               seed,
@@ -159,7 +177,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	}
 	if meta.ID != "doc-9" || meta.ContentType != model.ContentTypeMemo ||
 		meta.Version != 2 || meta.ContentPointer != "ptr" ||
-		meta.CheckpointStore != model.CheckpointStoreFileService || meta.AuthorizationPolicyID != "pol-1" {
+		meta.AuthorizationPolicyID != "pol-1" {
 		t.Errorf("mapped metadata = %+v", meta)
 	}
 	// The document's own storage bucket must be carried through from the
@@ -179,33 +197,11 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 // into the domain to fail later with a weaker diagnostic.
 func TestLoadRejectsUnknownContentType(t *testing.T) {
 	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
-		Found: true, ContentType: "spreadsheet", CheckpointStore: "inline",
+		Found: true, ContentType: "spreadsheet",
 	}}}
 	store := newWithRPC(f)
 	if _, err := store.Load(context.Background(), "doc-x"); err == nil {
 		t.Fatal("Load with unknown contentType: expected error, got nil")
-	}
-}
-
-// TestLoadRejectsUnknownCheckpointStore asserts a server reply carrying a checkpointStore
-// this service cannot read is rejected at the adapter boundary.
-//
-// There are exactly two backends this service can read: file-service and the
-// in-process store. A row naming anything else must be refused, not tolerated —
-// accepting it would mean reading the document through whichever store this
-// process happens to be configured with, which is the wrong backend, silently, on
-// the path where being wrong serves or overwrites the wrong document content.
-func TestLoadRejectsUnknownCheckpointStore(t *testing.T) {
-	for _, kind := range []string{"gdrive", "azure-blob", "memory"} {
-		t.Run(kind, func(t *testing.T) {
-			f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
-				Found: true, ContentType: "memo", CheckpointStore: kind,
-			}}}
-			store := newWithRPC(f)
-			if _, err := store.Load(context.Background(), "doc-x"); err == nil {
-				t.Fatalf("Load with checkpointStore %q: expected an error — this service cannot read that backend, so serving the document would read from the wrong one", kind)
-			}
-		})
 	}
 }
 

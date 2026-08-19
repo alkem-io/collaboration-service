@@ -83,9 +83,6 @@ func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	if in.ContentPointer == "" {
 		in.ContentPointer = existing.ContentPointer
 	}
-	if in.CheckpointStore == "" {
-		in.CheckpointStore = existing.CheckpointStore
-	}
 	if in.AuthorizationPolicyID == "" {
 		in.AuthorizationPolicyID = existing.AuthorizationPolicyID
 	}

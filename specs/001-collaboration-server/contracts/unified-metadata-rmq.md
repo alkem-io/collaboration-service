@@ -49,7 +49,6 @@ Request `data`:
   "contentType": "memo" | "whiteboard",
   "version": 4,                   // bumped per persisted snapshot
   "contentPointer": "<locator>", // inline row key | file-service UUID
-  "checkpointStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>", // OPEN-1; may be "" in open/standalone
   "ownerRef": "<parent entity id>"   // delete-cascade key (FR-023); optional
 }
@@ -57,10 +56,15 @@ Request `data`:
 
 Reply: `{ "success": true }` or `{ "success": false, "error": "<reason>" }`.
 
-> **`server` must persist `contentPointer` + `checkpointStore`** so a fetch returns
-> them — the collab service rehydrates the snapshot from `checkpointStore` using
-> `contentPointer`, regardless of the collab service's running `CHECKPOINT_STORE`
-> config.
+> **`server` must persist `contentPointer`** so a fetch returns it — the collab
+> service rehydrates the snapshot from file-service using `contentPointer`.
+>
+> There is deliberately NO store selector on this contract. file-service is the
+> storage abstraction for the whole Alkemio stack, so a `contentPointer` is always
+> a file-service id and there is no "which store" question at this boundary. The
+> collab service's own `CHECKPOINT_STORE` (`inline` | `file-service`) selects its
+> INTERNAL adapter for standalone and test runs; `inline` is non-durable and must
+> never appear in a server entity, column, or wire payload.
 
 ### `collaboration-fetch` — request/reply
 
@@ -79,7 +83,6 @@ Reply:
   "contentType": "memo" | "whiteboard",
   "version": 4,
   "contentPointer": "<locator>",
-  "checkpointStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>",
   "storageBucketId": "<uuid>",        // the document's OWN storage bucket; snapshots persist into it (per-doc bucket)
   "content": "<base64 Yjs-V2 state>", // FIRST-OPEN SEED (006-collab-content-unification): present ONLY when the

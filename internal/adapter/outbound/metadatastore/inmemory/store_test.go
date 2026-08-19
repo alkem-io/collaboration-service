@@ -60,10 +60,9 @@ func TestSnapshotSaveDoesNotWipeLifecycleMetadata(t *testing.T) {
 
 	// First snapshot persist: content_pointer/checkpoint_store set, lifecycle fields blank.
 	if err := s.Save(ctx, model.Metadata{
-		ID:              "doc",
-		ContentType:     model.ContentTypeWhiteboard,
-		ContentPointer:  "blob-1",
-		CheckpointStore: model.CheckpointStoreFileService,
+		ID:             "doc",
+		ContentType:    model.ContentTypeWhiteboard,
+		ContentPointer: "blob-1",
 	}); err != nil {
 		t.Fatalf("snapshot Save: %v", err)
 	}
@@ -91,11 +90,10 @@ func TestRedeliveredPreRegisterDoesNotOrphanBlob(t *testing.T) {
 
 	// Live snapshot state (a room persisted at least once).
 	if err := s.Save(ctx, model.Metadata{
-		ID:              "doc",
-		ContentType:     model.ContentTypeMemo,
-		ContentPointer:  "blob-live",
-		CheckpointStore: model.CheckpointStoreFileService,
-		OwnerRef:        "callout-9",
+		ID:             "doc",
+		ContentType:    model.ContentTypeMemo,
+		ContentPointer: "blob-live",
+		OwnerRef:       "callout-9",
 	}); err != nil {
 		t.Fatalf("snapshot Save: %v", err)
 	}
@@ -112,8 +110,5 @@ func TestRedeliveredPreRegisterDoesNotOrphanBlob(t *testing.T) {
 	got, _ := s.Load(ctx, "doc")
 	if got.ContentPointer != "blob-live" {
 		t.Errorf("redelivered pre-register orphaned the blob: content_pointer = %q, want preserved %q", got.ContentPointer, "blob-live")
-	}
-	if got.CheckpointStore != model.CheckpointStoreFileService {
-		t.Errorf("redelivered pre-register flipped checkpoint_store: got %q, want preserved %q", got.CheckpointStore, model.CheckpointStoreFileService)
 	}
 }

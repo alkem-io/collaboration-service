@@ -24,7 +24,15 @@ const (
 	ContentTypeWhiteboard ContentType = "whiteboard"
 )
 
-// CheckpointStoreKind identifies which checkpoint-store adapter holds a document's encoded
+// CheckpointStoreKind identifies this PROCESS's checkpoint-store adapter, derived
+// from CHECKPOINT_STORE. It is deliberately NOT part of the Alkemio metadata
+// contract: file-service is the storage abstraction for the whole stack, so a
+// contentPointer is always a file-service id, and `inline` is an internal
+// test/standalone mode that must never reach a server entity, column, or wire
+// field. It survives here only to tell a pointer-addressed store from one that
+// never sets a pointer.
+//
+// Historical note: this identified which adapter holds a document's encoded
 // snapshot. It is persisted in the metadata row so a document can be rehydrated
 // from the right backend regardless of the running configuration.
 type CheckpointStoreKind string
@@ -61,8 +69,6 @@ type Metadata struct {
 	// ContentPointer locates the snapshot inside the blob store (inline row
 	// key / file-service object id).
 	ContentPointer string
-	// CheckpointStore names the adapter that holds the blob for ContentPointer.
-	CheckpointStore CheckpointStoreKind
 	// AuthorizationPolicyID is the Alkemio authorization policy this document
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
 	// the authorization-evaluation-service; empty in open/standalone mode.

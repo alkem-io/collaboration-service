@@ -51,7 +51,7 @@ func startEchoConsumer(t *testing.T, url, queue string) func() {
 			case PatternSave, PatternDelete:
 				resp = map[string]bool{"success": true}
 			case PatternFetch:
-				resp = FetchReply{Found: true, ContentType: "memo", Version: 1, ContentPointer: "ptr", CheckpointStore: "inline"}
+				resp = FetchReply{Found: true, ContentType: "memo", Version: 1, ContentPointer: "ptr"}
 			}
 			if d.ReplyTo == "" {
 				continue

@@ -70,7 +70,7 @@ func Connect(ctx context.Context, dsn string) (*Store, *pgxpool.Pool, error) {
 }
 
 const loadSQL = `
-SELECT id, content_type, version, content_pointer, checkpoint_store,
+SELECT id, content_type, version, content_pointer,
        authorization_policy_id, owner_ref, created_at, updated_at
 FROM collaboration_metadata
 WHERE id = $1`
@@ -79,12 +79,12 @@ WHERE id = $1`
 func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
 	row := s.db.QueryRow(ctx, loadSQL, string(id))
 	var (
-		m                            model.Metadata
-		contentType, checkpointStore string
-		idStr                        string
-		createdAt, updatedAt         time.Time
+		m                    model.Metadata
+		contentType          string
+		idStr                string
+		createdAt, updatedAt time.Time
 	)
-	err := row.Scan(&idStr, &contentType, &m.Version, &m.ContentPointer, &checkpointStore,
+	err := row.Scan(&idStr, &contentType, &m.Version, &m.ContentPointer,
 		&m.AuthorizationPolicyID, &m.OwnerRef, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -94,7 +94,6 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 	}
 	m.ID = model.DocumentID(idStr)
 	m.ContentType = model.ContentType(contentType)
-	m.CheckpointStore = model.CheckpointStoreKind(checkpointStore)
 	m.CreatedAt = createdAt
 	m.UpdatedAt = updatedAt
 	return m, nil
@@ -113,7 +112,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 //     (Room.persist) historically carried them blank, so a blank value there means
 //     "unchanged" — otherwise the first snapshot save would wipe the owner_ref the
 //     delete cascade keys off (FR-023).
-//   - content_pointer / checkpoint_store are SNAPSHOT metadata set by the persist path;
+//   - content_pointer is SNAPSHOT metadata set by the persist path;
 //     pre-register (document.created) carries them blank. A REDELIVERED
 //     document.created re-runs PreRegister (a blind Save) with a blank
 //     content_pointer; with an unconditional `= EXCLUDED` that would clobber the
@@ -123,34 +122,25 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 //
 // A non-blank value always wins (a genuine update). content_type is required on
 // every write (never blank), so it stays an unconditional EXCLUDED.
-//
-// checkpoint_store is bound RAW (not pre-defaulted to 'inline' in Go): the INSERT
-// position defaults a blank to 'inline' for a genuine first insert, while the
-// ON CONFLICT branch treats a blank as "unchanged" so a (re)delivered pre-register
-// — which carries no CheckpointStore — cannot flip a populated row's backend back to
-// 'inline' and make it lie about where the live blob lives.
 const upsertSQL = `
 INSERT INTO collaboration_metadata
-    (id, content_type, version, content_pointer, checkpoint_store,
+    (id, content_type, version, content_pointer,
      authorization_policy_id, owner_ref, created_at, updated_at)
-VALUES ($1, $2, 1, $3, COALESCE(NULLIF($4, ''), 'inline'), $5, $6, now(), now())
+VALUES ($1, $2, 1, $3, $4, $5, now(), now())
 ON CONFLICT (id) DO UPDATE SET
     content_type            = EXCLUDED.content_type,
     version                 = collaboration_metadata.version + 1,
     content_pointer         = COALESCE(NULLIF(EXCLUDED.content_pointer, ''), collaboration_metadata.content_pointer),
-    checkpoint_store              = COALESCE(NULLIF($4, ''), collaboration_metadata.checkpoint_store),
     authorization_policy_id = COALESCE(NULLIF(EXCLUDED.authorization_policy_id, ''), collaboration_metadata.authorization_policy_id),
     owner_ref               = COALESCE(NULLIF(EXCLUDED.owner_ref, ''), collaboration_metadata.owner_ref),
     updated_at              = now()`
 
 // Save upserts the index row, bumping its version (data-model.md). Called on
-// first save and on every persisted snapshot. CheckpointStore is bound raw so the SQL
-// can distinguish "unset" (preserve on conflict) from a real value; the INSERT
-// path defaults a blank to 'inline'.
+// first save and on every persisted snapshot.
 func (s *Store) Save(ctx context.Context, meta model.Metadata) error {
 	_, err := s.db.Exec(ctx, upsertSQL,
 		string(meta.ID), string(meta.ContentType), meta.ContentPointer,
-		string(meta.CheckpointStore), meta.AuthorizationPolicyID, meta.OwnerRef)
+		meta.AuthorizationPolicyID, meta.OwnerRef)
 	if err != nil {
 		return fmt.Errorf("save metadata: %w", err)
 	}

@@ -46,7 +46,6 @@ func TestPostgresRoundTrip(t *testing.T) {
 		ID:                    id,
 		ContentType:           model.ContentTypeWhiteboard,
 		ContentPointer:        "ptr-1",
-		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-1",
 		OwnerRef:              "owner-1",
 	}
@@ -77,10 +76,9 @@ func TestPostgresRoundTrip(t *testing.T) {
 	// treated as "unchanged" and PRESERVE the pre-registered lifecycle metadata,
 	// not wipe it — otherwise the delete cascade loses its owner_ref key (FR-023).
 	snapshotSave := model.Metadata{
-		ID:              id,
-		ContentType:     model.ContentTypeWhiteboard,
-		ContentPointer:  "ptr-3",
-		CheckpointStore: model.CheckpointStoreFileService,
+		ID:             id,
+		ContentType:    model.ContentTypeWhiteboard,
+		ContentPointer: "ptr-3",
 		// OwnerRef + AuthorizationPolicyID intentionally empty (snapshot path).
 	}
 	if err := store.Save(ctx, snapshotSave); err != nil {

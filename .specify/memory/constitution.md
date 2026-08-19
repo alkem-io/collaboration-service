@@ -521,7 +521,7 @@ The collaboration service integrates with the following systems:
   `document.access_changed`) over RabbitMQ — see
   `.../contracts/lifecycle-events.md`.
 - Holds the document metadata/index via the `save`/`fetch` bus extended
-  with `content_pointer` + `checkpoint_store` — see
+  with `content_pointer` — see
   `.../contracts/persistence-ports.md`.
 
 **Authorization Evaluation Service** (Go, h2c HTTP/2 or NATS):

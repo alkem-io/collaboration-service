@@ -86,7 +86,6 @@ except in name (FR-009a).
 | contentType | memo \| whiteboard — drives convention selection |
 | version | the room's own save counter |
 | contentPointer | locates the blob in the content plane |
-| checkpointStore | which backing medium holds it |
 | authorizationPolicyId | drives authz evaluation |
 | ownerRef | drives the delete cascade |
 | storageBucketId | the document's own bucket |

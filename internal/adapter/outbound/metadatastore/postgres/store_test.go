@@ -74,7 +74,7 @@ func (q *fakeQuerier) Exec(_ context.Context, sql string, args ...any) (pgconnCo
 func TestLoadMapsRow(t *testing.T) {
 	now := time.Now().UTC()
 	q := &fakeQuerier{row: fakeRow{cols: []any{
-		"doc-1", "whiteboard", 3, "ptr-uuid", "file-service", "pol-7", "owner-x", now, now,
+		"doc-1", "whiteboard", 3, "ptr-uuid", "pol-7", "owner-x", now, now,
 	}}}
 	store := &Store{db: q}
 
@@ -84,7 +84,6 @@ func TestLoadMapsRow(t *testing.T) {
 	}
 	if got.ID != "doc-1" || got.ContentType != model.ContentTypeWhiteboard ||
 		got.Version != 3 || got.ContentPointer != "ptr-uuid" ||
-		got.CheckpointStore != model.CheckpointStoreFileService ||
 		got.AuthorizationPolicyID != "pol-7" || got.OwnerRef != "owner-x" {
 		t.Errorf("mapped row = %+v", got)
 	}
@@ -121,7 +120,6 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		ID:                    "doc-2",
 		ContentType:           model.ContentTypeMemo,
 		ContentPointer:        "ptr",
-		CheckpointStore:       model.CheckpointStoreFileService,
 		AuthorizationPolicyID: "pol-9",
 		OwnerRef:              "owner",
 	})
@@ -133,7 +131,7 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		t.Errorf("unexpected upsert SQL: %s", q.lastExec)
 	}
 	// id, content_type, content_pointer, checkpoint_store, authorization_policy_id, owner_ref
-	want := []any{"doc-2", "memo", "ptr", "file-service", "pol-9", "owner"}
+	want := []any{"doc-2", "memo", "ptr", "pol-9", "owner"}
 	if len(q.lastArgs) != len(want) {
 		t.Fatalf("save args = %v, want %v", q.lastArgs, want)
 	}
@@ -141,37 +139,6 @@ func TestSaveUpsertsWithArgs(t *testing.T) {
 		if q.lastArgs[i] != want[i] {
 			t.Errorf("arg[%d] = %v, want %v", i, q.lastArgs[i], want[i])
 		}
-	}
-}
-
-// TestSaveBindsCheckpointStoreRawAndDefaultsInSQL asserts the checkpoint_store handling: the
-// adapter binds the value RAW (empty stays empty on the wire) so the SQL can
-// distinguish "unset" (preserve the existing row's backend on conflict) from a
-// real value; the inline default for a genuine first insert is applied by the
-// SQL's COALESCE(NULLIF($4,”),'inline') in the INSERT position, not in Go.
-// Pre-defaulting in Go would make a (re)delivered blank pre-register flip a
-// populated row's checkpoint_store back to 'inline' and lie about where the live blob
-// lives.
-func TestSaveBindsCheckpointStoreRawAndDefaultsInSQL(t *testing.T) {
-	q := &fakeQuerier{}
-	store := &Store{db: q}
-	if err := store.Save(context.Background(), model.Metadata{ID: "d", ContentType: model.ContentTypeMemo}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	// The bound arg is the raw (empty) CheckpointStore — defaulting is the SQL's job.
-	if q.lastArgs[3] != "" {
-		t.Errorf("checkpoint_store arg = %q, want raw empty (SQL defaults it)", q.lastArgs[3])
-	}
-	// The SQL defaults a blank to inline on INSERT and preserves the existing
-	// checkpoint_store / content_pointer on a blank conflict update.
-	if !strings.Contains(q.lastExec, "NULLIF($4, ''), 'inline'") {
-		t.Errorf("upsert SQL does not default blank checkpoint_store to inline on insert: %s", q.lastExec)
-	}
-	if !strings.Contains(q.lastExec, "content_pointer         = COALESCE(NULLIF(EXCLUDED.content_pointer, ''), collaboration_metadata.content_pointer)") {
-		t.Errorf("upsert SQL does not preserve content_pointer on a blank update: %s", q.lastExec)
-	}
-	if !strings.Contains(q.lastExec, "checkpoint_store              = COALESCE(NULLIF($4, ''), collaboration_metadata.checkpoint_store)") {
-		t.Errorf("upsert SQL does not preserve checkpoint_store on a blank update: %s", q.lastExec)
 	}
 }
 

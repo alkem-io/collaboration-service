@@ -750,15 +750,6 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
 	}
-	if meta.CheckpointStore != "" {
-		// Record the backend the document was last saved to so subsequent saves
-		// re-persist it in the metadata row (the row stays truthful about where the
-		// state lives). Note this does not re-route the read below: the checkpoint
-		// store is the single adapter selected at startup, so a running config whose
-		// CHECKPOINT_STORE differs from meta.CheckpointStore must point that adapter at the same
-		// backing store to rehydrate (T005.6).
-		r.blobKind = meta.CheckpointStore
-	}
 	return meta, true, nil
 }
 
@@ -1721,7 +1712,6 @@ func (r *Room) persist(ctx context.Context) {
 		ContentType:           r.content,
 		Version:               newVersion,
 		ContentPointer:        r.pointer,
-		CheckpointStore:       r.blobKind,
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,
