@@ -63,10 +63,10 @@ JS-interop suite; assert convergence for both document conventions.
 
 ### Tests for User Story 1
 
-- [ ] T013 [P] [US1] Add a malformed/truncated-frame fuzz test in `internal/adapter/inbound/ws/` asserting offender-only failure — zero room teardowns, zero effect on other members, zero process crashes (SC-019, FR-009c)
-- [ ] T014 [P] [US1] Extend `test/e2e/jsinterop_test.go` coverage to assert handshake and awareness interop on the new dispatch path (SC-001)
+- [X] T013 [P] [US1] Add a malformed/truncated-frame fuzz test in `internal/adapter/inbound/ws/` asserting offender-only failure — zero room teardowns, zero effect on other members, zero process crashes (SC-019, FR-009c)
+- [X] T014 [P] [US1] Extend `test/e2e/jsinterop_test.go` coverage to assert handshake and awareness interop on the new dispatch path (SC-001)
 
-- [ ] T071 [P] [US1] Assert the convergence **bound** in `test/e2e/singlepod_test.go` and `test/e2e/twopod_test.go`: connected clients reach identical state within 1s after edits settle, in both modes (SC-002)
+- [X] T071 [P] [US1] Assert the convergence **bound** in `test/e2e/singlepod_test.go` and `test/e2e/twopod_test.go`: connected clients reach identical state within 1s after edits settle, in both modes (SC-002)
 
 ### Implementation for User Story 1
 

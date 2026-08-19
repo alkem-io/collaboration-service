@@ -147,3 +147,42 @@ func TestSinglePodOpenModeNoAuthRequired(t *testing.T) {
 		t.Fatal("open-mode client could not connect/edit without a token")
 	}
 }
+
+// TestSinglePodConvergenceBound is the T071/SC-002 bound on the single-pod path.
+//
+// "Eventually converges" is not a promise anyone typing can use. SC-002 sets a
+// bound — connected clients reach identical state within one second of edits
+// settling — and asserting the bound is what distinguishes a healthy fan-out from
+// one that still works but has picked up a multi-second debounce, retry backoff,
+// or poll interval. An unbounded eventually() passes against all of those.
+//
+// Both content types, because they take different paths through the room: a memo
+// is a Y.XmlFragment and a whiteboard an id-keyed Y.Map, and only the whiteboard
+// exercises per-property merge.
+func TestSinglePodConvergenceBound(t *testing.T) {
+	base := testApp(t, standaloneConfig())
+
+	t.Run("memo", func(t *testing.T) {
+		a := dial(t, base, "e2e-bound-memo", "memo")
+		b := dial(t, base, "e2e-bound-memo", "memo")
+		time.Sleep(80 * time.Millisecond)
+
+		a.insertMemo("bounded ")
+		if !convergedWithin(time.Second, func() bool {
+			return a.memoText() == b.memoText() && contains(b.memoText(), "bounded")
+		}) {
+			t.Fatalf("memo clients did not converge within 1s of the edit settling:\n  a=%q\n  b=%q", a.memoText(), b.memoText())
+		}
+	})
+
+	t.Run("whiteboard", func(t *testing.T) {
+		a := dial(t, base, "e2e-bound-wb", "whiteboard")
+		b := dial(t, base, "e2e-bound-wb", "whiteboard")
+		time.Sleep(80 * time.Millisecond)
+
+		a.addElement("el-bound", 1)
+		if !convergedWithin(time.Second, func() bool { return b.hasElement("el-bound") }) {
+			t.Fatal("whiteboard clients did not converge within 1s of the edit settling")
+		}
+	})
+}

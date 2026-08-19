@@ -183,3 +183,64 @@ func TestJSInteropJSEditorGoObserver(t *testing.T) {
 		t.Fatalf("Go observer never converged to the JS editor's edit; got %q", goObs.memoText())
 	}
 }
+
+// TestJSInteropGoEditorJSObserver is T014 / SC-001: the REVERSE direction, which
+// the other interop tests do not cover.
+//
+// The existing pair both have a JS client producing the edit, so they exercise
+// the server's INBOUND path — the JS framing that Go must decode. This one
+// inverts it: a Go client edits and announces awareness, and a real yjs client
+// must decode what the server sends. That is the outbound half of the dispatch
+// rebuilt on the core's protocol package, and it is the half a JS client would
+// reject silently by simply never converging rather than by erroring.
+//
+// Both signals are asserted separately because they travel different framing
+// paths: the document update rides the sync protocol, awareness rides
+// EncodeAwarenessUpdateMessage, and a regression in one leaves the other working.
+func TestJSInteropGoEditorJSObserver(t *testing.T) {
+	dir := jsInteropDir(t)
+	base := testApp(t, standaloneConfig())
+
+	const docID = "e2e-go-to-js-interop"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The JS observer runs in the background, waiting for the Go client's marker.
+	type out struct {
+		res jsResult
+		raw string
+		err error
+	}
+	obsCh := make(chan out, 1)
+	go func() {
+		res, raw, err := runHarness(ctx, dir, base, docID, "observe", "", "GO-TO-JS")
+		obsCh <- out{res, raw, err}
+	}()
+
+	// Give the JS observer time to connect and complete its handshake before the
+	// Go client edits, so the assertion is about fan-out rather than about the
+	// initial state transfer.
+	time.Sleep(700 * time.Millisecond)
+
+	goEditor := dial(t, base, docID, "memo")
+	goEditor.setAwareness(ycrdt.MakeObject("user", "go-editor"))
+	time.Sleep(100 * time.Millisecond)
+	goEditor.insertMemo("GO-TO-JS ")
+
+	observed := <-obsCh
+	if observed.err != nil {
+		t.Fatalf("observe harness: %v", observed.err)
+	}
+	if len(observed.res.DecodeErrors) > 0 {
+		t.Errorf("the JS client could not decode what the Go server sent: %+v\n%s", observed.res.DecodeErrors, observed.raw)
+	}
+	if !observed.res.Synced {
+		t.Fatalf("the JS client never completed the handshake against the Go server\n%s", observed.raw)
+	}
+	if !contains(observed.res.Text, "GO-TO-JS") {
+		t.Errorf("a real yjs client did not converge to a Go client's edit: %q\n%s", observed.res.Text, observed.raw)
+	}
+	if !observed.res.PeerAwarenessSeen {
+		t.Errorf("a real yjs client never saw the Go client's awareness; the outbound awareness framing does not match y-protocols\n%s", observed.raw)
+	}
+}

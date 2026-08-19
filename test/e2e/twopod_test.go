@@ -3,8 +3,10 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,4 +99,107 @@ func TestTwoPodAwarenessCrossInstance(t *testing.T) {
 	if !eventually(func() bool { return b.awarenessClientCount() >= 2 }) {
 		t.Fatalf("pod-B client never saw pod-A's awareness; holds %d states", b.awarenessClientCount())
 	}
+}
+
+// TestTwoPodConvergesUnderHostileDelivery is T051 / SC-007.
+//
+// The hub contract promises neither ordering nor single delivery, so a
+// deployment must converge anyway. The two pods here are driven with interleaved,
+// concurrent edits from both sides — which is what actually produces reordering
+// on a real bus, since two publishers racing means neither pod sees a single
+// well-ordered stream.
+//
+// Correct echo suppression is asserted at the same time, and it is the part that
+// fails loudly if wrong: a pod that re-published the peer updates it received
+// would loop with its counterpart forever, and the symptom in this test is that
+// the documents never settle rather than that they settle wrongly.
+func TestTwoPodConvergesUnderHostileDelivery(t *testing.T) {
+	mr := miniredis.RunT(t)
+	url := "redis://" + mr.Addr()
+
+	baseA := bootPod(t, url)
+	baseB := bootPod(t, url)
+
+	const docID = "e2e-2pod-hostile"
+	a := dial(t, baseA, docID, "memo")
+	b := dial(t, baseB, docID, "memo")
+	time.Sleep(150 * time.Millisecond)
+
+	// Interleaved concurrent edits from both pods: neither side observes a
+	// well-ordered stream, which is the reordering the contract permits.
+	const rounds = 12
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range rounds {
+			a.insertMemo(fmt.Sprintf("A%02d ", i))
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range rounds {
+			b.insertMemo(fmt.Sprintf("B%02d ", i))
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	wg.Wait()
+
+	if !eventually(func() bool { return a.memoText() == b.memoText() }) {
+		t.Fatalf("pods did not converge under interleaved edits:\n  a=%q\n  b=%q", a.memoText(), b.memoText())
+	}
+
+	// Every edit from both sides survived. Convergence to an IDENTICAL but
+	// truncated document would satisfy the check above while having lost writes.
+	final := a.memoText()
+	for i := range rounds {
+		for _, want := range []string{fmt.Sprintf("A%02d", i), fmt.Sprintf("B%02d", i)} {
+			if !contains(final, want) {
+				t.Fatalf("converged state is missing %q; the pods agreed on a document that lost an edit: %q", want, final)
+			}
+		}
+	}
+}
+
+// TestTwoPodConvergenceBound is the T071/SC-002 bound for the multi-pod path.
+//
+// Convergence "eventually" is not a useful promise to a person typing: the
+// requirement is that connected clients reach identical state within one second
+// of edits settling. Asserting the bound rather than mere convergence is what
+// catches a fan-out path that works but has acquired a multi-second debounce,
+// retry backoff, or poll interval — all of which pass an unbounded check.
+func TestTwoPodConvergenceBound(t *testing.T) {
+	mr := miniredis.RunT(t)
+	url := "redis://" + mr.Addr()
+
+	baseA := bootPod(t, url)
+	baseB := bootPod(t, url)
+
+	const docID = "e2e-2pod-bound"
+	a := dial(t, baseA, docID, "memo")
+	b := dial(t, baseB, docID, "memo")
+	time.Sleep(150 * time.Millisecond)
+
+	a.insertMemo("bounded-cross-pod ")
+	settled := time.Now()
+
+	if !convergedWithin(time.Second, func() bool {
+		return a.memoText() == b.memoText() && contains(b.memoText(), "bounded-cross-pod")
+	}) {
+		t.Fatalf("cross-pod clients did not converge within 1s of the edit settling (took >%v):\n  a=%q\n  b=%q",
+			time.Since(settled), a.memoText(), b.memoText())
+	}
+}
+
+// convergedWithin polls cond until it holds or the budget expires.
+func convergedWithin(budget time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return cond()
 }
