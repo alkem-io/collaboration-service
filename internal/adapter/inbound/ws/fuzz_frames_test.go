@@ -94,7 +94,10 @@ func FuzzMalformedFramesAreOffenderOnly(f *testing.F) {
 		// "still connected" from "server gone" — an earlier version of this test used
 		// Ping and failed even with no offence at all, which would have been reported
 		// as a server defect.
-		observer, _, err := websocket.Dial(ctx, base+"/collab/"+doc, nil)
+		observer, obsResp, err := websocket.Dial(ctx, base+"/collab/"+doc, nil)
+		if obsResp != nil && obsResp.Body != nil {
+			_ = obsResp.Body.Close()
+		}
 		if err != nil {
 			t.Skipf("dial observer: %v", err)
 		}
@@ -113,7 +116,10 @@ func FuzzMalformedFramesAreOffenderOnly(f *testing.F) {
 			}
 		}()
 
-		offender, _, err := websocket.Dial(ctx, base+"/collab/"+doc, nil)
+		offender, offResp, err := websocket.Dial(ctx, base+"/collab/"+doc, nil)
+		if offResp != nil && offResp.Body != nil {
+			_ = offResp.Body.Close()
+		}
 		if err != nil {
 			t.Skipf("dial offender: %v", err)
 		}
