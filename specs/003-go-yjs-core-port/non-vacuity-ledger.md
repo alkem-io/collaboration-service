@@ -58,6 +58,8 @@ stronger property, never weakened.
 | `HUB_MODE` is mandatory | restore `getenv("HUB_MODE", inmemory)` | "HUB_MODE unset: expected startup to fail, got nil" |
 | redis + file-service is REJECTED at startup | remove the pair check | "must fail startup; the service would serve happily while two pods overwrote each other's flushes" |
 | ...and the supported combinations still load | make the check reject everything | "single-pod durable must still load" |
+| A save NEVER recreates a file the index still points at | restore the create-on-rewrite-404 fallback | "saving against a pointer whose file is gone SUCCEEDED; a missing referenced checkpoint was silently replaced with current in-memory state, hiding the corruption" |
+| ...and a document with NO pointer still gets its first checkpoint | refuse every save | "first save for a document with no pointer must succeed" |
 
 ### Why the room bounds its own restore
 

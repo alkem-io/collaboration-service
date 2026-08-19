@@ -131,8 +131,25 @@ func (s *stubFileService) handler() http.Handler {
 	return mux
 }
 
+// createCount reports how many files the stub has created, under the same lock the
+// handlers take, so an assertion never reads the counter unsynchronised.
+func (s *stubFileService) createCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.creates
+}
+
 // count reports how many files the stub currently holds, so a test can assert
 // erasure actually happened rather than trusting a nil error.
+// deleteAll erases every stored file while leaving the index pointers intact:
+// pointer present, target absent.
+func (s *stubFileService) deleteAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byID = map[string][]byte{}
+	s.byHash = map[string]string{}
+}
+
 func (s *stubFileService) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,6 +162,7 @@ type mapResolver struct {
 	mu       sync.Mutex
 	pointers map[backend.DocumentID]string
 	bucket   string
+	records  int
 }
 
 func (m *mapResolver) Pointer(_ context.Context, id backend.DocumentID) (string, string, error) {
@@ -160,11 +178,25 @@ func (m *mapResolver) Pointer(_ context.Context, id backend.DocumentID) (string,
 func (m *mapResolver) Record(_ context.Context, id backend.DocumentID, pointer string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.records++
 	m.pointers[id] = pointer
 	return nil
 }
 
+func (m *mapResolver) recordCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.records
+}
+
 func newStoreForTest(t *testing.T) (*Store, *stubFileService) {
+	store, stub, _ := newStoreWithResolver(t)
+	return store, stub
+}
+
+// newStoreWithResolver also exposes the pointer resolver, so a test can assert
+// that a rejected save recorded no pointer.
+func newStoreWithResolver(t *testing.T) (*Store, *stubFileService, *mapResolver) {
 	t.Helper()
 	stub := newStub()
 	srv := httptest.NewServer(stub.handler())
@@ -176,7 +208,7 @@ func newStoreForTest(t *testing.T) (*Store, *stubFileService) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return store, stub
+	return store, stub, res
 }
 
 // TestCheckpointConformance runs the core's adversarial checkpoint contract
@@ -294,10 +326,11 @@ func TestSaveSurfacesDedupConflict(t *testing.T) {
 	}
 }
 
-// TestSaveDoesNotForkOnServerError guards the create-fallback. Only a 404 (the
-// file is gone) may fall back to creating. A transient 500 must surface: creating
-// a second file would FORK the document, leaving the pointer on the old file
-// while fresh state lands somewhere nothing will ever read.
+// TestSaveDoesNotForkOnServerError guards the pointer-present path: ANY failure
+// rewriting an existing pointer must surface. Creation belongs only to the
+// no-pointer condition. Creating a second file here would FORK the document,
+// leaving the pointer on the old file while fresh state lands somewhere nothing
+// will ever read.
 func TestSaveDoesNotForkOnServerError(t *testing.T) {
 	var creates int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -325,36 +358,6 @@ func TestSaveDoesNotForkOnServerError(t *testing.T) {
 	}
 	if creates != 0 {
 		t.Fatalf("created %d files after a failed rewrite; that forks the document", creates)
-	}
-}
-
-// TestSaveRecreatesWhenTheFileIsGone is the other half: a pointer whose file was
-// removed out of band must not wedge saving forever. The rewrite 404s and the
-// store creates a replacement, recording the new pointer.
-func TestSaveRecreatesWhenTheFileIsGone(t *testing.T) {
-	store, stub := newStoreForTest(t)
-	save(t, store, "doc-1", realUpdate(t, "state-1"))
-
-	stub.mu.Lock()
-	for id := range stub.byID {
-		delete(stub.byID, id)
-	}
-	stub.byHash = map[string]string{}
-	stub.mu.Unlock()
-
-	save(t, store, "doc-1", realUpdate(t, "state-2"))
-	stub.mu.Lock()
-	creates := stub.creates
-	stub.mu.Unlock()
-	if creates != 2 {
-		t.Fatalf("created %d files, want 2 (initial + replacement after the file vanished)", creates)
-	}
-	got, err := store.LoadCheckpoint(context.Background(), "doc-1")
-	if err != nil {
-		t.Fatalf("LoadCheckpoint: %v", err)
-	}
-	if text := textOf(t, got.Update); text != "state-2" {
-		t.Fatalf("loaded %q after recreate, want state-2", text)
 	}
 }
 
@@ -791,5 +794,71 @@ func TestSaveRefusesAV1UpdateRatherThanStoringIt(t *testing.T) {
 	// Refused before the network, so nothing was written.
 	if _, err := store.LoadCheckpoint(context.Background(), "doc"); !errors.Is(err, persistence.ErrNotFound) {
 		t.Fatalf("a refused save left state behind: load = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSaveRefusesToRecreateAFileTheIndexStillPointsAt pins the corruption rule on
+// the SAVE path.
+//
+// A non-blank ContentPointer whose file is absent is corrupt durable state, not a
+// new document — the same distinction LoadCheckpoint enforces by returning
+// ErrCorrupt rather than ErrNotFound. Only the explicit no-pointer condition may
+// create a document's first checkpoint. Creating here would write current
+// in-memory state into a NEW file and record that pointer, silently replacing a
+// missing referenced checkpoint with whatever the room happens to hold — hiding
+// the corruption instead of surfacing it.
+//
+// Non-vacuity: restore a create-on-rewrite-404 fallback and this fails with a file
+// created and a pointer recorded.
+func TestSaveRefusesToRecreateAFileTheIndexStillPointsAt(t *testing.T) {
+	store, stub, res := newStoreWithResolver(t)
+	ctx := context.Background()
+
+	// A document with a live pointer and a stored file.
+	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Encoding: persistence.EncodingV2,
+		Update: realUpdate(t, "stored content"), StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	createsAfterSeed, recordsAfterSeed := stub.createCount(), res.recordCount()
+
+	// The file vanishes out of band: pointer present, target absent.
+	stub.deleteAll()
+
+	_, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
+		DocumentID: "doc", Encoding: persistence.EncodingV2,
+		Update: realUpdate(t, "state written after the file vanished"), StateVector: []byte("sv"),
+	})
+	if err == nil {
+		t.Fatal("saving against a pointer whose file is gone SUCCEEDED; a missing referenced checkpoint was silently replaced with current in-memory state, hiding the corruption")
+	}
+	if !errors.Is(err, persistence.ErrCorrupt) {
+		t.Fatalf("want ErrCorrupt — the index says state exists and it cannot be written; got %v", err)
+	}
+	if got := stub.createCount(); got != createsAfterSeed {
+		t.Fatalf("a refused save created %d file(s); only the no-pointer path may create", got-createsAfterSeed)
+	}
+	if res.recordCount() != recordsAfterSeed {
+		t.Fatalf("a refused save recorded %d pointer(s); the index must keep pointing at the corrupt state so it stays visible", res.recordCount()-recordsAfterSeed)
+	}
+}
+
+// TestSaveCreatesTheFirstCheckpointForANewDocument is the positive half: the
+// explicit no-pointer condition still creates and records. Without it, a store
+// that refused every save would satisfy the guard above.
+func TestSaveCreatesTheFirstCheckpointForANewDocument(t *testing.T) {
+	store, stub, res := newStoreWithResolver(t)
+	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
+		DocumentID: "fresh", Encoding: persistence.EncodingV2,
+		Update: realUpdate(t, "first"), StateVector: []byte("sv"),
+	}); err != nil {
+		t.Fatalf("first save for a document with no pointer must succeed: %v", err)
+	}
+	if got := stub.createCount(); got != 1 {
+		t.Fatalf("created %d files, want exactly 1", got)
+	}
+	if res.recordCount() != 1 {
+		t.Fatalf("recorded %d pointers, want exactly 1", res.recordCount())
 	}
 }

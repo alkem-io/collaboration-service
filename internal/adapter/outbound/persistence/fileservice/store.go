@@ -155,13 +155,24 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 	pointer, bucket, err := s.pointers.Pointer(ctx, req.DocumentID)
 	switch {
 	case err == nil:
-		if rerr := s.rewrite(ctx, pointer, req.Update); rerr == nil {
+		rerr := s.rewrite(ctx, pointer, req.Update)
+		if rerr == nil {
 			return s.revisions.next(), nil
-		} else if !errors.Is(rerr, persistence.ErrNotFound) {
-			return 0, rerr
 		}
-		// The file vanished out of band; fall through and create a new one so
-		// saving is not wedged forever on a pointer that no longer resolves.
+		if errors.Is(rerr, persistence.ErrNotFound) {
+			// CORRUPT, not "create a new one". The index says this document HAS
+			// state — it carries a pointer — and the file behind it is gone. Only
+			// the explicit no-pointer condition below may create a first
+			// checkpoint, exactly as LoadCheckpoint reserves ErrNotFound for a
+			// document with no pointer at all.
+			//
+			// Creating here would write current in-memory state into a NEW file and
+			// record that pointer, silently replacing a missing referenced
+			// checkpoint with whatever the room happens to hold — hiding the
+			// corruption instead of surfacing it.
+			return 0, fmt.Errorf("%w: file %q behind the document pointer is missing, refusing to recreate it", persistence.ErrCorrupt, pointer)
+		}
+		return 0, rerr
 	case errors.Is(err, ErrNoPointer):
 		// First save for this document.
 	default:
