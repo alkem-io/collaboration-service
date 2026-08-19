@@ -8,6 +8,10 @@ import (
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/hub"
+	"github.com/antst/go-yjs/backend/persistence"
+	"go.uber.org/zap"
+
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
@@ -138,4 +142,68 @@ func TestHungBackendDoesNotWedgeRoomRelease(t *testing.T) {
 		n, _ := bc.stats()
 		return n >= 1 && mgr.RoomCount() == 0
 	})
+}
+
+// hangingLoadStore blocks inside LoadCheckpoint until its context is cancelled,
+// modelling a checkpoint backend that has stopped answering.
+type hangingLoadStore struct {
+	*persistinprocess.Store
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (h *hangingLoadStore) LoadCheckpoint(ctx context.Context, _ backend.DocumentID) (persistence.Checkpoint, error) {
+	h.once.Do(func() { close(h.entered) })
+	<-ctx.Done()
+	return persistence.Checkpoint{}, ctx.Err()
+}
+
+// TestMaterializationIsBoundedWhenTheCheckpointStoreHangs is the regression for
+// an unbounded first-load found by independent review.
+//
+// newRoom builds a bounded loadCtx for its materialization I/O, but passed the
+// UNBOUNDED context into Registry.Acquire — and the restore happens inside the
+// open function, so LoadCheckpoint ran with no deadline at all.
+//
+// Nothing else could free it. The room is not yet in the Manager's map, so
+// shutdown cannot find it to cancel; Registry.Close sees an initializing entry
+// and reports ErrInUse. The first-connect cohort coalescing on that open would
+// wait indefinitely, holding their WebSocket connections.
+//
+// Non-vacuity: pass `ctx` to Acquire again and this times out instead of
+// returning.
+func TestMaterializationIsBoundedWhenTheCheckpointStoreHangs(t *testing.T) {
+	deps := newTestDeps()
+	hanging := &hangingLoadStore{Store: persistinprocess.New(), entered: make(chan struct{})}
+	deps.Checkpoint = hanging
+	// A metadata row must exist, or restoreInto is skipped and the store is never
+	// reached.
+	if err := deps.meta.Save(context.Background(), model.Metadata{
+		ID: "hangs", ContentType: model.ContentTypeMemo, ContentPointer: "ptr",
+	}); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := newRoom(context.Background(), "hangs", model.ContentTypeMemo,
+			deps.Deps, RoomConfig{SendBuffer: 16, BackendTimeout: 150 * time.Millisecond},
+			NopMetrics{}, zap.NewNop())
+		done <- err
+	}()
+
+	select {
+	case <-hanging.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("LoadCheckpoint was never reached")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("materialization against a hung checkpoint store must fail, not succeed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("materialization never returned: the checkpoint restore has no deadline, and nothing else can cancel a room that is not yet registered")
+	}
 }

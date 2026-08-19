@@ -85,3 +85,39 @@ func TestClientControlFramesAreIgnored(t *testing.T) {
 		t.Fatal("an ignored frame changed the document")
 	}
 }
+
+// TestAwarenessTheDecoderRejectsIsNotRelayedToPeers is the regression for an
+// offender-only violation found by independent review (FR-009c).
+//
+// A frame can be well-formed enough to pass the outer framing check and still be
+// rejected by the awareness decoder. The room used to broadcast it anyway, on
+// the reasoning that peers would "apply it against their own state" — but an
+// awareness apply fails on the BYTES, not on the state, so a frame that fails
+// here fails identically for every recipient.
+//
+// Relaying it therefore inverts offender-only: one client's bad frame costs
+// every other client in the room, and every other pod on the bus, a failed
+// decode. The sender is the only party that should bear its own malformed input.
+//
+// Non-vacuity: remove the `return false` after the failed apply and this fails —
+// the frame reaches the other member and the peer bus.
+func TestAwarenessTheDecoderRejectsIsNotRelayedToPeers(t *testing.T) {
+	room := newBareRoom(t)
+	sender := &captureConn{}
+	observer := &captureConn{}
+	room.members[1] = roomMember{id: 1, conn: sender}
+	room.members[2] = roomMember{id: 2, conn: observer}
+
+	// A frame whose length-prefixed awareness body is present (so it clears the
+	// framing check) but is not a decodable awareness update.
+	frame := []byte{0x01, 0x04, 0xff, 0xff, 0xff, 0xff}
+
+	before := observer.count()
+	if room.handleMessage(1, frame) {
+		t.Fatal("a rejected awareness frame must not ask for a room teardown")
+	}
+
+	if got := observer.count() - before; got != 0 {
+		t.Fatalf("the other member received %d frame(s) the awareness decoder had already rejected; every recipient fails the same decode, so one client's bad frame becomes everyone's work (FR-009c)", got)
+	}
+}

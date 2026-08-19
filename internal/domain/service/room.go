@@ -568,7 +568,17 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// created but not yet restored — the half-built state FR-004a forbids. Loading
 	// after Acquire would publish an empty document first and fill it in afterwards.
 	opened := false
-	handle, err := registry.Acquire(ctx, backend.DocumentID(id), func(openCtx context.Context) (*ycrdt.Doc, error) {
+	// loadCtx, NOT ctx. The open function calls LoadCheckpoint, so the restore is
+	// backend I/O that must carry the same materialization deadline the metadata
+	// read does — otherwise a hung checkpoint store parks the whole first-connect
+	// cohort with nothing able to free it. The room is not in the Manager's map
+	// yet, so shutdown cannot find it to cancel, and Registry.Close sees an
+	// initializing entry and reports ErrInUse.
+	//
+	// loadCtx derives from the room-lifetime context, which the Manager already
+	// built with context.WithoutCancel — so this bounds materialization without
+	// making it cancellable by the connecting request.
+	handle, err := registry.Acquire(loadCtx, backend.DocumentID(id), func(openCtx context.Context) (*ycrdt.Doc, error) {
 		opened = true
 		doc := newRoomDoc(string(id))
 		if found {
@@ -903,7 +913,7 @@ func (r *Room) run() {
 			r.armRetryTimer(saveTimer)
 
 		case <-idleTimer.C:
-			if r.releaseIfEmpty() {
+			if r.releaseIfEmpty(saveTimer, idleTimer) {
 				return
 			}
 
@@ -1239,9 +1249,14 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		}
 		r.trackAwarenessID(src, body)
 		if err := ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: src}); err != nil {
-			// Best-effort: a malformed awareness update can't update the room's snapshot,
-			// but the raw frame is still fanned out so peers apply it against their own state.
-			r.logger.Warn("applying awareness update failed", zap.Error(err))
+			// DROP it. An earlier version relayed the frame anyway, reasoning that peers
+			// would "apply it against their own state" — but an awareness apply fails on
+			// the bytes, not on the state, so a frame that fails here fails identically
+			// for every recipient. Relaying it makes one client's bad frame cost every
+			// other client and every other pod a failed decode, which is precisely the
+			// offender-only property (FR-009c) inverted.
+			r.logger.Warn("dropping awareness frame the decoder rejected", zap.Error(err))
+			return false
 		}
 		r.broadcast(frame, src)
 		r.publishToPeers(frame, true)
@@ -1761,11 +1776,39 @@ func (r *Room) teardownInvalidated() {
 // whether the run loop should stop. An idle release DOES flush: the document is
 // believed good, so idling out must not silently cost a window of edits
 // (FR-011a).
-func (r *Room) releaseIfEmpty() bool {
+func (r *Room) releaseIfEmpty(saveTimer, idleTimer *time.Timer) bool {
 	if len(r.members) != 0 {
 		return false
 	}
-	r.teardown(r.persistNow)
+
+	// Flush BEFORE committing to teardown, so the outcome can be inspected.
+	// teardown(r.persistNow) ran the flush inside a sequence that then released
+	// unconditionally — so a transient backend failure on the final save
+	// destroyed the room, and with it the edits it had just failed to persist.
+	// The last client has already left, so the save-error control reaches nobody:
+	// the loss was silent from the user's side.
+	r.persistNow()
+
+	if !r.lc.is(stateActive) {
+		// persistNow escalated and tore the room down itself.
+		return true
+	}
+
+	// Still dirty after a failed flush: keep the room alive so the retry and
+	// escalation machine owns it, exactly as it would for a room with members.
+	// Escalation is what eventually ends it, loudly, if the backend stays down.
+	//
+	// Only when a retry is actually possible: with the debounce disabled there is
+	// no retry timer, so staying alive would leak an empty room forever. Then the
+	// loss is accepted, already counted by SnapshotFailed and logged by
+	// onFlushFailed.
+	if r.dirty && r.flushFailures > 0 && r.cfg.SaveDebounce > 0 {
+		r.armRetryTimer(saveTimer)
+		r.armIdleTimer(idleTimer)
+		return false
+	}
+
+	r.teardown(nil)
 	return true
 }
 

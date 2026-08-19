@@ -126,7 +126,7 @@ func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
 func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
 	room, _, store := dirtyRoomWithRegistry(t, "doc-idle")
 
-	if !room.releaseIfEmpty() {
+	if !room.releaseIfEmpty(time.NewTimer(time.Hour), time.NewTimer(time.Hour)) {
 		t.Fatal("an empty room must be released")
 	}
 	select {
@@ -138,6 +138,15 @@ func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
 	if n := store.saves.Load(); n != 1 {
 		t.Fatalf("idle release persisted %d time(s), want exactly 1; a good document must not be dropped on release", n)
 	}
+	// Asserting the CALL COUNT alone would pass against a store whose every save
+	// failed — the room would still have called Save once and still been torn
+	// down, losing the document. Check the state actually landed.
+	if _, err := store.LoadCheckpoint(context.Background(), backend.DocumentID("doc-idle")); err != nil {
+		t.Fatalf("idle release reported a flush but stored nothing: %v", err)
+	}
+	if room.dirty {
+		t.Fatal("the room was released still dirty; its unsaved edits are gone")
+	}
 }
 
 // TestReleaseIfEmptyKeepsARoomWithMembers guards the condition itself: the idle
@@ -146,7 +155,7 @@ func TestReleaseIfEmptyKeepsARoomWithMembers(t *testing.T) {
 	room, _, _ := dirtyRoomWithRegistry(t, "doc-populated")
 	room.members[1] = roomMember{id: 1, conn: &captureConn{}}
 
-	if room.releaseIfEmpty() {
+	if room.releaseIfEmpty(time.NewTimer(time.Hour), time.NewTimer(time.Hour)) {
 		t.Fatal("a room with members must not be released by the idle path")
 	}
 	select {
@@ -201,4 +210,77 @@ func TestInvalidatedHandleSignalsWithoutRevoking(t *testing.T) {
 	// Release is idempotent and completes destruction after the fact.
 	handle.Release()
 	handle.Release()
+}
+
+// TestFailedFinalFlushDoesNotDestroyTheUnsavedEdits is the regression for a
+// data-loss path found by independent review.
+//
+// The scenario is ordinary: a client edits, then leaves before the debounce
+// fires. The idle timer reaches an empty, dirty room and flushes one last time.
+// If that single save fails — one transient backend blip — the room used to be
+// torn down anyway, taking the edit with it. The last client has already gone,
+// so the save-error control reaches nobody: silent loss.
+//
+// onFlushFailed states that a failed flush means NOT YET DURABLE and that the
+// room keeps serving and retries. This path made that untrue: there was no room
+// left to retry with.
+//
+// The room must now survive a failed final flush and let the retry machine own
+// it, exactly as it would for a room that still had members.
+//
+// Non-vacuity: restore `teardown(r.persistNow)` and this fails — the room is
+// destroyed while dirty.
+func TestFailedFinalFlushDoesNotDestroyTheUnsavedEdits(t *testing.T) {
+	deps := newTestDeps()
+	store := newOutageStore() // every save fails
+	deps.Checkpoint = store
+
+	room, err := newRoom(context.Background(), "doc-final-flush", model.ContentTypeMemo,
+		deps.Deps, RoomConfig{
+			SendBuffer:   16,
+			SaveDebounce: 5 * time.Millisecond, // a retry is possible
+			IdleTimeout:  time.Hour,
+			Limits:       Limits{FlushFailureThreshold: 50}, // do not escalate during this test
+		}, NopMetrics{}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("newRoom: %v", err)
+	}
+	insertText(room.doc, "the edit that must not vanish ")
+	room.dirty = true
+
+	released := room.releaseIfEmpty(time.NewTimer(time.Hour), time.NewTimer(time.Hour))
+
+	if released {
+		t.Fatal("the room was released after its final flush FAILED; the unsaved edit is gone and the last client already left, so nothing reported it")
+	}
+	select {
+	case <-room.done:
+		t.Fatal("the room was torn down despite holding unsaved edits")
+	default:
+	}
+	if !room.dirty {
+		t.Fatal("the room was marked clean without a successful save")
+	}
+
+	// And once the backend recovers, the edit is persisted rather than lost.
+	store.recover()
+	room.persistNow()
+	if room.dirty {
+		t.Fatal("the document was still dirty after a successful retry")
+	}
+	// Read through the store the room actually wrote to (the outage double keeps
+	// its own inner store), and materialize it to prove the EDIT survived rather
+	// than just that some bytes landed.
+	cp, err := store.LoadCheckpoint(context.Background(), backend.DocumentID("doc-final-flush"))
+	if err != nil {
+		t.Fatalf("the recovered flush stored nothing: %v", err)
+	}
+	scratch := newRoomDoc("doc-final-flush")
+	if err := ycrdt.ApplyUpdateV2(scratch, cp.Update, nil); err != nil {
+		t.Fatalf("stored bytes do not materialize: %v", err)
+	}
+	if !contains(xmlText(scratch), "must not vanish") {
+		t.Fatalf("the recovered flush persisted a document without the edit: %q", xmlText(scratch))
+	}
+	room.finish()
 }
