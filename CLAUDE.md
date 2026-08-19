@@ -71,9 +71,9 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 (single-pod, inline blob, open auth):
 
 - `PORT` (default 4006)
-- `FANOUT_MODE` — `inmemory` | `redis` (redis + `BLOB_STORE=file-service` is unsupported)
+- `HUB_MODE` — `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
-- `BLOB_STORE` — `inline` | `file-service`
+- `CHECKPOINT_STORE` — `inline` | `file-service`
 - `AUTH_MODE` — `open` | `authzeval`
 
 ## Development Workflow

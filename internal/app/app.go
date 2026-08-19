@@ -124,10 +124,10 @@ func warnUnsupportedTopology(cfg *config.Config, logger *zap.Logger) {
 		return
 	}
 	logger.Warn("UNSUPPORTED CONFIGURATION: multi-pod fan-out with a durable store and no document ownership mechanism",
-		zap.String("FANOUT_MODE", string(cfg.Fanout)),
-		zap.String("BLOB_STORE", string(cfg.BlobStore)),
+		zap.String("HUB_MODE", string(cfg.Fanout)),
+		zap.String("CHECKPOINT_STORE", string(cfg.BlobStore)),
 		zap.String("consequence", "every pod flushes the whole document on its own schedule with nothing deciding which write wins; two pods that diverge will overwrite each other and the later writer silently discards edits it never received"),
-		zap.String("supported", "run a single pod (FANOUT_MODE=inmemory) with BLOB_STORE=file-service"),
+		zap.String("supported", "run a single pod (HUB_MODE=inmemory) with CHECKPOINT_STORE=file-service"),
 	)
 }
 

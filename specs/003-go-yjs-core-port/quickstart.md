@@ -183,7 +183,7 @@ the pod by destroying the room.
 
 ```bash
 # start with a removed/renamed key still set
-BLOB_STORE=file-service make run
+CHECKPOINT_STORE=file-service make run
 ```
 
 **Expected** (SC-021): startup **fails with an error naming the replacement key**. It

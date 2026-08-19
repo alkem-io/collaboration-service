@@ -9,9 +9,9 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("PORT", "")
-	t.Setenv("FANOUT_MODE", "")
+	t.Setenv("HUB_MODE", "")
 	t.Setenv("METADATA_STORE", "")
-	t.Setenv("BLOB_STORE", "")
+	t.Setenv("CHECKPOINT_STORE", "")
 	t.Setenv("AUTH_MODE", "")
 
 	cfg, err := Load()
@@ -52,7 +52,7 @@ func TestAuthTokenHeaderOverride(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownEnum(t *testing.T) {
-	t.Setenv("FANOUT_MODE", "kafka")
+	t.Setenv("HUB_MODE", "kafka")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() with FANOUT_MODE=kafka: expected error, got nil")
 	}
@@ -64,16 +64,16 @@ func TestLoadRejectsUnknownEnum(t *testing.T) {
 func TestLoadRejectsUnknownAdapterSelections(t *testing.T) {
 	for _, c := range []struct{ key, val string }{
 		{"METADATA_STORE", "cassandra"},
-		{"BLOB_STORE", "gcs"},
+		{"CHECKPOINT_STORE", "gcs"},
 		{"AUTH_MODE", "ldap"},
 	} {
 		t.Run(c.key, func(t *testing.T) {
 			// Pin every selector to a known-good value first, then override the one
 			// under test with the bad value — so the rejection is attributable to
 			// this selector and cannot be a false pass from unrelated ambient env.
-			t.Setenv("FANOUT_MODE", "inmemory")
+			t.Setenv("HUB_MODE", "inmemory")
 			t.Setenv("METADATA_STORE", "inmemory")
-			t.Setenv("BLOB_STORE", "inline")
+			t.Setenv("CHECKPOINT_STORE", "inline")
 			t.Setenv("AUTH_MODE", "open")
 			t.Setenv(c.key, c.val)
 			if _, err := Load(); err == nil {
@@ -91,7 +91,7 @@ func TestLoadRejectsBadPort(t *testing.T) {
 }
 
 func TestRedisRequiresURL(t *testing.T) {
-	t.Setenv("FANOUT_MODE", "redis")
+	t.Setenv("HUB_MODE", "redis")
 	t.Setenv("REDIS_URL", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("FANOUT_MODE=redis without REDIS_URL: expected error")
@@ -99,7 +99,7 @@ func TestRedisRequiresURL(t *testing.T) {
 }
 
 func TestRedisLoadsURL(t *testing.T) {
-	t.Setenv("FANOUT_MODE", "redis")
+	t.Setenv("HUB_MODE", "redis")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	cfg, err := Load()
 	if err != nil {
@@ -233,14 +233,14 @@ func TestPostgresAssemblesDSN(t *testing.T) {
 }
 
 func TestFileServiceRequiresSettings(t *testing.T) {
-	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
 	if _, err := Load(); err == nil {
 		t.Fatal("BLOB_STORE=file-service without settings: expected error")
 	}
 }
 
 func TestFileServiceLoadsSettings(t *testing.T) {
-	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("FILE_SERVICE_AUTHORIZATION_ID", "auth-uuid")
@@ -264,7 +264,7 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 // test fails — Load returns nil for MAX_UPLOAD_SIZE=-1, admitting an uncapped store.
 func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 	pinKnownGood(t)
-	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "-1")
@@ -277,7 +277,7 @@ func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 // "fall back to file-service's own 32 MiB ceiling" sentinel, not an error.
 func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	pinKnownGood(t)
-	t.Setenv("BLOB_STORE", "file-service")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "0")
@@ -307,7 +307,7 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
 	for _, unsupported := range []string{"gdrive", "azure-blob", "memory"} {
 		t.Run(unsupported, func(t *testing.T) {
-			t.Setenv("BLOB_STORE", unsupported)
+			t.Setenv("CHECKPOINT_STORE", unsupported)
 			_, err := Load()
 			if err == nil {
 				t.Fatalf("BLOB_STORE=%s must fail startup: an unrecognised selector falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", unsupported)
@@ -442,9 +442,9 @@ func TestNumericEnvRejectsMalformed(t *testing.T) {
 // auth-mode test cannot false-pass (or false-fail) on unrelated ambient env.
 func pinKnownGood(t *testing.T) {
 	t.Helper()
-	t.Setenv("FANOUT_MODE", "inmemory")
+	t.Setenv("HUB_MODE", "inmemory")
 	t.Setenv("METADATA_STORE", "inmemory")
-	t.Setenv("BLOB_STORE", "inline")
+	t.Setenv("CHECKPOINT_STORE", "inline")
 }
 
 // TestDefaultAuthZModeDerivesFromOpen asserts the standalone default — AUTH_MODE
@@ -733,5 +733,72 @@ func TestOIDCAudAllowListAllBlankIsEmpty(t *testing.T) {
 	}
 	if len(cfg.OIDC.BearerAudAllowList) != 0 {
 		t.Errorf("BearerAudAllowList = %#v, want empty", cfg.OIDC.BearerAudAllowList)
+	}
+}
+
+// TestRetiredConfigKeysFailStartupNamingTheirReplacement is FR-022d / SC-021.
+//
+// BLOB_STORE and FANOUT_MODE were renamed to match the contracts they select.
+// Both replacements have SILENT DEFAULTS — CHECKPOINT_STORE falls back to the
+// non-durable in-process store, HUB_MODE to single-pod — so a deployment that
+// still sets the old key would come up healthy, serve normally, and write every
+// document to memory. The first symptom is an empty document after a restart.
+//
+// That is why the rename is only safe with this check: a consumer that has not
+// caught up fails loudly at startup instead of losing data quietly. The error
+// must also NAME the replacement, because the operator reading it needs the
+// answer rather than a diagnosis.
+//
+// Non-vacuity: delete an entry from renamedKeys and its case fails on the
+// missing error; drop the replacement from the message and it fails on the
+// substring check.
+func TestRetiredConfigKeysFailStartupNamingTheirReplacement(t *testing.T) {
+	for old, replacement := range map[string]string{
+		"BLOB_STORE":  "CHECKPOINT_STORE",
+		"FANOUT_MODE": "HUB_MODE",
+	} {
+		t.Run(old, func(t *testing.T) {
+			t.Setenv(old, "file-service")
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("%s is retired and must fail startup: its replacement has a silent default, so ignoring it would send every document to non-durable in-process storage", old)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, old) || !strings.Contains(msg, replacement) {
+				t.Fatalf("the error must name both the retired key and its replacement, got: %s", msg)
+			}
+		})
+	}
+}
+
+// TestMetadataStoreKeyWasNotRenamed guards the deliberate exception. It still
+// selects port.MetadataStore — the one port that did not move to a core
+// contract — so renaming it would have been churn with a deployment cost and no
+// meaning behind it.
+func TestMetadataStoreKeyWasNotRenamed(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("METADATA_STORE must still be accepted: %v", err)
+	}
+	if cfg.MetadataStore != MetadataStoreInMemory {
+		t.Fatalf("MetadataStore = %q, want inmemory", cfg.MetadataStore)
+	}
+}
+
+// TestRenamedKeysAreRead asserts the NEW names actually work, so the tests above
+// cannot pass against a config that rejects everything.
+func TestRenamedKeysAreRead(t *testing.T) {
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	t.Setenv("HUB_MODE", "inmemory")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with the renamed keys: %v", err)
+	}
+	if cfg.BlobStore != BlobStoreInline {
+		t.Fatalf("CHECKPOINT_STORE was not read: %q", cfg.BlobStore)
+	}
+	if cfg.Fanout != FanoutInMemory {
+		t.Fatalf("HUB_MODE was not read: %q", cfg.Fanout)
 	}
 }

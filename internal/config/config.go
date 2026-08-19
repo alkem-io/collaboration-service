@@ -281,7 +281,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	fanout, err := parseFanout(getenv("FANOUT_MODE", string(FanoutInMemory)))
+	fanout, err := parseFanout(getenv("HUB_MODE", string(FanoutInMemory)))
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	blobStore, err := parseBlobStore(getenv("BLOB_STORE", string(BlobStoreInline)))
+	if err := rejectRenamedKeys(); err != nil {
+		return nil, err
+	}
+	blobStore, err := parseBlobStore(getenv("CHECKPOINT_STORE", string(BlobStoreInline)))
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +486,7 @@ func loadBlobStoreConfig(cfg *Config) error {
 	// uploads into the document's own bucket (per-document, from the
 	// collaboration-fetch metadata).
 	if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
-		return fmt.Errorf("BLOB_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
+		return fmt.Errorf("CHECKPOINT_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
 	}
 	return nil
 }
@@ -669,6 +672,42 @@ func parseMetadataStore(v string) (MetadataStoreMode, error) {
 	}
 }
 
+// renamedKeys maps a retired configuration key to the one that replaced it.
+//
+// The keys were renamed to match the contracts they now select: CHECKPOINT_STORE
+// picks a persistence.CheckpointStore, HUB_MODE picks a hub.Hub. METADATA_STORE
+// is deliberately absent — it still selects port.MetadataStore and did not move.
+var renamedKeys = map[string]string{
+	"BLOB_STORE":  "CHECKPOINT_STORE",
+	"FANOUT_MODE": "HUB_MODE",
+}
+
+// rejectRenamedKeys fails startup when a retired key is set (FR-022d, SC-021).
+//
+// IGNORING a stale key is the dangerous option, not failing on it. Both renamed
+// keys have silent defaults — CHECKPOINT_STORE falls back to the non-durable
+// in-process store and HUB_MODE to single-pod — so a deployment that still sets
+// BLOB_STORE=file-service would come up healthy, serve normally, and write every
+// document to memory. The first symptom is an empty document after a restart.
+//
+// So the rename is only safe BECAUSE of this check: a consumer that has not
+// caught up fails loudly at startup instead of losing data quietly. The error
+// names the replacement, because an operator reading it at 3am needs the answer,
+// not a diagnosis.
+func rejectRenamedKeys() error {
+	for old, replacement := range renamedKeys {
+		// A non-EMPTY value only. An exported-but-empty variable carries no
+		// configuration intent — it is how a compose file or a test harness clears
+		// a setting — and failing on it would refuse to start over a blank string.
+		if strings.TrimSpace(os.Getenv(old)) != "" {
+			return fmt.Errorf("%s has been renamed to %s (it now selects the contract it configures); "+
+				"set %s instead — leaving %s set would be ignored, and its replacement's silent default "+
+				"would send documents to non-durable in-process storage", old, replacement, replacement, old)
+		}
+	}
+	return nil
+}
+
 func parseBlobStore(v string) (BlobStoreMode, error) {
 	switch BlobStoreMode(v) {
 	case BlobStoreInline, BlobStoreFileService:
@@ -679,7 +718,7 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 		// bring the service up healthy, serving normally, and losing every document
 		// on the next restart — exactly the silent default FR-022d forbids. The
 		// error names the supported values so the fix travels with the message.
-		return "", fmt.Errorf("BLOB_STORE must be one of inline, file-service (got %q); inline is the non-durable in-process store used by tests and local development, file-service is the durable one", v)
+		return "", fmt.Errorf("CHECKPOINT_STORE must be one of inline, file-service (got %q); inline is the non-durable in-process store used by tests and local development, file-service is the durable one", v)
 	}
 }
 

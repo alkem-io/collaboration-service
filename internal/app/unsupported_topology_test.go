@@ -40,11 +40,11 @@ func TestUnsupportedTopologyIsWarnedBeforeServing(t *testing.T) {
 		t.Fatalf("logged at %v; must be WARN or above or it is lost in startup noise", e.Level)
 	}
 	fields := e.ContextMap()
-	if _, ok := fields["FANOUT_MODE"]; !ok {
-		t.Fatalf("the warning does not name FANOUT_MODE; an operator cannot tell which setting to change. fields: %v", fields)
+	if _, ok := fields["HUB_MODE"]; !ok {
+		t.Fatalf("the warning does not name HUB_MODE; an operator cannot tell which setting to change. fields: %v", fields)
 	}
-	if _, ok := fields["BLOB_STORE"]; !ok {
-		t.Fatalf("the warning does not name BLOB_STORE. fields: %v", fields)
+	if _, ok := fields["CHECKPOINT_STORE"]; !ok {
+		t.Fatalf("the warning does not name CHECKPOINT_STORE. fields: %v", fields)
 	}
 	if s, _ := fields["supported"].(string); !strings.Contains(s, "inmemory") {
 		t.Fatalf("the warning does not say what to run instead: %v", fields["supported"])
