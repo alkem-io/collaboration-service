@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS collaboration_metadata (
     content_type            TEXT        NOT NULL,
     version                 INTEGER     NOT NULL DEFAULT 0,
     content_pointer         TEXT        NOT NULL DEFAULT '',
-    checkpoint_store              TEXT        NOT NULL DEFAULT 'inline',
+    checkpoint_store        TEXT        NOT NULL DEFAULT 'inline',
     authorization_policy_id TEXT        NOT NULL DEFAULT '',
     owner_ref               TEXT        NOT NULL DEFAULT '',
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
