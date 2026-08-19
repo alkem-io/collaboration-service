@@ -168,9 +168,6 @@ type Room struct {
 	// durability state machine in flush.go.
 	flushFailures  int
 	undurableSince time.Time
-	// pointerChecked records that we have already looked for a store-assigned
-	// content pointer after the first save.
-	pointerChecked bool
 	// seededPending is true when the room materialized from the first-open seed
 	// (Metadata.SeedContent) and that seed has not yet been promoted to a real
 	// per-document snapshot. The run loop arms the save debounce once at start so
@@ -1663,14 +1660,24 @@ func (r *Room) persist(ctx context.Context) {
 		return
 	}
 
-	// First save only: a store that addresses content by pointer (file-service)
-	// created the document's file and recorded its pointer, so refresh the cached
-	// row to pick it up. The pointer is stable thereafter. The flag makes this cost
-	// one extra read per document LIFETIME rather than per flush — without it a
-	// store that keeps no pointer at all (the in-process one) would re-read on
-	// every single save, forever, and never find one.
-	if !r.pointerChecked {
-		r.pointerChecked = true
+	// Refresh the STORE-OWNED pointer before writing the row.
+	//
+	// ContentPointer belongs to the checkpoint store: it creates the file and
+	// records the id (metapointer.Record). Everything else on the row belongs to
+	// the room. But Metadata.Save writes a WHOLE row, so a stale cached pointer
+	// here silently overwrites one the store just recorded.
+	//
+	// That is reachable, not theoretical. If the file behind the pointer vanishes
+	// out of band, SaveCheckpoint recreates it under a NEW id and records it —
+	// then this save would put the old id back. The document would resolve to a
+	// file that no longer exists (ErrCorrupt, so it will not even open) while the
+	// file holding its content is orphaned under an id nothing references.
+	//
+	// An earlier version read the row only on the first save of a room's lifetime,
+	// which is exactly the window this misses: recreation happens on a later save.
+	// Gated on the store actually being pointer-addressed, so the in-process path
+	// — which never sets a pointer — pays nothing.
+	if r.blobKind == model.BlobStoreFileService {
 		if meta, lerr := r.deps.Metadata.Load(ctx, r.id); lerr == nil && meta.ContentPointer != "" {
 			r.pointer = meta.ContentPointer
 		}
