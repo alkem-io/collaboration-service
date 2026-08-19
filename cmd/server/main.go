@@ -46,7 +46,7 @@ func run() int {
 	defer application.Close()
 	logger.Info("collaboration core wired",
 		zap.String("fanout", string(cfg.Fanout)),
-		zap.String("metadata_store", string(cfg.MetaStore)),
+		zap.String("metadata_store", string(cfg.MetadataStore)),
 		zap.String("blob_store", string(cfg.BlobStore)),
 		zap.String("auth_mode", string(cfg.AuthMode)),
 		zap.String("authz_mode", string(cfg.AuthZMode)),

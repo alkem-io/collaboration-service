@@ -9,7 +9,7 @@ framework:
   #
   # That default pattern treats any `json.Marshal(x)` anywhere in a handler's call
   # graph as an HTTP response body. The standalone create handler
-  # (POST /collab/{documentId}) calls Manager.PreRegister → the RabbitMQ metastore
+  # (POST /collab/{documentId}) calls Manager.PreRegister → the RabbitMQ metadata store
   # Save → marshalEnvelope, which json.Marshal's the NestJS RPC envelope. apispec
   # was attributing that envelope as a spurious 200 `rabbitmq.envelope` response on
   # the POST, even though the POST actually returns 201 CreateDocumentResponse. The

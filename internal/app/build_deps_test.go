@@ -39,9 +39,9 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 			// Stage 2: the broadcaster is already open and must be closed.
 			name: "metadata after a live broadcaster",
 			cfg: &config.Config{
-				Fanout:    config.FanoutRedis,
-				MetaStore: config.MetaStoreRabbitMQ,
-				RabbitMQ:  config.RabbitMQConfig{URL: "amqp://%zz-invalid", Queue: "q"},
+				Fanout:        config.FanoutRedis,
+				MetadataStore: config.MetadataStoreRabbitMQ,
+				RabbitMQ:      config.RabbitMQConfig{URL: "amqp://%zz-invalid", Queue: "q"},
 			},
 		},
 		{
@@ -49,8 +49,8 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 			// no base URL fails the checkpoint build.
 			name: "checkpoint after a live metadata store",
 			cfg: &config.Config{
-				MetaStore: config.MetaStoreInMemory,
-				BlobStore: config.BlobStoreFileService,
+				MetadataStore: config.MetadataStoreInMemory,
+				BlobStore:     config.BlobStoreFileService,
 			},
 		},
 	} {
@@ -79,10 +79,10 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 // above cannot pass against a buildDeps that never succeeds.
 func TestBuildDepsWiresTheStandaloneDefaults(t *testing.T) {
 	deps, cleanup, err := buildDeps(&config.Config{
-		Fanout:    config.FanoutInMemory,
-		MetaStore: config.MetaStoreInMemory,
-		BlobStore: config.BlobStoreInline,
-		AuthMode:  config.AuthModeOpen,
+		Fanout:        config.FanoutInMemory,
+		MetadataStore: config.MetadataStoreInMemory,
+		BlobStore:     config.BlobStoreInline,
+		AuthMode:      config.AuthModeOpen,
 	}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("buildDeps: %v", err)

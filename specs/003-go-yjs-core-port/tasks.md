@@ -189,7 +189,7 @@ delivery.
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T059 Rename `MetadataStore` to the canonical spelling everywhere — port, config identifiers (`MetaStore*`), and package path `metastore/` → `metadatastore/` (FR-009a, SC-008b)
+- [X] T059 Rename `MetadataStore` to the canonical spelling everywhere — port, config identifiers (`MetadataStore*`), and package path `metastore/` → `metadatastore/` (FR-009a, SC-008b)
 - [ ] T060 Rename the backend-selection configuration keys in `internal/config/config.go` to match the adopted contracts, leaving the metadata key unchanged (FR-022c)
 - [ ] T061 Make a removed or renamed configuration key **fail startup with an error naming its replacement** in `internal/config/config.go` — never silently ignored, because these keys have silent defaults that would send blobs to memory (FR-022d, SC-021)
 - [ ] T062 Coordinate the rename across every consumer: this repo's `.env.example`, `README.md`, `CLAUDE.md`; `deploy/k8s/base/configmap.yaml` on the **unmerged** branch `feat/003-migration`; `server`'s 006 `quickstart-services.yml` (FR-022e)

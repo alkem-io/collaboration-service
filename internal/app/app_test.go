@@ -12,7 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	"github.com/alkem-io/collaboration-service/internal/config"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -22,12 +22,12 @@ import (
 // with the epic R9 limit defaults, the base every error case mutates one field of.
 func standaloneConfig() *config.Config {
 	return &config.Config{
-		Port:      0,
-		Fanout:    config.FanoutInMemory,
-		MetaStore: config.MetaStoreInMemory,
-		BlobStore: config.BlobStoreInline,
-		AuthMode:  config.AuthModeOpen,
-		AuthZMode: config.AuthZModeOpen,
+		Port:          0,
+		Fanout:        config.FanoutInMemory,
+		MetadataStore: config.MetadataStoreInMemory,
+		BlobStore:     config.BlobStoreInline,
+		AuthMode:      config.AuthModeOpen,
+		AuthZMode:     config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -203,7 +203,7 @@ func TestBuildDepsStandaloneSucceeds(t *testing.T) {
 // fix.
 func TestLifecycleQueueIsDistinctFromMetastoreQueue(t *testing.T) {
 	cfg := &config.Config{
-		MetaStore: config.MetaStoreRabbitMQ,
+		MetadataStore: config.MetadataStoreRabbitMQ,
 		RabbitMQ: config.RabbitMQConfig{
 			Queue:          "alkemio-collaboration",
 			LifecycleQueue: "alkemio-collaboration-lifecycle",

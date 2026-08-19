@@ -29,17 +29,17 @@ const (
 	FanoutRedis FanoutMode = "redis"
 )
 
-// MetaStoreMode selects the MetadataStore adapter.
-type MetaStoreMode string
+// MetadataStoreMode selects the MetadataStore adapter.
+type MetadataStoreMode string
 
 const (
-	// MetaStoreInMemory keeps the document index in-process — the zero-dependency
+	// MetadataStoreInMemory keeps the document index in-process — the zero-dependency
 	// standalone default (boots with no bus or DB, SC-012).
-	MetaStoreInMemory MetaStoreMode = "inmemory"
-	// MetaStoreRabbitMQ rides the existing server save/fetch bus (Alkemio).
-	MetaStoreRabbitMQ MetaStoreMode = "rabbitmq"
-	// MetaStorePostgres persists the index in Postgres (standalone).
-	MetaStorePostgres MetaStoreMode = "postgres"
+	MetadataStoreInMemory MetadataStoreMode = "inmemory"
+	// MetadataStoreRabbitMQ rides the existing server save/fetch bus (Alkemio).
+	MetadataStoreRabbitMQ MetadataStoreMode = "rabbitmq"
+	// MetadataStorePostgres persists the index in Postgres (standalone).
+	MetadataStorePostgres MetadataStoreMode = "postgres"
 )
 
 // BlobStoreMode selects the BlobStore adapter.
@@ -96,8 +96,8 @@ type Config struct {
 	Port int
 	// Fanout selects the cross-pod broadcaster (inmemory default).
 	Fanout FanoutMode
-	// MetaStore selects the metadata/index adapter (rabbitmq default).
-	MetaStore MetaStoreMode
+	// MetadataStore selects the metadata/index adapter (rabbitmq default).
+	MetadataStore MetadataStoreMode
 	// BlobStore selects the snapshot blob adapter (inline default).
 	BlobStore BlobStoreMode
 	// AuthMode selects the handshake-AuthN adapter (open default for standalone).
@@ -286,7 +286,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	metaStore, err := parseMetaStore(getenv("METADATA_STORE", string(MetaStoreInMemory)))
+	metaStore, err := parseMetaStore(getenv("METADATA_STORE", string(MetadataStoreInMemory)))
 	if err != nil {
 		return nil, err
 	}
@@ -308,12 +308,12 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:      port,
-		Fanout:    fanout,
-		MetaStore: metaStore,
-		BlobStore: blobStore,
-		AuthMode:  authMode,
-		AuthZMode: authZMode,
+		Port:          port,
+		Fanout:        fanout,
+		MetadataStore: metaStore,
+		BlobStore:     blobStore,
+		AuthMode:      authMode,
+		AuthZMode:     authZMode,
 		Auth: AuthConfig{
 			TokenHeader: getenv("AUTH_TOKEN_HEADER", DefaultAuthTokenHeader),
 		},
@@ -425,8 +425,8 @@ func loadFanoutConfig(cfg *Config) error {
 }
 
 func loadMetaStoreConfig(cfg *Config) error {
-	switch cfg.MetaStore {
-	case MetaStoreRabbitMQ:
+	switch cfg.MetadataStore {
+	case MetadataStoreRabbitMQ:
 		cfg.RabbitMQ.URL = rabbitURL()
 		cfg.RabbitMQ.Queue = getenv("RABBITMQ_QUEUE", "")
 		if cfg.RabbitMQ.Queue == "" {
@@ -440,7 +440,7 @@ func loadMetaStoreConfig(cfg *Config) error {
 		if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
 			return fmt.Errorf("LIFECYCLE_QUEUE must differ from RABBITMQ_QUEUE (%q) — a shared queue round-robin-steals metastore RPCs", cfg.RabbitMQ.Queue)
 		}
-	case MetaStorePostgres:
+	case MetadataStorePostgres:
 		cfg.Postgres.DSN = postgresDSN()
 		if cfg.Postgres.DSN == "" {
 			return fmt.Errorf("METADATA_STORE=postgres requires ALKEMIO_DATABASE_* (host/name/user)")
@@ -660,10 +660,10 @@ func parseFanout(v string) (FanoutMode, error) {
 	}
 }
 
-func parseMetaStore(v string) (MetaStoreMode, error) {
-	switch MetaStoreMode(v) {
-	case MetaStoreInMemory, MetaStoreRabbitMQ, MetaStorePostgres:
-		return MetaStoreMode(v), nil
+func parseMetaStore(v string) (MetadataStoreMode, error) {
+	switch MetadataStoreMode(v) {
+	case MetadataStoreInMemory, MetadataStoreRabbitMQ, MetadataStorePostgres:
+		return MetadataStoreMode(v), nil
 	default:
 		return "", fmt.Errorf("METADATA_STORE must be one of inmemory, rabbitmq, postgres (got %q)", v)
 	}

@@ -30,9 +30,9 @@ import (
 	authoidc "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/oidc"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	hubredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/hub/redis"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
-	metapostgres "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/postgres"
-	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/rabbitmq"
+	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
+	metapostgres "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/postgres"
+	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/rabbitmq"
 	persistfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/fileservice"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/metapointer"
@@ -198,8 +198,8 @@ func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hu
 // the Contributor that publishes the north-star contribution event over the same
 // bus (T013). A nil Contributor (standalone) defaults to a domain no-op.
 func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, port.Contributor, error) {
-	switch cfg.MetaStore {
-	case config.MetaStoreRabbitMQ:
+	switch cfg.MetadataStore {
+	case config.MetadataStoreRabbitMQ:
 		client, store, err := metarabbitmq.Connect(metarabbitmq.Config{
 			URL: cfg.RabbitMQ.URL, Queue: cfg.RabbitMQ.Queue,
 		})
@@ -210,7 +210,7 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 		// The rabbitmq store also satisfies port.Contributor (collaboration-
 		// contribution event), so analytics ride the same bus.
 		return store, store, nil
-	case config.MetaStorePostgres:
+	case config.MetadataStorePostgres:
 		if err := metapostgres.Migrate(cfg.Postgres.DSN); err != nil {
 			return nil, nil, fmt.Errorf("postgres migrate: %w", err)
 		}
@@ -238,7 +238,7 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 // fraction of collaboration-fetch/-save RPCs and drop them — memo joins then time
 // out. The two consumers must never share a queue.
 func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Logger, closers *[]func()) error {
-	if cfg.MetaStore != config.MetaStoreRabbitMQ {
+	if cfg.MetadataStore != config.MetadataStoreRabbitMQ {
 		return nil
 	}
 	queue := lifecycleQueue(cfg)
@@ -445,7 +445,7 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 	// adapter fails closed on an empty policy). Require it at the handler so such a
 	// document is never persisted; in open AuthZ everything is granted, so the
 	// policy id is optional.
-	if cfg.MetaStore != config.MetaStoreRabbitMQ {
+	if cfg.MetadataStore != config.MetadataStoreRabbitMQ {
 		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{
 			Lifecycle:                  manager,
 			RequireAuthorizationPolicy: cfg.AuthZMode == config.AuthZModeEval,

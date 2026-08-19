@@ -359,13 +359,13 @@ serving unbacked state.
 
 **Decision**: `MetadataStore` is **not** superseded by `persistence.Store`. It is
 retained, and `MetadataStore` becomes the single canonical name — port, config
-identifiers, and package path alike (`MetaStore*` → `MetadataStore*`,
+identifiers, and package path alike (`MetadataStore*` → `MetadataStore*`,
 `metastore/` → `metadatastore/`).
 
 **Rationale**: the index carries content type, authorization policy id, owner ref, and
 storage bucket — none of which a contract "expressed only in bytes and revisions"
 models or should. Three names for one concept (port `MetadataStore`, config
-`MetaStoreMode`, package `metastore/`) is the permanent translation surface §VIII
+`MetadataStoreMode`, package `metastore/`) is the permanent translation surface §VIII
 forbids; `config.go` already has to translate between them in a comment, which is the
 tell.
 

@@ -50,7 +50,7 @@
 
 - **Backend-unavailable behaviour** — ✅ a transient durable-write failure is *not* divergence. Keep serving, retry with backoff, escalate to invalidate + disconnect after a bounded, configurable number of consecutive failures. FR-013 rewritten; three edge cases replace the single blunt one.
 - **Standalone** — ✅ withdrawn as a product configuration; retained only as an in-process test capability. User Story 4 deleted (stories renumbered 1–5), FR-021/SC-009 rewritten, new Non-Goal added. Requires — and received — a §III amendment.
-- **`MetadataStore` naming** — ✅ canonical everywhere; `MetaStore*` identifiers and the `metastore/` package path are renamed (FR-009a, SC-008b).
+- **`MetadataStore` naming** — ✅ canonical everywhere; `MetadataStore*` identifiers and the `metastore/` package path are renamed (FR-009a, SC-008b).
 
 **Resolved in Session 2026-08-18 (second `/speckit-clarify` pass):**
 

@@ -7,7 +7,7 @@ import (
 
 	"github.com/antst/go-yjs/backend"
 
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
+	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	fsstore "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/fileservice"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )

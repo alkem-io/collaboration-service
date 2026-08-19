@@ -38,8 +38,8 @@ func TestBuildMetadataSurfacesBackendMisconfiguration(t *testing.T) {
 	t.Run("rabbitmq", func(t *testing.T) {
 		var closers []func()
 		cfg := &config.Config{
-			MetaStore: config.MetaStoreRabbitMQ,
-			RabbitMQ:  config.RabbitMQConfig{URL: "amqp://%zz-invalid", Queue: "q"},
+			MetadataStore: config.MetadataStoreRabbitMQ,
+			RabbitMQ:      config.RabbitMQConfig{URL: "amqp://%zz-invalid", Queue: "q"},
 		}
 		if _, _, err := buildMetadata(cfg, &closers); err == nil {
 			t.Fatal("an unusable RABBITMQ_URL must fail startup")
@@ -52,8 +52,8 @@ func TestBuildMetadataSurfacesBackendMisconfiguration(t *testing.T) {
 	t.Run("postgres", func(t *testing.T) {
 		var closers []func()
 		cfg := &config.Config{
-			MetaStore: config.MetaStorePostgres,
-			Postgres:  config.PostgresConfig{DSN: "postgres://\x00bad"},
+			MetadataStore: config.MetadataStorePostgres,
+			Postgres:      config.PostgresConfig{DSN: "postgres://\x00bad"},
 		}
 		if _, _, err := buildMetadata(cfg, &closers); err == nil {
 			t.Fatal("an unusable Postgres DSN must fail startup")
@@ -65,7 +65,7 @@ func TestBuildMetadataSurfacesBackendMisconfiguration(t *testing.T) {
 // no-op Contributor, which the domain relies on being non-nil.
 func TestBuildMetadataDefaultsToInMemory(t *testing.T) {
 	var closers []func()
-	store, contributor, err := buildMetadata(&config.Config{MetaStore: config.MetaStoreInMemory}, &closers)
+	store, contributor, err := buildMetadata(&config.Config{MetadataStore: config.MetadataStoreInMemory}, &closers)
 	if err != nil {
 		t.Fatalf("in-memory metadata store: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestStartLifecycleIsSkippedOffTheBus(t *testing.T) {
 	var closers []func()
 	mgr := service.NewManager(service.Deps{}, service.RoomConfig{}, nil, zap.NewNop())
 
-	for _, mode := range []config.MetaStoreMode{config.MetaStoreInMemory, config.MetaStorePostgres} {
-		if err := startLifecycle(&config.Config{MetaStore: mode}, mgr, zap.NewNop(), &closers); err != nil {
+	for _, mode := range []config.MetadataStoreMode{config.MetadataStoreInMemory, config.MetadataStorePostgres} {
+		if err := startLifecycle(&config.Config{MetadataStore: mode}, mgr, zap.NewNop(), &closers); err != nil {
 			t.Fatalf("startLifecycle(%v) must be a no-op off the bus: %v", mode, err)
 		}
 	}
@@ -99,8 +99,8 @@ func TestStartLifecycleSurfacesABrokerFailure(t *testing.T) {
 	var closers []func()
 	mgr := service.NewManager(service.Deps{}, service.RoomConfig{}, nil, zap.NewNop())
 	cfg := &config.Config{
-		MetaStore: config.MetaStoreRabbitMQ,
-		RabbitMQ:  config.RabbitMQConfig{URL: "amqp://%zz-invalid", LifecycleQueue: "lifecycle-q"},
+		MetadataStore: config.MetadataStoreRabbitMQ,
+		RabbitMQ:      config.RabbitMQConfig{URL: "amqp://%zz-invalid", LifecycleQueue: "lifecycle-q"},
 	}
 
 	err := startLifecycle(cfg, mgr, zap.NewNop(), &closers)

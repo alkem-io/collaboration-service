@@ -71,12 +71,12 @@ func testAppHTTP(t *testing.T, cfg *config.Config) string {
 // are exercised by the unit suite.
 func standaloneConfig() *config.Config {
 	return &config.Config{
-		Port:      0,
-		Fanout:    config.FanoutInMemory,
-		MetaStore: config.MetaStoreInMemory,
-		BlobStore: config.BlobStoreInline,
-		AuthMode:  config.AuthModeOpen,
-		AuthZMode: config.AuthZModeOpen,
+		Port:          0,
+		Fanout:        config.FanoutInMemory,
+		MetadataStore: config.MetadataStoreInMemory,
+		BlobStore:     config.BlobStoreInline,
+		AuthMode:      config.AuthModeOpen,
+		AuthZMode:     config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
 			MaxDocBytes:                   32 << 20,
 			MaxConnsPerRoom:               50,

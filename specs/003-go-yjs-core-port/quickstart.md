@@ -202,7 +202,7 @@ coordination set (FR-022e) — this repo, the manifests on `feat/003-migration`,
 ```bash
 grep -rn "y-crdt" --include="*.go" .        # expect: no hits
 go list -m all | grep -i "y-crdt"           # expect: no hits
-grep -rn "MetaStore" --include="*.go" .     # expect: no hits (FR-009a)
+grep -rn "MetadataStore" --include="*.go" .     # expect: no hits (FR-009a)
 ```
 
 **Expected** (SC-008, SC-008a, SC-008b): zero references to the previous core; zero

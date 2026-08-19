@@ -51,12 +51,12 @@ func TestNewPostgresRoundTrip(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Port:      0,
-		Fanout:    config.FanoutInMemory,
-		MetaStore: config.MetaStorePostgres,
-		BlobStore: config.BlobStoreInline,
-		AuthMode:  config.AuthModeOpen,
-		Postgres:  config.PostgresConfig{DSN: dsn},
+		Port:          0,
+		Fanout:        config.FanoutInMemory,
+		MetadataStore: config.MetadataStorePostgres,
+		BlobStore:     config.BlobStoreInline,
+		AuthMode:      config.AuthModeOpen,
+		Postgres:      config.PostgresConfig{DSN: dsn},
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
@@ -104,11 +104,11 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Port:      0,
-		Fanout:    config.FanoutInMemory,
-		MetaStore: config.MetaStoreRabbitMQ,
-		BlobStore: config.BlobStoreInline,
-		AuthMode:  config.AuthModeOpen,
+		Port:          0,
+		Fanout:        config.FanoutInMemory,
+		MetadataStore: config.MetadataStoreRabbitMQ,
+		BlobStore:     config.BlobStoreInline,
+		AuthMode:      config.AuthModeOpen,
 		// Per-run unique queues so concurrent/previous runs cannot leak state. The
 		// lifecycle consumer binds its OWN queue, distinct from the metastore RPC
 		// queue (a shared queue round-robin-steals fetch/save RPCs).

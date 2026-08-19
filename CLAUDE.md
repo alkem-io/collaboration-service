@@ -51,7 +51,7 @@ ports. Adapters implement them:
   core's shipped `hub.NewInProcess()`, used directly rather than re-implemented.
   **Multi-pod with a durable store is unsupported**: no ownership mechanism, so
   two pods flushing the same document overwrite each other (startup warns).
-- `metastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
+- `metadatastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
 
