@@ -329,7 +329,7 @@ func TestAuthZEvalRequiresServiceURL(t *testing.T) {
 }
 
 func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
-	t.Setenv("AUTH_MODE", "authzeval")
+	t.Setenv("AUTH_MODE", "header")
 	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
 	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
 	cfg, err := Load()
@@ -519,28 +519,6 @@ func TestAuthZModeOverrideIndependentOfAuthN(t *testing.T) {
 	}
 	if cfg.AuthMode != AuthModeOIDC || cfg.AuthZMode != AuthZModeOpen {
 		t.Errorf("AuthMode/AuthZMode = %q/%q, want oidc/open", cfg.AuthMode, cfg.AuthZMode)
-	}
-}
-
-// TestLegacyAuthZEvalAliasMapsToHeaderPlusEval asserts the retired
-// AUTH_MODE=authzeval value is accepted as a backward-compat alias for
-// header AuthN + authzeval AuthZ (OPEN-5) — so existing deployments are
-// unchanged.
-func TestLegacyAuthZEvalAliasMapsToHeaderPlusEval(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "authzeval")
-	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
-	t.Setenv("AUTHZ_MODE", "")
-	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.AuthMode != AuthModeHeader {
-		t.Errorf("legacy authzeval alias AuthMode = %q, want header", cfg.AuthMode)
-	}
-	if cfg.AuthZMode != AuthZModeEval {
-		t.Errorf("legacy authzeval alias AuthZMode = %q, want authzeval", cfg.AuthZMode)
 	}
 }
 

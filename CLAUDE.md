@@ -78,8 +78,7 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 - `HUB_MODE` — `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is unsupported)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
 - `CHECKPOINT_STORE` — `inline` | `file-service`
-- `AUTH_MODE` — `header` | `oidc` | `open` (`authzeval` is a retired alias for
-  `header` + `AUTHZ_MODE=authzeval`). In `header` mode the actor id is read from
+- `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
   `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
   client-controllable `Authorization` default is rejected at startup.
 - `AUTHZ_MODE` — `authzeval` | `open` (derived from `AUTH_MODE` when unset)

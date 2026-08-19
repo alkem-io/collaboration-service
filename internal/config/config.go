@@ -68,12 +68,6 @@ const (
 	// AuthModeOpen authenticates everyone anonymously — the zero-dependency
 	// standalone default.
 	AuthModeOpen AuthMode = "open"
-
-	// authModeLegacyAuthZEval is the RETIRED AUTH_MODE value, accepted as a
-	// backward-compat alias for header AuthN + authzeval AuthZ (OPEN-5) so
-	// existing deployments are unchanged. It is not a distinct mode — Load maps
-	// it to AuthModeHeader + AuthZModeEval.
-	authModeLegacyAuthZEval AuthMode = "authzeval"
 )
 
 // AuthZMode selects the per-document-AuthZ adapter, independently of AuthN
@@ -692,19 +686,10 @@ func parseBlobStore(v string) (BlobStoreMode, error) {
 //     header/oidc→authzeval.
 //   - An explicit AUTHZ_MODE always wins (AuthN and AuthZ select independently).
 func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
-	var (
-		authN      AuthMode
-		aliasAuthZ AuthZMode // forced AuthZ from the legacy alias, if any
-	)
+	var authN AuthMode
 	switch AuthMode(authRaw) {
 	case AuthModeHeader, AuthModeOIDC, AuthModeOpen:
 		authN = AuthMode(authRaw)
-	case authModeLegacyAuthZEval:
-		// Legacy alias: header AuthN + authzeval AuthZ. The alias forces authzeval
-		// AuthZ regardless of AUTHZ_MODE being unset (preserving the prior single
-		// AUTH_MODE=authzeval behaviour exactly).
-		authN = AuthModeHeader
-		aliasAuthZ = AuthZModeEval
 	default:
 		return "", "", fmt.Errorf("AUTH_MODE must be one of header, oidc, open (got %q)", authRaw)
 	}
@@ -717,9 +702,6 @@ func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
 		default:
 			return "", "", fmt.Errorf("AUTHZ_MODE must be one of authzeval, open (got %q)", authZRaw)
 		}
-	}
-	if aliasAuthZ != "" {
-		return authN, aliasAuthZ, nil
 	}
 	return authN, deriveAuthZMode(authN), nil
 }
