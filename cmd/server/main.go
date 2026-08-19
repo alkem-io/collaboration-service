@@ -47,7 +47,7 @@ func run() int {
 	logger.Info("collaboration core wired",
 		zap.String("fanout", string(cfg.HubMode)),
 		zap.String("metadata_store", string(cfg.MetadataStore)),
-		zap.String("blob_store", string(cfg.CheckpointStore)),
+		zap.String("checkpoint_store", string(cfg.CheckpointStore)),
 		zap.String("auth_mode", string(cfg.AuthMode)),
 		zap.String("authz_mode", string(cfg.AuthZMode)),
 	)

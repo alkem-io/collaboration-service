@@ -23,7 +23,7 @@ Verified end to end, not by inspection:
 ```
 $ env -i PATH=... PORT=4106 ./collab        # no DB, bus, blob store, or auth service
 {"msg":"collaboration core wired","fanout":"inmemory","metadata_store":"inmemory",
- "blob_store":"inline","auth_mode":"open","authz_mode":"open"}
+ "checkpoint_store":"inline","auth_mode":"open","authz_mode":"open"}
 ```
 
 Two REAL yjs clients (the `y-protocols` interop harness, not a Go stand-in) then
@@ -53,4 +53,4 @@ It is not a deployment option and must never be presented as one. The in-process
 store carries **no durability guarantee across a restart** — its package
 documentation says so, and `CHECKPOINT_STORE=inline` is documented in `.env.example` as
 the non-durable test/development value. The startup log naming
-`blob_store=inline` is the operator-visible signal that a process is running on it.
+`checkpoint_store=inline` is the operator-visible signal that a process is running on it.

@@ -49,7 +49,7 @@ Request `data`:
   "contentType": "memo" | "whiteboard",
   "version": 4,                   // bumped per persisted snapshot
   "contentPointer": "<locator>", // inline row key | file-service UUID
-  "blobStore": "inline" | "file-service",
+  "checkpointStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>", // OPEN-1; may be "" in open/standalone
   "ownerRef": "<parent entity id>"   // delete-cascade key (FR-023); optional
 }
@@ -57,8 +57,8 @@ Request `data`:
 
 Reply: `{ "success": true }` or `{ "success": false, "error": "<reason>" }`.
 
-> **`server` must persist `contentPointer` + `blobStore`** so a fetch returns
-> them — the collab service rehydrates the snapshot from `blobStore` using
+> **`server` must persist `contentPointer` + `checkpointStore`** so a fetch returns
+> them — the collab service rehydrates the snapshot from `checkpointStore` using
 > `contentPointer`, regardless of the collab service's running `CHECKPOINT_STORE`
 > config.
 
@@ -79,7 +79,7 @@ Reply:
   "contentType": "memo" | "whiteboard",
   "version": 4,
   "contentPointer": "<locator>",
-  "blobStore": "inline" | "file-service",
+  "checkpointStore": "inline" | "file-service",
   "authorizationPolicyId": "<uuid>",
   "storageBucketId": "<uuid>",        // the document's OWN storage bucket; snapshots persist into it (per-doc bucket)
   "content": "<base64 Yjs-V2 state>", // FIRST-OPEN SEED (006-collab-content-unification): present ONLY when the
