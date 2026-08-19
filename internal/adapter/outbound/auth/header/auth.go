@@ -4,9 +4,8 @@
 // → server /rest/internal/forward-auth) already authenticated the request and
 // resolved the actor id, exactly as file-service's ActorHeaderExtractor does.
 //
-// This is the Wave-2 authzeval.Authenticate behaviour, lifted into a named adapter
-// (Wave 5, T018.2) so handshake-AuthN is selected independently of per-document
-// AuthZ. There is NO behavioural change to the gateway-terminated path (SC-014):
+// It is a separate adapter from authzeval so handshake-AuthN is selected
+// independently of per-document AuthZ (SC-014):
 // a non-empty header is the upstream-authenticated actor id; a missing/empty header
 // means the gateway did not run and is rejected (401) — never downgraded to
 // anonymous (constitution §V).

@@ -157,35 +157,33 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 ## Phase 6 — Dual-adapter handshake AuthN (option (c)) — ⏳ FORWARD (spec/design only this pass)
 
 > **Decision recorded (antst, Session 2026-06-20):** collab handshake-AuthN supports
-> **BOTH** `header` (option (a), gateway-terminated — the Wave-2 behaviour, renamed)
+> **BOTH** `header` (option (a), gateway-terminated)
 > and a new `oidc` (option (b), direct credential validation), config-selectable,
-> with AuthZ unchanged. Realizes FR-021–FR-023; mirrors server
+> with AuthZ independently selected. Realizes FR-021–FR-023; mirrors server
 > `forward-auth.controller.ts`. **This SpecKit pass writes the spec/plan/tasks ONLY
 > — every T018 sub-task below is `[ ]` (unimplemented). Implementation begins after
 > `/analyze` is clean.** Build TDD on `feat/oidc-dual-auth` (off `feat/003-open1-reason`).
 > **OPEN-5/6/7 are ✅ DECIDED (antst, 2026-06-20)** — no open questions remain; the
 > credential-validating sub-tasks (T018.4/T018.5) build to the locked decisions
-> (`AUTH_MODE`/`AUTHZ_MODE` split; named-anonymous guest; BOTH cookie+bearer with
+> (independent `AUTH_MODE`/`AUTHZ_MODE`; named-anonymous guest; BOTH cookie+bearer with
 > `SESSION_REDIS_URL` defaulting to `REDIS_URL`, mirrored JWKS env names, no
 > `?access_token=` query fallback).
 
-### T018 — `header`/`oidc`/`open` AuthN split + direct-OIDC adapter (FR-021/FR-022/FR-023) — `internal/adapter/outbound/auth/`, `internal/config/`, `internal/adapter/inbound/ws/`
+### T018 — `header`/`oidc`/`open` AuthN + direct-OIDC adapter (FR-021/FR-022/FR-023) — `internal/adapter/outbound/auth/`, `internal/config/`, `internal/adapter/inbound/ws/`
 
-- [X] **T018.1** [W5] Config split (`internal/config/config.go`):
-  split `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) from a new `AUTHZ_MODE`
+- [X] **T018.1** [W5] AuthN/AuthZ configuration (`internal/config/config.go`):
+  `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) and `AUTHZ_MODE`
   (`authzeval`|`open`); derive `AUTHZ_MODE` from `AUTH_MODE` when unset
-  (`open`→`open`; `header`/`oidc`→`authzeval`); accept the retired
-  the transitional `AUTH_MODE=authzeval` bundle was later REMOVED; fail-fast
-  validate each enum and the `oidc`/`authzeval` required settings (OPEN-5). Tests:
-  `config_test.go` cases for the new enums, the alias, the derivation, and
+  (`open`→`open`; `header`/`oidc`→`authzeval`); fail-fast validate each enum and
+  the `oidc`/`authzeval` required settings (OPEN-5). Tests: `config_test.go` cases
+  for the enums, the derivation, and
   fail-fast on bad/missing required config. **Tests first.**
-- [X] **T018.2** [W5] Extract the `header` AuthN adapter
-  (`internal/adapter/outbound/auth/header/auth.go`) from the Wave-2
-  `authzeval.Authenticate` (`model.Identity{ActorID: <gateway header value>}`,
-  401/error on empty); leave `authzeval` as the AuthZ-only adapter. **No behaviour
-  change to the gateway-terminated path** (SC-014). Tests: `header/auth_test.go`
-  (non-empty header → actor id; empty → error), and the existing authzeval AuthZ
-  tests stay green. **Tests first.**
+- [X] **T018.2** [W5] Implement the `header` AuthN adapter
+  (`internal/adapter/outbound/auth/header/auth.go`): trust the gateway-stamped
+  actor id (`model.Identity{ActorID: <gateway header value>}`, 401/error on
+  empty). `authzeval` is the AuthZ-only adapter (SC-014). Tests: `header/auth_test.go`
+  (non-empty header → actor id; empty → error), and the authzeval AuthZ tests
+  stay green. **Tests first.**
 - [X] **T018.3** [W5] Generalize the WS-handshake credential read
   (`internal/adapter/inbound/ws/handler.go` + a domain `model.HandshakeCredentials`
   value object): the WS adapter populates `{CookieSID, BearerToken, GuestName}` from
@@ -234,8 +232,9 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
   and a valid bearer each authenticate end-to-end over the WS handshake, a
   tombstoned/expired session and a forged bearer are 401'd, and a no-credential
   handshake resolves to the anonymous sentinel (read of a public-read doc succeeds);
-  assert `header` mode is byte-for-byte the prior gateway-terminated behaviour
-  (SC-013/SC-014). Keep the ≥95% combined coverage gate green.
+  assert `header` mode resolves the actor from a valid stamped header, rejects an
+  absent or empty one, and leaves the AuthZ selection independent (SC-013/SC-014).
+  Keep the ≥95% combined coverage gate green.
 
 ---
 
@@ -246,9 +245,9 @@ delete-cascade (T015), standalone HTTP API (T016), two-pod e2e + gate (T017).
 - **Wave 3 (T013–T016)** — DONE. T014 (per-doc authZ) built on T006 (authzeval); T013/T015/T016 on Wave-1 lifecycle; **OPEN-4 resolved** (epic R9 defaults + Prom gauge *and* RMQ contribution event).
 - **Wave 4 (T017)** — DONE. Depends on all prior waves; T017.2 needs T004; T017.3 needs T005.3; T017.4 needs T006/T014. The e2e suite boots through `internal/app` (the composition root extracted from `cmd/server`), so it exercises real adapter selection, not a copy.
 - **Wave 5 (T018)** — **FORWARD, spec/design only this pass (all sub-tasks `[ ]`).**
-  Depends on Wave-2 `authzeval` (T018.2 extracts the `header` AuthN from it; T018.7
+  Depends on `authzeval` (T018.2 implements the `header` AuthN adapter; T018.7
   selects `authzeval` AuthZ independently) and the Wave-1 `Auth` port + WS handshake
-  (T018.3). Sub-task order: T018.1 (config) → T018.2/T018.3 (header extract + handshake
+  (T018.3). Sub-task order: T018.1 (config) → T018.2/T018.3 (header adapter + handshake
   read, parallel) → T018.4/T018.5 (cookie + bearer paths, parallel) → T018.6
   (priority + sentinel) → T018.7 (wiring) → T018.8 (e2e). **OPEN-5/6/7 are DECIDED**
   — no clarification gate remains; sub-tasks build to the locked decisions.

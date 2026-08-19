@@ -88,12 +88,12 @@ bookkeeping projection (`model/room.go`).
 
 #### AuthN mode + credential resolution (Wave 5 — config-driven adapter selection)
 
-The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized by a
+The `Auth` port (`Authenticate(ctx, credential) → Identity`) is realized by a
 **config-selected** adapter; AuthZ (the `AuthZ` port) is selected **independently**.
 
 | AuthN mode (`AUTH_MODE`) | Adapter | How `Identity.ActorID` is resolved | 401 condition |
 |---|---|---|---|
-| `header` *(Alkemio default; option (a))* | `header` (the Wave-2 header-trusting `Authenticate`, renamed) | **Trust** the actor id in the gateway-stamped header (`AUTH_TOKEN_HEADER`, e.g. `X-Alkemio-Actor-Id`); the gateway already validated the credential | header missing/empty (gateway didn't run) |
+| `header` *(Alkemio default; option (a))* | `header` (header-trusting `Authenticate`) | **Trust** the actor id in the gateway-stamped header (`AUTH_TOKEN_HEADER`, e.g. `X-Alkemio-Actor-Id`); the gateway already validated the credential | header missing/empty (gateway didn't run) |
 | `oidc` *(new; option (b))* | `oidc` (direct validation) | **Validate the credential itself** — see the credential table below | a *presented* credential is invalid (bad sig / expired / tombstoned / missing claim); **missing** credential → anonymous sentinel, not 401 |
 | `open` *(standalone default)* | `open` | empty actor id (everyone anonymous) | never |
 
@@ -122,12 +122,6 @@ The `Auth` port (`Authenticate(ctx, credential) → Identity`) is now realized b
   Redis-unreachable on a cookie-bearing handshake → reject (503-equivalent), never a
   silent anonymous downgrade. The bearer is read **only** from `Authorization:` (the
   `?access_token=` query fallback is DROPPED, OPEN-7).
-- **No compatibility alias.** A single `AUTH_MODE=authzeval` value that bundled
-  AuthN and AuthZ existed transiently during the Wave-5 split and was removed
-  before this service shipped anything: with no deployments in existence there was
-  nothing to keep unchanged, and the alias was a second way to express what
-  `AUTH_MODE=header` + `AUTHZ_MODE=authzeval` already says. The retired value is
-  rejected at startup by the ordinary unknown-value path.
 
 ### Awareness / Presence (ephemeral) — `model.{Awareness,CollaboratorMode}` (`model/room.go`)
 Per-participant: `ClientID` (y awareness client id), `ActorID`, `Mode`

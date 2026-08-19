@@ -58,8 +58,7 @@ type AuthMode string
 
 const (
 	// AuthModeHeader trusts the actor id stamped in the gateway header
-	// (option (a), gateway-terminated; the Alkemio prod default). This is the
-	// renamed pre-Wave-5 gateway-terminated path — no behavioural change.
+	// (option (a), gateway-terminated; the Alkemio prod default).
 	AuthModeHeader AuthMode = "header"
 	// AuthModeOIDC validates the handshake credential itself (option (b),
 	// direct OIDC validation: BFF cookie session via Redis + Hydra RS256 bearer
@@ -443,8 +442,8 @@ func loadMetadataStoreConfig(cfg *Config) error {
 }
 
 func loadCheckpointStoreConfig(cfg *Config) error {
-	// Only file-service carries adapter settings: `inline` (the in-process store)
-	// has none, and the retired values were already rejected by parseCheckpointStore.
+	// Only file-service carries adapter settings; `inline` (the in-process store)
+	// has none.
 	if cfg.CheckpointStore != CheckpointStoreFileService {
 		return nil
 	}
@@ -676,7 +675,7 @@ func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
 		// MANDATORY, with no default, because the only safe default does not exist.
 		//
 		// Defaulting to inline means a deployment that omits the key — or sets a
-		// RENAMED one, which is the same thing to os.Getenv — boots healthy on the
+		// different one, which is the same thing to os.Getenv — boots healthy on the
 		// non-durable in-process store and loses every document on restart. That is
 		// silent data loss, and the omission is invisible: nothing in the logs
 		// distinguishes "chose inline" from "never said". Defaulting to file-service
@@ -698,7 +697,7 @@ func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
 }
 
 // parseAuthModes resolves the AuthN mode (AUTH_MODE) and the AuthZ mode
-// (AUTHZ_MODE) together, applying the Wave-5 split rules (OPEN-5):
+// (AUTHZ_MODE) together (OPEN-5):
 //
 //   - When AUTHZ_MODE is unset it is DERIVED from the AuthN mode: open→open,
 //     header/oidc→authzeval.

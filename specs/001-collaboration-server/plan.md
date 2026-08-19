@@ -116,14 +116,13 @@ half-config): `PORT` (4006), `HUB_MODE` (`inmemory`|`redis`, REQUIRED),
 adapter and constructs `service.Deps`; the core consumes only interfaces. Adding a
 backend is a new adapter package + one switch arm — no domain change.
 
-> **Wave 5 — AuthN/AuthZ split.** The original single `AUTH_MODE=authzeval|open`
-> conflated handshake-AuthN with per-doc-AuthZ. Wave 5 splits them: **`AUTH_MODE`**
-> selects the **handshake-AuthN** strategy (`header`|`oidc`|`open`) and **`AUTHZ_MODE`**
-> selects the **per-doc-AuthZ** adapter (`authzeval`|`open`), independently. When
-> `AUTHZ_MODE` is unset it is **derived** from `AUTH_MODE`
-> (`open`→`open`; `header`/`oidc`→`authzeval`) — a sensible default, since an
-> authenticated deployment wants real authorization. A value that bundled both
-> into one key was removed while the shape was still settling (OPEN-5). Validation stays fail-fast: `oidc` requires its
+> **AuthN / AuthZ selection.** **`AUTH_MODE`** selects the **handshake-AuthN**
+> strategy (`header`|`oidc`|`open`); **`AUTHZ_MODE`** selects the **per-doc-AuthZ**
+> adapter (`authzeval`|`open`), independently. When `AUTHZ_MODE` is unset it is
+> **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`) — a
+> sensible default, since an authenticated deployment wants real authorization.
+> Any other value fails at startup through the ordinary unknown-value path.
+> Validation stays fail-fast: `oidc` requires its
 > session-store/JWKS config (whichever paths are enabled); `authzeval` AuthZ
 > requires `AUTH_SERVICE_URL`.
 
@@ -139,7 +138,7 @@ backend is a new adapter package + one switch arm — no domain change.
 
 **Decision (antst, recorded — not re-litigated):** collab handshake-AuthN supports
 **BOTH** a gateway-terminated mode and a direct-OIDC-validation mode,
-config-selectable, with AuthZ unchanged. This realizes FR-021–FR-023.
+config-selectable, with AuthZ independently selected. This realizes FR-021–FR-023.
 
 **Where it plugs in.** The `Auth` port (`Authenticate(ctx, credential) → Identity`,
 `port/ports.go`) is unchanged; Wave 5 only adds **adapters** under
@@ -149,7 +148,7 @@ config-selectable, with AuthZ unchanged. This realizes FR-021–FR-023.
 internal/adapter/outbound/auth/
 ├── open/        Authenticate → Identity{} (anon)                [W1 ✅]
 ├── header/      Authenticate → Identity{ActorID: <gateway header>}   ← option (a)
-│                (the Wave-2 authzeval.Authenticate, extracted & renamed)
+│                (header-trusting AuthN; trusts AUTH_TOKEN_HEADER)
 └── oidc/        Authenticate → validate-then-resolve                 ← option (b) [W5, T018]
     ├── cookie session path:  bare sid → Redis GET alkemio:sid:<sid>
     │                          → AlkemioSessionPayload → alkemio_actor_id
@@ -160,9 +159,9 @@ internal/adapter/outbound/auth/
 internal/adapter/outbound/auth/authzeval/   Evaluate (h2c + gobreaker, fail-closed)  [W2 ✅]
 ```
 
-The Wave-2 `authzeval` package's `Evaluate` (AuthZ) is **retained**; its
-`Authenticate` (the header-trusting AuthN) is **lifted into a `header` adapter** so
-AuthN and AuthZ are independently selectable. No change to `port.Auth`/`port.AuthZ`
+The `authzeval` package provides `Evaluate` (AuthZ); the `header` package provides
+the header-trusting `Authenticate` (AuthN). They are separate adapters so AuthN and
+AuthZ are independently selectable. No change to `port.Auth`/`port.AuthZ`
 signatures, the domain core, or the wire protocol — §I/§II hold.
 
 **How the WS handshake reads the credential.** Today `handler.go` reads a single
@@ -227,8 +226,8 @@ is a config flip — **no code change** (SC-007/SC-011).
 - **Wave 2 — durable adapters.** T004 `redis` fan-out; T005 `rabbitmq`+`postgres` metastore and `file-service` blob; T006 `authzeval` auth. Each plugs into the held ports; parallelizable. Blocked-by OPEN-1/2/3 for contract detail.
 - **Wave 3 — presence/limits/lifecycle/standalone-API.** T013 presence + collaborator mode + inactivity downgrade + server-forced awareness eviction + contribution metric; T014 authN-at-handshake + per-doc authZ + configurable limits; T015 `document.deleted` cascade consumer; T016 standalone create/delete HTTP API. Shaped by OPEN-4.
 - **Wave 4 — e2e + gate.** T017 single-pod + two-pod e2e (convergence, both content types, persistence, presence, cross-pod fan-out), ≥95% coverage gate, `make openapi` clean.
-- **Wave 5 — dual-adapter handshake AuthN (option (c)).** T018: split AuthN/AuthZ
-  mode selection (`AUTH_MODE`/`AUTHZ_MODE`); extract the `header` AuthN adapter from
+- **Wave 5 — dual-adapter handshake AuthN (option (c)).** T018: independent AuthN/AuthZ
+  mode selection (`AUTH_MODE`/`AUTHZ_MODE`); the `header` AuthN adapter alongside
   Wave-2 `authzeval`; add the new `oidc` direct-validation adapter (BFF cookie
   session via Redis + Hydra RS256 bearer via JWKS); generalize the WS handshake
   credential read; config + wiring + tests. TDD. **This pass is SPEC/DESIGN only —
@@ -273,11 +272,11 @@ internal/adapter/
     ├── fanout/{inmemory/broadcaster.go, redis/doc.go→impl T004}
     ├── metastore/{inmemory/store.go, rabbitmq/doc.go→impl T005, postgres/doc.go→impl T005}
     ├── blobstore/{inline/store.go, fileservice/doc.go→impl T005}
-    └── auth/{open/auth.go, authzeval/auth.go (AuthZ; +header-AuthN extracted W5), header/auth.go→impl T018, oidc/{auth.go,session_redis.go,hydra_jwks.go}→impl T018}
+    └── auth/{open/auth.go, authzeval/auth.go (AuthZ), header/auth.go→impl T018, oidc/{auth.go,session_redis.go,hydra_jwks.go}→impl T018}
 # Wave 2+ additions: db/migrations/ (postgres), internal/adapter/inbound/lifecycle/ (T015),
 # standalone API handlers on http/ (T016), test/e2e/ harness (T017).
 # Wave 5 additions (T018, spec/design only this pass): auth/header/ + auth/oidc/ adapters,
-# model.HandshakeCredentials, AUTH_MODE/AUTHZ_MODE split in config.go, WS-handshake credential read.
+# model.HandshakeCredentials, independent AUTH_MODE/AUTHZ_MODE in config.go, WS-handshake credential read.
 ```
 
 **Structure Decision**: the fleet hexagonal layout (file-service/oidc/wopi shape).

@@ -7,10 +7,10 @@
 //     authorizationPolicyId via the MetadataStore (OPEN-1) and evaluates
 //     evaluate(actorId, "read" | "update-content", policyId).
 //
-// AuthN is NOT this package's concern (Wave 5, T018.2): the header-trusting
-// handshake AuthN it carried in Wave 2 was lifted into the sibling `header`
-// adapter, so handshake AuthN is selected independently of AuthZ (AUTH_MODE vs
-// AUTHZ_MODE). This adapter is selected by AUTHZ_MODE=authzeval.
+// AuthN is NOT this package's concern: header-trusting handshake AuthN lives in
+// the sibling `header` adapter, so handshake AuthN is selected independently of
+// AuthZ (AUTH_MODE vs AUTHZ_MODE). This adapter is selected by
+// AUTHZ_MODE=authzeval.
 //
 // The h2c + gobreaker client below reuses the file-service/wopi pattern verbatim
 // (research.md OPEN-1); the only collab-specific addition is the

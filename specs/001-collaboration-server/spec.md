@@ -60,24 +60,22 @@ Detail and rationale live in `research.md`.
 > handshake-AuthN posture: the `authzeval` adapter *trusts* the actor id carried
 > in the gateway-stamped header (`AUTH_TOKEN_HEADER`, defaulting the deployment to
 > `X-Alkemio-Actor-Id`) — i.e. **gateway-terminated AuthN**, matching file-service's
-> `ActorHeaderExtractor`. Wave 5 adds a **second, config-selectable handshake-AuthN
-> adapter that validates the credential itself**, without changing AuthZ. This is
+> `ActorHeaderExtractor`. A second, config-selectable handshake-AuthN adapter
+> validates the credential itself, independently of AuthZ. This is
 > **option (c): support BOTH, config-selectable.**
 
-The AuthN/AuthZ split, made explicit:
+AuthN/AuthZ selection:
 
-- **AuthN (handshake) is now a three-way config choice** — the existing single
-  `AUTH_MODE=authzeval|open` enum is **split** so the handshake-AuthN strategy is
-  named independently of AuthZ. Modes:
+- **AuthN (handshake) is a three-way config choice**, named independently of
+  AuthZ. Modes:
   - **`header`** *(Alkemio prod DEFAULT)* — **option (a), gateway-terminated.**
     Trust the actor id in the header stamped by Traefik's
     `strip-client-alkemio-headers`→`alkemio-resolve` forwardAuth (server
     `/rest/internal/forward-auth`). This is the canonical post-OIDC-cutover
-    Alkemio pattern; it is exactly what the Wave-2 `authzeval` adapter's
-    `Authenticate` already does (`model.Identity{ActorID: <header value>}`).
-    **The `header` mode is the existing behaviour, renamed and made explicit** —
-    no behavioural change to the gateway-terminated path.
-  - **`oidc`** *(new — option (b), direct OIDC validation)* — a collab `Auth`
+    Alkemio pattern: the adapter resolves `model.Identity{ActorID: <header
+    value>}` from the gateway-stamped header and trusts it, because the gateway
+    has already authenticated the request.
+  - **`oidc`** *(option (b), direct OIDC validation)* — a collab `Auth`
     adapter that **validates the credential ITSELF at the WS handshake** and
     extracts the actor id, mirroring the server's `forward-auth.controller.ts`:
     1. **`alkemio_session` BFF cookie** → look the bare session id up in Redis
@@ -97,13 +95,13 @@ The AuthN/AuthZ split, made explicit:
        anonymous, exactly as the gateway does (a malformed/expired credential
        that was *presented* is the 401 case; see OPEN-7).
     For standalone/off-gateway deployment AND defense-in-depth behind the gateway.
-  - **`open`** *(unchanged — zero-dependency standalone)* — authenticate everyone
+  - **`open`** *(zero-dependency standalone)* — authenticate everyone
     as anonymous (empty actor id); the existing `open` adapter.
-- **AuthZ is UNCHANGED in all three modes** — per-document `read`/`update-content`
-  decisions still delegate to the authorization-evaluation-service via the
-  `authzeval` AuthZ adapter (`evaluate(actorId, privilege, policyId)`,
-  h2c+gobreaker, fail-closed). The standalone `open` AuthZ adapter is retained for
-  zero-dependency runs. **AuthN mode and AuthZ adapter are now selected
+- **AuthZ is selected independently of AuthN** — per-document
+  `read`/`update-content` decisions delegate to the authorization-evaluation-service
+  via the `authzeval` AuthZ adapter (`evaluate(actorId, privilege, policyId)`,
+  h2c+gobreaker, fail-closed). The standalone `open` AuthZ adapter is provided for
+  zero-dependency runs. **AuthN mode and AuthZ adapter are selected
   independently** (`AUTH_MODE` for AuthN, `AUTHZ_MODE` for AuthZ — see plan.md).
 - **WS handshake credential surface** — the handshake reader is generalized from a
   single `AUTH_TOKEN_HEADER` to a credential set the `oidc` adapter inspects in the
@@ -127,12 +125,10 @@ The AuthN/AuthZ split, made explicit:
 The three Wave-5 OPENs are **DECIDED**, not open. The detailed grounding/rationale
 remains under `## Clarifications → OPEN`; the locked decisions are:
 
-- **OPEN-5 (AuthN/AuthZ mode split): DECIDED →** split the single
-  `AUTH_MODE=authzeval|open` into **`AUTH_MODE`** (AuthN: `header`|`oidc`|`open`)
-  and **`AUTHZ_MODE`** (AuthZ: `authzeval`|`open`). When `AUTHZ_MODE` is unset it is
-  **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`). The
-  transitional `AUTH_MODE=authzeval` value was REMOVED (superseded by
-  `header` AuthN + `authzeval` AuthZ. (See FR-021; plan.md "AuthN/AuthZ split".)
+- **OPEN-5 (AuthN/AuthZ mode selection): DECIDED →** **`AUTH_MODE`** selects AuthN
+  (`header`|`oidc`|`open`); **`AUTHZ_MODE`** selects AuthZ (`authzeval`|`open`),
+  derived from `AUTH_MODE` when unset (`open`→`open`; `header`/`oidc`→`authzeval`).
+  Any other value fails at startup. (See FR-021; plan.md "AuthN / AuthZ selection".)
 - **OPEN-6 (guest in `oidc` mode): DECIDED →** `?guestName=` in `oidc` mode is a
   **named anonymous** — the display name flows to awareness/presence only; the
   authorization principal is the **anonymous sentinel** (`ANONYMOUS_ACTOR_ID`). No
@@ -277,7 +273,7 @@ tasks in `tasks.md`. **[Wave N]** marks the wave that delivers it.
 - **FR-010** [Wave 2]: The server MUST provide a **`redis`** `ClusterBroadcaster` that publishes updates on `doc:{id}` and ephemeral/awareness on `awareness:{id}`, and subscribes to deliver peer-pod payloads to local members — selected by `HUB_MODE=redis`. `HUB_MODE` is MANDATORY (003 FR-022f), so `inmemory` is chosen explicitly rather than defaulted (epic FR-020/R4; T004).
 - **FR-011** [Wave 2]: The server MUST provide **durable MetadataStore adapters** — `rabbitmq` (the Alkemio `server` save/fetch dialect extended with `content_pointer`) and `postgres` (sqlc/pgx, golang-migrate) for standalone — selected by `METADATA_STORE` (epic FR-022/R7; T005; OPEN-3).
 - **FR-012** [Wave 2]: The server MUST provide a **durable content adapter** — `file-service` (offload via the existing file-service API) — alongside `inline`, selected by `CHECKPOINT_STORE`, which is MANDATORY (003 FR-022f) so `inline` is chosen explicitly rather than defaulted; the content pointer shape is the adapter's concern (epic FR-022/R7; T005; OPEN-2).
-- **FR-013** [Wave 2 ✅ → split in Wave 5]: The server MUST provide an **`authzeval`** Auth+AuthZ adapter — handshake **header-trusting** authN (option (a), gateway-terminated: `model.Identity{ActorID}` from the gateway-stamped header) and per-document authZ via the authorization-evaluation-service (h2c HTTP/2 `POST /internal/auth/evaluate`, or NATS `auth.evaluate`), guarded by a sony/gobreaker circuit breaker and **failing closed** — alongside the `open` default. **[Wave 5]** the header-trusting AuthN half is promoted to a named **`header`** AuthN mode and the AuthZ half is selected independently of AuthN (`AUTHZ_MODE`); see FR-021–FR-023 (epic FR-021/R13; T006; OPEN-1).
+- **FR-013** [Wave 2 ✅]: The server MUST provide **`header`** handshake AuthN (option (a), gateway-terminated: `model.Identity{ActorID}` from the gateway-stamped header) and **`authzeval`** per-document AuthZ via the authorization-evaluation-service (h2c HTTP/2 `POST /internal/auth/evaluate`, or NATS `auth.evaluate`), guarded by a sony/gobreaker circuit breaker and **failing closed** — alongside the `open` default. AuthN (`header`|`oidc`|`open`) and AuthZ (`authzeval`|`open`) are selected independently; see FR-021–FR-023 (epic FR-021/R13; T006; OPEN-1).
 - **FR-014** [Wave 3]: The server MUST manage **presence/collaborator mode** — viewer vs. collaborator, inactivity downgrade — and emit a **north-star contribution metric** (per-window contributing actors) equivalent to today's, including **server-forced awareness eviction** of a departed connection (epic FR-007/FR-014; T013; OPEN-4).
 - **FR-015** [Wave 3 ✅ → refined in Wave 5]: The server MUST enforce **authN at the handshake** (401 on failure, never anonymous-downgrade except `open`/`oidc`-anonymous-fall-through modes) and **per-document authZ** via the `AuthZ` port (re-evaluated on `document.access_changed`), and enforce **configurable limits** — max doc size, max connections per room, per-connection update rate — rejecting/disconnecting on breach with a control message. **[Wave 5]** the "401 on failure" rule is refined per AuthN mode: `header` 401s on a missing/empty header (gateway didn't run); `oidc` resolves a missing credential to the anonymous sentinel and **only** 401s a *presented-but-invalid* credential (bad signature / expired / tombstoned), mirroring the gateway's forward-auth semantics (epic FR-021/FR-024; T014; FR-021–FR-023; OPEN-7).
 - **FR-016** [Wave 3]: The server MUST consume the **`document.deleted`** lifecycle event and cascade — disconnect clients (`room-closed`), release the room, `MetadataStore.Delete` + `BlobStore.Delete` — idempotently, with no orphans (epic FR-012/FR-023; contracts/lifecycle-events.md; T015).
@@ -288,7 +284,7 @@ tasks in `tasks.md`. **[Wave N]** marks the wave that delivers it.
 
 #### Wave 5 — dual-adapter handshake AuthN (option (c)) — forward, SPEC/DESIGN this pass
 
-- **FR-021** [Wave 5]: The server MUST select its **handshake-AuthN strategy by configuration** from **three** modes — **`header`** (option (a), gateway-terminated: trust the actor id in the gateway-stamped header; the existing Wave-2 behaviour, now named; **Alkemio prod default**), **`oidc`** (option (b), direct credential validation at the handshake; FR-022), and **`open`** (anonymous; zero-dependency standalone default) — **independently of the AuthZ adapter selection** (`AUTH_MODE` selects AuthN; `AUTHZ_MODE` selects AuthZ). **`AUTHZ_MODE`** is `authzeval|open` and, when unset, is **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`). The transitional `AUTH_MODE=authzeval` value (a bundled AuthN+AuthZ alias) was REMOVED before this service shipped anything and is rejected at startup. Renaming the existing AuthN posture to `header` MUST NOT change the gateway-terminated path's behaviour (Session 2026-06-20; T018; **OPEN-5 DECIDED**).
+- **FR-021** [Wave 5]: The server MUST select its **handshake-AuthN strategy by configuration** from **three** modes — **`header`** (option (a), gateway-terminated: trust the actor id in the gateway-stamped header; **Alkemio prod default**), **`oidc`** (option (b), direct credential validation at the handshake; FR-022), and **`open`** (anonymous; zero-dependency standalone default) — **independently of the AuthZ adapter selection** (`AUTH_MODE` selects AuthN; `AUTHZ_MODE` selects AuthZ). **`AUTHZ_MODE`** is `authzeval|open` and, when unset, is **derived** from `AUTH_MODE` (`open`→`open`; `header`/`oidc`→`authzeval`). (Session 2026-06-20; T018; **OPEN-5 DECIDED**).
 - **FR-022** [Wave 5]: In **`oidc`** mode the server MUST **validate the handshake credential itself** and resolve `model.Identity{ActorID}`, mirroring the server's `forward-auth.controller.ts`, trying credentials in order: **(1)** the **`alkemio_session` BFF cookie** — bare session id → Redis lookup (`alkemio:sid:<id>`, via `SESSION_REDIS_URL` defaulting to `REDIS_URL`) → `alkemio_actor_id`, rejecting **tombstoned** (`terminated_at` set) and **expired** (`expires_at`/`absolute_expires_at` past) sessions; **(2)** a **Hydra-issued RS256 `Authorization: Bearer` token** — JWKS-validated (issuer + audience allow-list + `alkemio_actor_id` claim + clock tolerance), extract `alkemio_actor_id`, read **only** from the `Authorization:` header (no `?access_token=` query fallback — DROPPED); **(3)** **`?guestName=`** — **named anonymous** (display name → presence only; principal = anonymous sentinel; **OPEN-6 DECIDED**); **(4)** **no credential** → the **nil-UUID anonymous sentinel** (`ANONYMOUS_ACTOR_ID`) which auth-eval resolves to `GLOBAL_ANONYMOUS`. The server MUST validate **BOTH** the cookie and the bearer (full forward-auth parity); each path is **inert when its config is absent** (no `SESSION_REDIS_URL`/`REDIS_URL` → cookie path off; no JWKS URL → bearer path off). The JWKS/issuer/audience/cookie-name env var names **mirror the server's** (**OPEN-7 DECIDED**) (epic FR-021/R13; T018; FR-013/FR-015; **OPEN-6/OPEN-7 DECIDED**).
 - **FR-023** [Wave 5]: In **`oidc`** mode the server MUST treat AuthN failure exactly as the gateway forward-auth does: a **presented-but-invalid** credential (bad signature, expired/tombstoned session, missing `alkemio_actor_id` claim) → **401** at the handshake; a **missing** credential → resolve to the **anonymous sentinel** (never 401 for absence), so a public-read document remains reachable. The Redis-session and Hydra-JWKS dependencies MUST be behind the `Auth` port so the domain core is unchanged, MUST fail safely (Redis unreachable → 503/handshake-reject, not silent anonymous), and the `oidc` adapter MUST NOT be required for `header`/`open` modes (epic FR-021; T018; OPEN-7).
 
@@ -321,7 +317,7 @@ Server-level, directly testable in this repo. Each traces to an epic SC.
 - **SC-011** [Wave 4]: Unit-test coverage is **≥95%** for all server code, measured and **CI-gating**; `make openapi` is clean; the single-pod and two-pod e2e suites are green (epic SC-008/SC-009/SC-010/SC-011; T017).
 - **SC-012** [Wave 1 ✅ → all]: The service **boots and serves both content types with zero external dependencies** in the default config (`open`/`inmemory`/`inline`) and selects durable backends purely by env config (epic SC-011; `config.go`, `cmd/server`).
 - **SC-013** [Wave 5]: With `AUTH_MODE=oidc`, a handshake carrying a **valid `alkemio_session` cookie** resolves to the session's `alkemio_actor_id`, a **valid Hydra RS256 bearer** resolves to its `alkemio_actor_id` claim, a **tombstoned/expired session** or **invalid bearer** is **401'd**, and **no credential** resolves to the **nil-UUID anonymous sentinel** — all without the gateway running (validated directly by the `oidc` adapter) (FR-022/FR-023; T018).
-- **SC-014** [Wave 5]: Switching `AUTH_MODE` between `header`, `oidc`, and `open` is a **pure config change** — the AuthZ adapter, the domain core, and the WS protocol are **unchanged** — and `header` mode behaves identically to the pre-Wave-5 gateway-terminated path (FR-021; T018).
+- **SC-014** [Wave 5]: Switching `AUTH_MODE` between `header`, `oidc`, and `open` is a **pure config change** — it selects an AuthN adapter only, leaving the AuthZ selection, the domain core, and the WS protocol untouched. In `header` mode a valid gateway-stamped actor id resolves that actor; an absent or empty header is rejected; and the AuthZ adapter in force is whatever `AUTHZ_MODE` selects, independently (FR-021; T018).
 
 ## Assumptions & Dependencies
 
@@ -459,17 +455,15 @@ event).
 
 ### OPEN-5 — AuthN-mode enum shape + AuthZ-mode independence (Wave 5, T018) — ✅ DECIDED
 
-**DECIDED (antst, 2026-06-20):** AuthN is `header` | `oidc` | `open`, `header` =
-Alkemio default. The existing single `AUTH_MODE=authzeval|open` enum is **split**
-into `AUTH_MODE` (AuthN: `header`|`oidc`|`open`) and a separate **`AUTHZ_MODE`**
-(`authzeval`|`open`). The Wave-2 `authzeval` *adapter* is decomposed: its
-header-trusting `Authenticate` becomes the `header` AuthN adapter; its `Evaluate`
-becomes the `authzeval` AuthZ adapter (selected by `AUTHZ_MODE`). **Default
-coupling:** when `AUTHZ_MODE` is unset, derive it from `AUTH_MODE`
-(`open`→`open` AuthZ, `header`/`oidc`→`authzeval` AuthZ) so
-A value that bundled AuthN and AuthZ into one key was removed while the shape was still settling
-(`authzeval`→`header` AuthN + `authzeval` AuthZ). **Env names:** `AUTH_MODE` /
-`AUTHZ_MODE`; the `authzeval` alias is preserved. (Grounding below retained.)
+**DECIDED (antst, 2026-06-20):** AuthN is `header` | `oidc` | `open`, with
+`header` the Alkemio default; AuthZ is `authzeval` | `open`, selected by
+**`AUTHZ_MODE`** and derived from `AUTH_MODE` when unset (`open`→`open` AuthZ,
+`header`/`oidc`→`authzeval` AuthZ) so an authenticated deployment gets real
+authorization without restating it. Two adapter responsibilities, selected
+independently: the `header` AuthN adapter trusts the gateway-stamped actor id; the
+`authzeval` AuthZ adapter evaluates per-document read/update against the
+authorization-evaluation-service. **Env names:** `AUTH_MODE` and `AUTHZ_MODE`. (Grounding
+below retained.)
 
 ### OPEN-6 — guest handling in standalone-direct `oidc` mode (Wave 5, T018) — ✅ DECIDED
 
@@ -523,4 +517,4 @@ params; native/M2M clients can set `Authorization`. **DECIDED (antst, 2026-06-20
 | 2 | Durable adapters: redis fan-out; rabbitmq+postgres metastore; file-service blob; authzeval auth | T004–T006 | Forward |
 | 3 | Presence/collaborator-mode/inactivity + awareness eviction + contribution metric; authN/authZ + limits; lifecycle delete-cascade; standalone HTTP API | T013–T016 | Forward |
 | 4 | Single-pod + two-pod e2e; ≥95% coverage gate; openapi clean | T017 | Forward |
-| 5 | **Dual-adapter handshake AuthN (option (c)):** split AuthN/AuthZ mode selection; `header` (rename of gateway-terminated) + new `oidc` direct-validation adapter (BFF cookie session + Hydra RS256 bearer) + `open`; config + wiring | T018 | **Forward (spec/design only this pass)** |
+| 5 | **Dual-adapter handshake AuthN (option (c)):** independent AuthN/AuthZ mode selection; `header` (gateway-terminated) + `oidc` direct-validation adapter (BFF cookie session + Hydra RS256 bearer) + `open`; config + wiring | T018 | **Forward (spec/design only this pass)** |

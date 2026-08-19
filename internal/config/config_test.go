@@ -520,7 +520,7 @@ func TestNumericEnvRejectsMalformed(t *testing.T) {
 	}
 }
 
-// --- Wave 5 (T018.1): AuthN/AuthZ mode split ---
+// --- Wave 5 (T018.1): AuthN/AuthZ mode selection ---
 
 // pinKnownGood pins every non-auth selector to a known-good value so an
 // auth-mode test cannot false-pass (or false-fail) on unrelated ambient env.
@@ -549,7 +549,7 @@ func TestDefaultAuthZModeDerivesFromOpen(t *testing.T) {
 	}
 }
 
-// TestHeaderModeDerivesAuthZEval asserts AUTH_MODE=header (the renamed
+// TestHeaderModeDerivesAuthZEval asserts AUTH_MODE=header (the
 // gateway-terminated AuthN) derives AUTHZ_MODE=authzeval when unset.
 func TestHeaderModeDerivesAuthZEval(t *testing.T) {
 	pinKnownGood(t)
@@ -627,7 +627,7 @@ func TestAuthZModeRejectsUnknown(t *testing.T) {
 
 // TestAuthZEvalRequiresServiceURLViaAuthZMode asserts selecting authzeval AuthZ
 // explicitly (AUTHZ_MODE=authzeval) with open AuthN still requires
-// AUTH_SERVICE_URL — the authzeval-config requirement now keys off AUTHZ_MODE.
+// AUTH_SERVICE_URL — the authzeval-config requirement keys off AUTHZ_MODE.
 func TestAuthZEvalRequiresServiceURLViaAuthZMode(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "header")
@@ -798,11 +798,11 @@ func TestOIDCAudAllowListAllBlankIsEmpty(t *testing.T) {
 	}
 }
 
-// TestMetadataStoreKeyWasNotRenamed guards the deliberate exception. It still
-// selects port.MetadataStore — the one port that did not move to a core
-// contract — so renaming it would have been churn with a deployment cost and no
-// meaning behind it.
-func TestMetadataStoreKeyWasNotRenamed(t *testing.T) {
+// TestMetadataStoreKeySelectsTheMetadataPort pins the naming rule's one
+// exception: METADATA_STORE is named for port.MetadataStore, which is this
+// service's own port rather than a core contract, so the key keeps that name
+// while the others are named for the contracts they select.
+func TestMetadataStoreKeySelectsTheMetadataPort(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("METADATA_STORE", "inmemory")
 	cfg, err := Load()
@@ -814,14 +814,14 @@ func TestMetadataStoreKeyWasNotRenamed(t *testing.T) {
 	}
 }
 
-// TestRenamedKeysAreRead asserts the NEW names actually work, so the tests above
-// cannot pass against a config that rejects everything.
-func TestRenamedKeysAreRead(t *testing.T) {
+// TestCanonicalSelectorKeysAreRead asserts the selector keys actually work, so the
+// tests above cannot pass against a config that rejects everything.
+func TestCanonicalSelectorKeysAreRead(t *testing.T) {
 	t.Setenv("CHECKPOINT_STORE", "inline")
 	t.Setenv("HUB_MODE", "inmemory")
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load with the renamed keys: %v", err)
+		t.Fatalf("Load with the canonical selector keys: %v", err)
 	}
 	if cfg.CheckpointStore != CheckpointStoreInline {
 		t.Fatalf("CHECKPOINT_STORE was not read: %q", cfg.CheckpointStore)

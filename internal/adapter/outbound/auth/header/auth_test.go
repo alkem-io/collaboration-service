@@ -20,9 +20,9 @@ func TestNonEmptyHeaderResolvesActorID(t *testing.T) {
 	}
 }
 
-// TestEmptyHeaderIsRejected asserts a missing/empty actor-id header is a 401
-// (the gateway did not run — header mode requires the stamp). This is the
-// pre-Wave-5 gateway-terminated behaviour, unchanged (SC-014).
+// TestEmptyHeaderIsRejected asserts a missing/empty actor-id header is rejected:
+// header mode trusts the stamp, so an absent stamp means the gateway did not run
+// and there is no actor to trust (SC-014).
 func TestEmptyHeaderIsRejected(t *testing.T) {
 	a := New()
 	if _, err := a.Authenticate(context.Background(), model.HandshakeCredentials{}); err == nil {

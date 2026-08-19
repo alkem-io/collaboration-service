@@ -289,10 +289,11 @@ func TestOIDCForgedBearerIs401(t *testing.T) {
 	}
 }
 
-// TestHeaderModeUnchanged proves the renamed `header` AuthN mode is byte-for-byte
-// the pre-Wave-5 gateway-terminated behaviour (SC-014): a no-header handshake is
-// 401 (the gateway didn't run); a header handshake authenticates and converges.
-func TestHeaderModeUnchanged(t *testing.T) {
+// TestHeaderModeTrustsOnlyAStampedActorID asserts `header` AuthN end to end
+// (SC-014): a no-header handshake is 401, because header mode trusts the stamp and
+// an absent stamp means the gateway did not run; a stamped handshake authenticates
+// and converges.
+func TestHeaderModeTrustsOnlyAStampedActorID(t *testing.T) {
 	cfg := standaloneConfig()
 	cfg.AuthMode = config.AuthModeHeader
 	cfg.AuthZMode = config.AuthZModeOpen // isolate AuthN from authZ
