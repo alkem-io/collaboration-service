@@ -54,7 +54,7 @@ func TestAuthTokenHeaderOverride(t *testing.T) {
 func TestLoadRejectsUnknownEnum(t *testing.T) {
 	t.Setenv("HUB_MODE", "kafka")
 	if _, err := Load(); err == nil {
-		t.Fatal("Load() with FANOUT_MODE=kafka: expected error, got nil")
+		t.Fatal("Load() with HUB_MODE=kafka: expected error, got nil")
 	}
 }
 
@@ -94,7 +94,7 @@ func TestRedisRequiresURL(t *testing.T) {
 	t.Setenv("HUB_MODE", "redis")
 	t.Setenv("REDIS_URL", "")
 	if _, err := Load(); err == nil {
-		t.Fatal("FANOUT_MODE=redis without REDIS_URL: expected error")
+		t.Fatal("HUB_MODE=redis without REDIS_URL: expected error")
 	}
 }
 
@@ -235,7 +235,7 @@ func TestPostgresAssemblesDSN(t *testing.T) {
 func TestFileServiceRequiresSettings(t *testing.T) {
 	t.Setenv("CHECKPOINT_STORE", "file-service")
 	if _, err := Load(); err == nil {
-		t.Fatal("BLOB_STORE=file-service without settings: expected error")
+		t.Fatal("CHECKPOINT_STORE=file-service without settings: expected error")
 	}
 }
 
@@ -310,7 +310,7 @@ func TestUnsupportedBlobStoreValuesFailStartup(t *testing.T) {
 			t.Setenv("CHECKPOINT_STORE", unsupported)
 			_, err := Load()
 			if err == nil {
-				t.Fatalf("BLOB_STORE=%s must fail startup: an unrecognised selector falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", unsupported)
+				t.Fatalf("CHECKPOINT_STORE=%s must fail startup: an unrecognised selector falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", unsupported)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, "file-service") || !strings.Contains(msg, "inline") {
@@ -413,7 +413,7 @@ func TestNumericEnvRejectsMalformed(t *testing.T) {
 			"HYDRA_JWKS_URL":   "http://hydra/.well-known/jwks.json",
 		}},
 		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
-			"BLOB_STORE":                     "file-service",
+			"CHECKPOINT_STORE":               "file-service",
 			"FILE_SERVICE_URL":               "http://files:4000",
 			"FILE_SERVICE_STORAGE_BUCKET_ID": "bucket-1",
 		}},
@@ -733,41 +733,6 @@ func TestOIDCAudAllowListAllBlankIsEmpty(t *testing.T) {
 	}
 	if len(cfg.OIDC.BearerAudAllowList) != 0 {
 		t.Errorf("BearerAudAllowList = %#v, want empty", cfg.OIDC.BearerAudAllowList)
-	}
-}
-
-// TestRetiredConfigKeysFailStartupNamingTheirReplacement is FR-022d / SC-021.
-//
-// BLOB_STORE and FANOUT_MODE were renamed to match the contracts they select.
-// Both replacements have SILENT DEFAULTS — CHECKPOINT_STORE falls back to the
-// non-durable in-process store, HUB_MODE to single-pod — so a deployment that
-// still sets the old key would come up healthy, serve normally, and write every
-// document to memory. The first symptom is an empty document after a restart.
-//
-// That is why the rename is only safe with this check: a consumer that has not
-// caught up fails loudly at startup instead of losing data quietly. The error
-// must also NAME the replacement, because the operator reading it needs the
-// answer rather than a diagnosis.
-//
-// Non-vacuity: delete an entry from renamedKeys and its case fails on the
-// missing error; drop the replacement from the message and it fails on the
-// substring check.
-func TestRetiredConfigKeysFailStartupNamingTheirReplacement(t *testing.T) {
-	for old, replacement := range map[string]string{
-		"BLOB_STORE":  "CHECKPOINT_STORE",
-		"FANOUT_MODE": "HUB_MODE",
-	} {
-		t.Run(old, func(t *testing.T) {
-			t.Setenv(old, "file-service")
-			_, err := Load()
-			if err == nil {
-				t.Fatalf("%s is retired and must fail startup: its replacement has a silent default, so ignoring it would send every document to non-durable in-process storage", old)
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, old) || !strings.Contains(msg, replacement) {
-				t.Fatalf("the error must name both the retired key and its replacement, got: %s", msg)
-			}
-		})
 	}
 }
 

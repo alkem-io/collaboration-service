@@ -109,13 +109,13 @@ type Config struct {
 	// request header the WS handshake reads the identity token from).
 	Auth AuthConfig
 
-	// Redis holds the redis fan-out settings (FANOUT_MODE=redis).
+	// Redis holds the redis fan-out settings (HUB_MODE=redis).
 	Redis RedisConfig
 	// RabbitMQ holds the metadata-bus settings (METADATA_STORE=rabbitmq).
 	RabbitMQ RabbitMQConfig
 	// Postgres holds the metadata-DB settings (METADATA_STORE=postgres).
 	Postgres PostgresConfig
-	// FileService holds the file-service blob settings (BLOB_STORE=file-service).
+	// FileService holds the file-service blob settings (CHECKPOINT_STORE=file-service).
 	FileService FileServiceConfig
 	// AuthZEval holds the authzeval settings (AUTHZ_MODE=authzeval).
 	AuthZEval AuthZEvalConfig
@@ -291,9 +291,6 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	if err := rejectRenamedKeys(); err != nil {
-		return nil, err
-	}
 	blobStore, err := parseBlobStore(getenv("CHECKPOINT_STORE", string(BlobStoreInline)))
 	if err != nil {
 		return nil, err
@@ -422,7 +419,7 @@ func loadFanoutConfig(cfg *Config) error {
 	}
 	cfg.Redis.URL = os.Getenv("REDIS_URL")
 	if cfg.Redis.URL == "" {
-		return fmt.Errorf("FANOUT_MODE=redis requires REDIS_URL")
+		return fmt.Errorf("HUB_MODE=redis requires REDIS_URL")
 	}
 	return nil
 }
@@ -659,7 +656,7 @@ func parseFanout(v string) (FanoutMode, error) {
 	case FanoutInMemory, FanoutRedis:
 		return FanoutMode(v), nil
 	default:
-		return "", fmt.Errorf("FANOUT_MODE must be one of inmemory, redis (got %q)", v)
+		return "", fmt.Errorf("HUB_MODE must be one of inmemory, redis (got %q)", v)
 	}
 }
 
@@ -670,42 +667,6 @@ func parseMetadataStore(v string) (MetadataStoreMode, error) {
 	default:
 		return "", fmt.Errorf("METADATA_STORE must be one of inmemory, rabbitmq, postgres (got %q)", v)
 	}
-}
-
-// renamedKeys maps a retired configuration key to the one that replaced it.
-//
-// The keys were renamed to match the contracts they now select: CHECKPOINT_STORE
-// picks a persistence.CheckpointStore, HUB_MODE picks a hub.Hub. METADATA_STORE
-// is deliberately absent — it still selects port.MetadataStore and did not move.
-var renamedKeys = map[string]string{
-	"BLOB_STORE":  "CHECKPOINT_STORE",
-	"FANOUT_MODE": "HUB_MODE",
-}
-
-// rejectRenamedKeys fails startup when a retired key is set (FR-022d, SC-021).
-//
-// IGNORING a stale key is the dangerous option, not failing on it. Both renamed
-// keys have silent defaults — CHECKPOINT_STORE falls back to the non-durable
-// in-process store and HUB_MODE to single-pod — so a deployment that still sets
-// BLOB_STORE=file-service would come up healthy, serve normally, and write every
-// document to memory. The first symptom is an empty document after a restart.
-//
-// So the rename is only safe BECAUSE of this check: a consumer that has not
-// caught up fails loudly at startup instead of losing data quietly. The error
-// names the replacement, because an operator reading it at 3am needs the answer,
-// not a diagnosis.
-func rejectRenamedKeys() error {
-	for old, replacement := range renamedKeys {
-		// A non-EMPTY value only. An exported-but-empty variable carries no
-		// configuration intent — it is how a compose file or a test harness clears
-		// a setting — and failing on it would refuse to start over a blank string.
-		if strings.TrimSpace(os.Getenv(old)) != "" {
-			return fmt.Errorf("%s has been renamed to %s (it now selects the contract it configures); "+
-				"set %s instead — leaving %s set would be ignored, and its replacement's silent default "+
-				"would send documents to non-durable in-process storage", old, replacement, replacement, old)
-		}
-	}
-	return nil
 }
 
 func parseBlobStore(v string) (BlobStoreMode, error) {

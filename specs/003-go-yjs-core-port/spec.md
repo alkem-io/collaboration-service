@@ -271,8 +271,8 @@ Each maps to a requirement and a non-vacuous test:
 - **FR-022a**: Durable multi-pod operation MUST NOT be represented as supported until single-writer document ownership exists. Cross-pod fan-out is supported; concurrent durable writers are not. This precondition MUST be documented wherever multi-pod configuration is described.
 - **FR-022b**: When configured for multi-pod fan-out together with a durable store and no ownership mechanism, the service MUST emit a startup warning naming the unsupported combination, so the precondition is visible at run time and not only in documentation. **Concretely**: logged at WARN or above, during startup and before the service begins serving, naming both the configuration keys involved and the unsupported combination in the message. This is stated precisely so it is verifiable — "prominent" alone is not testable.
 - **FR-022c**: Backend-selection configuration keys MUST be named for the contracts they select, not for superseded ports. The key selecting the `persistence.Store` backing medium and the key selecting the `hub.Hub` mode MUST both be renamed accordingly; the `MetadataStore` key is unchanged.
-- **FR-022d**: A **removed or renamed** configuration key MUST cause startup to **fail with a clear error naming the replacement**. It MUST NOT be silently ignored. This is not a nicety: the keys being renamed have silent defaults, so an ignored stale key would fall back to in-process storage and lose every document on restart while the service reported healthy.
-- **FR-022e**: The rename MUST land together with every consumer of the old keys — this repo's config, `.env.example`, and documentation; the k8s manifests on `feat/003-migration`; and `server`'s 006 `quickstart-services.yml`. A partial rollout is a data-loss risk, not a cosmetic inconsistency.
+- **FR-022d**: *(withdrawn)* This required a renamed configuration key to fail startup naming its replacement. It was written for a migration that does not exist: collaboration-service has never shipped, so no deployment has ever set the old keys, and the rename lands with every consumer in one change (FR-022e). Carrying tombstones for keys that were only ever development experiments is cost with no beneficiary.
+- **FR-022e**: The rename MUST land together with every consumer of the old keys — this repo's config, `.env.example`, and documentation; the k8s manifests on `feat/003-migration`; and `server`'s 006 `quickstart-services.yml`. A partial rollout would leave a consumer selecting a store that no longer exists under that name, which the silent default turns into non-durable storage — so the consumers land together rather than being guarded after the fact.
 
 **Observability**
 
@@ -324,7 +324,7 @@ Each maps to a requirement and a non-vacuous test:
 - **SC-018**: No teardown path writes a document whose integrity is in doubt: invalidation, escalation, and post-panic teardown are each proven not to persist, while graceful shutdown and idle release are each proven to persist.
 - **SC-019**: A malformed-frame fuzz run affects only the sending connection: zero room teardowns, zero effects on other members, zero process crashes.
 - **SC-020**: FR-010a's documentation obligation is discharged: the flush-interval guidance states the write-volume relationship and shows the worst case for a document at the size limit, so an operator can see the cost of a chosen interval before setting it.
-- **SC-021**: FR-022d holds in practice: starting the service with any removed or renamed configuration key **fails startup with a clear error naming the replacement** — the same phrase FR-022d mandates, so one assertion satisfies both. No removed key is ignored, and no such start reaches a serving state.
+- **SC-021**: *(withdrawn with FR-022d.)*
 
 ## Assumptions
 

@@ -191,7 +191,7 @@ delivery.
 
 - [X] T059 Rename `MetadataStore` to the canonical spelling everywhere — port, config identifiers (`MetadataStore*`), and package path `metastore/` → `metadatastore/` (FR-009a, SC-008b)
 - [X] T060 Rename the backend-selection configuration keys in `internal/config/config.go` to match the adopted contracts, leaving the metadata key unchanged (FR-022c)
-- [X] T061 Make a removed or renamed configuration key **fail startup with an error naming its replacement** in `internal/config/config.go` — never silently ignored, because these keys have silent defaults that would send blobs to memory (FR-022d, SC-021)
+- [X] T061 *(withdrawn — see FR-022d)* No tombstones for keys that never shipped; the rename lands with every consumer instead (T062)
 - [X] T062 Coordinate the rename across every consumer: this repo's `.env.example`, `README.md`, `CLAUDE.md`; `deploy/k8s/base/configmap.yaml` on the **unmerged** branch `feat/003-migration`; `server`'s 006 `quickstart-services.yml` (FR-022e)
 - [X] T063 [P] Verify zero translation shims by inspection across `internal/adapter/outbound/` — each adopted contract has exactly one implementation per backend, reaching infrastructure directly (SC-008a)
 - [X] T064 [P] Confirm the in-process path still serves all three roles per `specs/003-go-yjs-core-port/quickstart.md` §3: test suite, local development with real editors, and the zero-dependency smoke test (§III)

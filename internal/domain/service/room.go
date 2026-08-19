@@ -732,7 +732,7 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 		// re-persist it in the metadata row (the row stays truthful about where the
 		// state lives). Note this does not re-route the read below: the checkpoint
 		// store is the single adapter selected at startup, so a running config whose
-		// BLOB_STORE differs from meta.BlobStore must point that adapter at the same
+		// CHECKPOINT_STORE differs from meta.BlobStore must point that adapter at the same
 		// backing store to rehydrate (T005.6).
 		r.blobKind = meta.BlobStore
 	}
