@@ -92,9 +92,6 @@ func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	if in.StorageBucketID == "" {
 		in.StorageBucketID = existing.StorageBucketID
 	}
-	if len(in.SeedContent) == 0 {
-		in.SeedContent = existing.SeedContent
-	}
 	return in
 }
 

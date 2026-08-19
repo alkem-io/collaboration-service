@@ -239,8 +239,7 @@ func TestRestoreIsBoundedWithoutAnyCallerDeadline(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.restoreBounded(context.Background(), newRoomDoc("no-caller-deadline"),
-			model.Metadata{ID: "no-caller-deadline", ContentType: model.ContentTypeMemo, ContentPointer: "ptr"})
+		done <- r.restoreBounded(context.Background(), newRoomDoc("no-caller-deadline"))
 	}()
 
 	select {

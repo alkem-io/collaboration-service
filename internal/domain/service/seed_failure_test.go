@@ -8,78 +8,10 @@ import (
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/memory"
-	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
-
-// TestFailedSeedLeavesTheRoomCleanSoTheContentIsNotDestroyed is the invariant
-// behind seedInto's early return, and it is the opposite of the obvious
-// implementation.
-//
-// A seed that fails to apply leaves an EMPTY document. Marking it dirty anyway —
-// which any "we touched the doc, so schedule a save" reflex would do — promotes
-// that empty document to the document's first real snapshot. The create-time
-// content the seed was carrying is then gone permanently, because once a
-// ContentPointer exists the seed is never consulted again.
-//
-// Staying clean means nothing is written, so the stored content is still there to
-// be retried on the next open.
-//
-// Non-vacuity: move the dirty/seededPending assignments above the error return
-// and this fails on both flags.
-func TestFailedSeedLeavesTheRoomCleanSoTheContentIsNotDestroyed(t *testing.T) {
-	room := newBareRoom(t)
-	room.dirty = false
-	room.seededPending = false
-
-	// Bytes that are not a decodable v2 update: the seed cannot be applied.
-	room.seedInto(room.doc, []byte{0xff, 0xff, 0xff, 0xff})
-
-	if room.dirty {
-		t.Fatal("a FAILED seed marked the room dirty; the first save would then persist an empty document as this document's first snapshot and destroy the create-time content permanently")
-	}
-	if room.seededPending {
-		t.Fatal("a failed seed left seededPending set, which arms the save debounce to promote a document that was never seeded")
-	}
-}
-
-// TestEmptySeedIsANoOp covers the other early return: a document with no
-// create-time content opens empty and editable rather than erroring.
-func TestEmptySeedIsANoOp(t *testing.T) {
-	room := newBareRoom(t)
-	room.dirty = false
-
-	room.seedInto(room.doc, nil)
-	room.seedInto(room.doc, []byte{})
-
-	if room.dirty {
-		t.Fatal("an absent seed must leave the room clean; there is nothing to promote")
-	}
-}
-
-// TestSuccessfulSeedMarksTheRoomForPromotion is the positive case, so the tests
-// above cannot pass against a seedInto that never sets the flags at all.
-func TestSuccessfulSeedMarksTheRoomForPromotion(t *testing.T) {
-	source := newBareRoom(t)
-	insertText(source.doc, "seeded content ")
-	content, err := ycrdt.EncodeStateAsUpdateV2(source.doc, nil)
-	if err != nil {
-		t.Fatalf("encode seed: %v", err)
-	}
-
-	room := newBareRoom(t)
-	room.dirty = false
-	room.seedInto(room.doc, content)
-
-	if !room.dirty || !room.seededPending {
-		t.Fatalf("a successful seed must mark the room for promotion: dirty=%v seededPending=%v", room.dirty, room.seededPending)
-	}
-	if !contains(xmlText(room.doc), "seeded content") {
-		t.Fatalf("the seed did not reach the document: %q", xmlText(room.doc))
-	}
-}
 
 // failingEvictRegistry reports a non-ErrInUse failure from Evict, the branch the
 // room must log rather than swallow.

@@ -168,14 +168,8 @@ type Room struct {
 	// durability state machine in flush.go.
 	flushFailures  int
 	undurableSince time.Time
-	// seededPending is true when the room materialized from the first-open seed
-	// (Metadata.SeedContent) and that seed has not yet been promoted to a real
-	// per-document snapshot. The run loop arms the save debounce once at start so
-	// the seed is persisted promptly (ContentPointer set) without waiting for an
-	// edit or the idle release (T004). Cleared by the first persist.
-	seededPending bool
-	version       int
-	pointer       string
+	version        int
+	pointer        string
 	// blobKind is the configured blob backend persisted in the metadata row so a
 	// document rehydrates from the right backend regardless of running config
 	// (data-model.md checkpoint store; T005.6).
@@ -558,7 +552,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// not run. Reading it inside would leave a room that joined a cached document
 	// with a zero version and no pointer, and its first flush would then write a
 	// metadata row claiming the document had never been saved.
-	meta, found, err := r.loadMetadata(loadCtx)
+	_, found, err := r.loadMetadata(loadCtx)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -595,7 +589,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 			// Derived FROM openCtx rather than a fresh root: the core preserves
 			// request-scoped VALUES on it (only cancellation and the deadline are
 			// dropped), and a checkpoint store may key off them.
-			if err := r.restoreBounded(openCtx, doc, meta); err != nil {
+			if err := r.restoreBounded(openCtx, doc); err != nil {
 				return nil, err
 			}
 		}
@@ -767,33 +761,30 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 // until Acquire returns — and that is the point: there is no way to write this
 // against the room's own document, because the room does not have one yet.
 //
-// When no stored state exists — a freshly-created document whose content the
-// server persisted but which has no collaboration snapshot yet — it falls back to
-// the first-open SEED, materializing from the content the server delivered on
-// collaboration-fetch (Metadata.SeedContent, R4/US1) so the first opener sees the
-// creation content rather than an empty editor (FR-003). Neither state nor seed
-// is a fresh empty room (FR-010), not an error.
+// When no stored state exists, the document opens as a fresh EMPTY editable room
+// (FR-010) — not an error. There is no create-time seed: file-service holds the
+// document's only content, reached through its contentPointer, so a document with
+// no pointer has no content by definition.
 // restoreBounded runs the checkpoint restore under a wall-clock bound of its own.
 // It is a named method, not an inline WithTimeout, so the bound can be exercised
 // against a context that carries no deadline — which is precisely what the core
 // hands the open function once the last-waiter semantics apply.
-func (r *Room) restoreBounded(openCtx context.Context, doc *ycrdt.Doc, meta model.Metadata) error {
+func (r *Room) restoreBounded(openCtx context.Context, doc *ycrdt.Doc) error {
 	restoreCtx, cancel := context.WithTimeout(openCtx, r.backendTimeout())
 	defer cancel()
-	return r.restoreInto(restoreCtx, doc, meta)
+	return r.restoreInto(restoreCtx, doc)
 }
 
-func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc, meta model.Metadata) error {
-	// ErrNotFound means the document has never been saved — seed from the row's
-	// create-time content if any. ErrCorrupt means the index says state EXISTS but
-	// it could not be read; that must fail materialization rather than fall back to
-	// seeding, because seeding would resurrect stale content and the next save
-	// would overwrite the last good state with it (FR-014).
+func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc) error {
+	// ErrNotFound means the document has no stored state: it opens EMPTY and
+	// editable, and the first save creates its blob. ErrCorrupt means the index
+	// says state EXISTS but could not be read; that must fail materialization
+	// rather than fall back to an empty document, because an empty document would
+	// be persisted over the last good state on the next save (FR-014).
 	cp, err := r.deps.Checkpoint.LoadCheckpoint(ctx, backend.DocumentID(r.id))
 	switch {
 	case err == nil:
 	case errors.Is(err, persistence.ErrNotFound):
-		r.seedInto(doc, meta.SeedContent)
 		return nil
 	default:
 		return fmt.Errorf("loading stored state for %s: %w", r.id, err)
@@ -802,46 +793,12 @@ func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc, meta model.Metad
 	// The stored state is a full v2 update; applying it with a non-connection,
 	// peer-flagged origin means the update observer fans it to all members
 	// (there are none yet at load time) without re-publishing it to the bus —
-	// rehydration is local state, not a new edit to broadcast. Stored state is
-	// authoritative: any SeedContent on the row is a stale create-time bootstrap
-	// and is deliberately ignored (re-applying it would resurrect old content).
+	// rehydration is local state, not a new edit to broadcast.
 	if err := ycrdt.ApplyUpdateV2(doc, cp.Update, updateOrigin{src: 0, peer: true}); err != nil {
 		return fmt.Errorf("applying stored state: %w", err)
 	}
 	r.docBytes = len(cp.Update)
 	return nil
-}
-
-// seedInto materializes a never-yet-saved document's Y.Doc from the
-// content the server delivered on collaboration-fetch (Metadata.SeedContent, R4).
-// The bytes are a full Yjs-V2 state for both document types — memo (the rich-text
-// snapshot) and whiteboard (the scene snapshot the binding produced server-side)
-// — so both apply via ApplyUpdateV2. It runs during materialization, before the
-// update observer is wired (so it does not fan out or re-publish), and marks the
-// room dirty so the FIRST save promotes the seed into a real per-document snapshot
-// (ContentPointer set) — after which the blob is the source of truth and the seed
-// is never consulted again (T004). A nil/empty seed is a no-op: the room opens
-// empty and editable (FR-010).
-func (r *Room) seedInto(doc *ycrdt.Doc, content []byte) {
-	if len(content) == 0 {
-		return
-	}
-	if err := ycrdt.ApplyUpdateV2(doc, content, updateOrigin{src: 0, peer: true}); err != nil {
-		// Do NOT mark dirty on a failed seed: promoting it would persist an EMPTY
-		// document as this document's first real snapshot, destroying the content the
-		// seed was carrying. Leave the room clean so the stored content is retried.
-		r.logger.Error("seeding room from stored content failed; leaving room unseeded",
-			zap.String("doc", string(r.id)), zap.Error(err))
-		return
-	}
-	// Mark dirty so the seed is persisted as the document's first real snapshot.
-	// Unlike a loaded snapshot (which already has a ContentPointer and stays
-	// clean), the seed has no blob yet; promoting it on first save means
-	// subsequent opens load the blob instead of re-seeding. seededPending tells
-	// the run loop to arm the save debounce at start so the promotion happens
-	// promptly rather than only on the next edit or idle release.
-	r.dirty = true
-	r.seededPending = true
 }
 
 // run is the room's single goroutine. It owns the Y.Doc and the member registry,
@@ -879,15 +836,6 @@ func (r *Room) run() {
 
 	armSave := func() { r.armSaveTimer(saveTimer) }
 	armIdle := func() { r.armIdleTimer(idleTimer) }
-
-	// A room materialized from the first-open seed has unpersisted content but no
-	// edit to arm the debounce; promote the seed to a real snapshot on the normal
-	// cadence so it is durable promptly, without waiting for the first edit or the
-	// idle release (T004). With SaveDebounce disabled, the seed is persisted by the
-	// save-on-release path as before.
-	if r.seededPending {
-		armSave()
-	}
 
 	for {
 		select {
@@ -1727,9 +1675,6 @@ func (r *Room) persist(ctx context.Context) {
 	// version — a redelivered no-op PreRegister can bump the persisted row ahead of
 	// it; harmless while Metadata.Version is reserved/unused (FR-025).
 	r.dirty = false
-	// The seed (if any) is now real stored state; subsequent opens load it and
-	// never re-seed (T004).
-	r.seededPending = false
 	r.onFlushSucceeded()
 	r.metrics.SnapshotSaved()
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})

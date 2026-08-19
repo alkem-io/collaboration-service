@@ -49,6 +49,7 @@ stronger property, never weakened.
 | A blank `contentType` on upsert preserves the stored one | drop the preserve branch | "a blank contentType overwrote the stored one ... could materialize a memo root for a whiteboard" |
 | The index `Delete` removes the row and is idempotent | drop `delete(s.rows, id)` | "Load after Delete = <nil>, want ErrNotFound" |
 | A selected backend without its required settings fails at STARTUP | remove the `REDIS_URL` guard | "expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead" |
+| Corrupt stored state fails materialization and never opens EMPTY | add `ErrCorrupt` to the `ErrNotFound` branch | "materialization succeeded against unreadable stored state; the room would serve an EMPTY document and the next save would overwrite the last good state" |
 | The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
 | Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
 | The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
@@ -90,6 +91,22 @@ reason other than the one it claimed.
 | `FuzzMalformedFramesAreOffenderOnly` (first version) | — | it checked the observer with `Ping`, and coder/websocket only processes pongs while a read is in flight, so it failed with **no offence at all** — it would have been reported as a server defect | the observer reads in the background, as a real client does |
 
 ## Deleted rather than restructured (SC-005a)
+
+The **first-open seed** — `Metadata.SeedContent`, `FetchReply.Content`, `seedInto`,
+`seededPending` and its arm-the-debounce-at-start branch, the in-memory
+preservation, and the seed-only tests.
+
+It was not merely obsolete, it was **structurally unreachable**. The server
+produced seed bytes only for a NON-EMPTY `contentPointer`; `restoreInto` consumed
+them only when `LoadCheckpoint` returned `ErrNotFound`; and the file-service store
+returns `ErrNotFound` only when there is NO pointer — a pointer whose blob is
+absent is `ErrCorrupt`. The producer and consumer conditions were mutually
+exclusive, so no metadata reply could ever reach `seedInto` with usable bytes.
+
+The seed tests passed by constructing `model.Metadata` states the server could not
+produce: another green-for-the-wrong-reason contract, and the first one found by
+reasoning across two repos rather than inside one.
+
 
 The **fenced variant of the in-process store** (`NewFenced`, the mode branching,
 the fence high-water map, `CheckpointPersistenceFencing`, and the two fenced-only

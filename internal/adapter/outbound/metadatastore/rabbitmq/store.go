@@ -64,10 +64,7 @@ func (s *Store) Load(ctx context.Context, id model.DocumentID) (model.Metadata, 
 		ContentPointer:        reply.ContentPointer,
 		AuthorizationPolicyID: reply.AuthorizationPolicyID,
 		StorageBucketID:       reply.StorageBucketID,
-		// Surface the server-delivered content for the first-open seed (R4): the
-		// room consults it only when the document has no live snapshot yet.
-		SeedContent: reply.Content,
-		OwnerRef:    reply.OwnerRef,
+		OwnerRef:              reply.OwnerRef,
 	}, nil
 }
 

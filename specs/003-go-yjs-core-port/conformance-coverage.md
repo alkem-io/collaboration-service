@@ -21,7 +21,7 @@ Core version: `github.com/antst/go-yjs v0.0.3`.
 The registry and hub suites validate a **dependency**, not our code — we use both
 shipped implementations unmodified (§X/§XI). They are run anyway because two
 requirements rest on their exact behavior: FR-004b leans on `Acquire`'s coalescing
-for exactly-once first-open seeding, and FR-011a on `Invalidate`'s
+for exactly-once first-open restore, and FR-011a on `Invalidate`'s
 poison-and-signal. A future core bump that changed either would otherwise break
 those requirements silently.
 

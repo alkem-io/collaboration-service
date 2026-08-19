@@ -80,20 +80,6 @@ type Metadata struct {
 	// piling into one flat platform bucket. Empty in standalone / no-metadata
 	// mode, where the checkpoint store falls back to its configured bucket.
 	StorageBucketID string
-	// SeedContent is the document's stored content delivered on
-	// collaboration-fetch for the FIRST-OPEN SEED (R4): a freshly-created
-	// document has its content persisted by the server but no collaboration
-	// snapshot yet (no ContentPointer). When the room materializes such a
-	// document, it seeds the Y.Doc from these bytes so the first opener — or a
-	// teammate — sees the creation content instead of an empty editor (FR-003).
-	// It is a full Yjs-V2 state for both document types (memo: the rich-text
-	// snapshot; whiteboard: the scene snapshot the binding produced server-side),
-	// applied via ApplyUpdateV2. It is consulted ONLY when there is no live
-	// snapshot — once the room persists, the snapshot blob (ContentPointer) is
-	// the source of truth and the seed is ignored. Empty for documents that
-	// already have a snapshot, are empty-on-create, or in standalone/no-metadata
-	// mode.
-	SeedContent []byte
 	// OwnerRef is the parent Alkemio entity that owns this document's
 	// lifecycle; the delete cascade keys off it (FR-023).
 	OwnerRef  string
