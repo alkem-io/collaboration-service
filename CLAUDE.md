@@ -47,7 +47,10 @@ ports. Adapters implement them:
 - `http/` — operational surface: `/healthz`, `/metrics`.
 
 **Outbound** (`internal/adapter/outbound/`) — one subpackage per adapter:
-- `fanout/{inmemory,redis}` — `ClusterBroadcaster` (cross-pod fan-out, R4)
+- `hub/redis` — `hub.Hub` (cross-pod fan-out, R4). The single-pod default is the
+  core's shipped `hub.NewInProcess()`, used directly rather than re-implemented.
+  **Multi-pod with a durable store is unsupported**: no ownership mechanism, so
+  two pods flushing the same document overwrite each other (startup warns).
 - `metastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
@@ -56,7 +59,7 @@ ports. Adapters implement them:
 
 | Port | Contract |
 |---|---|
-| `ClusterBroadcaster` | `../agents-hq/specs/003-unify-collab-yjs/contracts/ws-protocol.md` (multi-pod fan-out) |
+| `hub.Hub` | `specs/003-go-yjs-core-port/contracts/hub.md` (multi-pod fan-out) |
 | `MetadataStore` | `.../contracts/persistence-ports.md` (metadata/index) |
 | `BlobStore` | `.../contracts/persistence-ports.md` (content-blob) |
 | `Auth` | `.../contracts/ws-protocol.md` (handshake AuthN) |
@@ -68,7 +71,7 @@ See [.env.example](./.env.example). Defaults are standalone-friendly
 (single-pod, inline blob, open auth):
 
 - `PORT` (default 4006)
-- `FANOUT_MODE` — `inmemory` | `redis`
+- `FANOUT_MODE` — `inmemory` | `redis` (redis + `BLOB_STORE=file-service` is unsupported)
 - `METADATA_STORE` — `rabbitmq` | `postgres`
 - `BLOB_STORE` — `inline` | `file-service`
 - `AUTH_MODE` — `open` | `authzeval`

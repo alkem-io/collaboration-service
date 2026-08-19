@@ -68,7 +68,7 @@ func TestBuildDepsCleansUpWhatItOpenedWhenALaterStageFails(t *testing.T) {
 			if cleanup != nil {
 				t.Fatal("a failed buildDeps must not hand back a cleanup; it has already run its own, and calling it twice would double-close")
 			}
-			if deps.Metadata != nil || deps.Broadcaster != nil {
+			if deps.Metadata != nil || deps.Hub != nil {
 				t.Fatal("a failed buildDeps must return zero Deps, not a half-wired set")
 			}
 		})
@@ -92,7 +92,7 @@ func TestBuildDepsWiresTheStandaloneDefaults(t *testing.T) {
 	}
 	t.Cleanup(cleanup)
 
-	if deps.Broadcaster == nil || deps.Metadata == nil || deps.Checkpoint == nil || deps.Auth == nil || deps.AuthZ == nil {
+	if deps.Hub == nil || deps.Metadata == nil || deps.Checkpoint == nil || deps.Auth == nil || deps.AuthZ == nil {
 		t.Fatalf("buildDeps left a dependency unwired: %+v", deps)
 	}
 }

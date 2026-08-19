@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/antst/go-yjs/backend/hub"
 	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -28,8 +29,7 @@ import (
 	authheader "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/header"
 	authoidc "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/oidc"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	fanoutinmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/fanout/inmemory"
-	fanoutredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/fanout/redis"
+	hubredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/hub/redis"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
 	metapostgres "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/postgres"
 	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/rabbitmq"
@@ -64,6 +64,8 @@ type App struct {
 // A wiring failure (bad backend config, unreachable bus) returns an error and
 // leaves nothing started.
 func New(cfg *config.Config, logger *zap.Logger) (*App, error) {
+	warnUnsupportedTopology(cfg, logger)
+
 	deps, depsCleanup, err := buildDeps(cfg, logger)
 	if err != nil {
 		return nil, err
@@ -101,6 +103,34 @@ func (a *App) Close() {
 // on shutdown. The standalone defaults (inmemory / inline / open) keep the
 // service a single zero-dependency binary (SC-012); any other selection wires the
 // matching durable adapter, failing fast if its config is incomplete.
+// warnUnsupportedTopology reports the one configuration combination this service
+// does not support (FR-022b): multi-pod fan-out with a DURABLE store.
+//
+// Why it is unsupported. Every pod serving a document holds its own authoritative
+// copy and flushes the WHOLE document on its own schedule. The hub carries edits
+// between them, but nothing decides which pod's flush wins — so two pods that
+// briefly diverge (a dropped pub/sub message, a partition, a restart) will each
+// write a complete state over the other's, and the later writer silently discards
+// whatever the earlier one had that it never received. There is no ownership
+// mechanism, no fence, and the checkpoint store replaces rather than merges.
+//
+// It is a WARNING rather than a startup failure on purpose: the combination is
+// legitimate for a read-heavy or short-lived deployment where an operator
+// understands the tradeoff, and refusing to boot would strand them. But it must
+// be said out loud, before serving, naming both keys — the failure mode is silent
+// data loss that appears only under conditions nobody reproduces on purpose.
+func warnUnsupportedTopology(cfg *config.Config, logger *zap.Logger) {
+	if cfg.Fanout != config.FanoutRedis || cfg.BlobStore != config.BlobStoreFileService {
+		return
+	}
+	logger.Warn("UNSUPPORTED CONFIGURATION: multi-pod fan-out with a durable store and no document ownership mechanism",
+		zap.String("FANOUT_MODE", string(cfg.Fanout)),
+		zap.String("BLOB_STORE", string(cfg.BlobStore)),
+		zap.String("consequence", "every pod flushes the whole document on its own schedule with nothing deciding which write wins; two pods that diverge will overwrite each other and the later writer silently discards edits it never received"),
+		zap.String("supported", "run a single pod (FANOUT_MODE=inmemory) with BLOB_STORE=file-service"),
+	)
+}
+
 func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), error) {
 	var closers []func()
 	cleanup := func() {
@@ -109,7 +139,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		}
 	}
 
-	broadcaster, err := buildBroadcaster(cfg, logger, &closers)
+	fanout, err := buildHub(cfg, logger, &closers)
 	if err != nil {
 		cleanup()
 		return service.Deps{}, nil, err
@@ -135,7 +165,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 	authz := buildAuthZ(cfg, metadata)
 
 	return service.Deps{
-		Broadcaster: broadcaster,
+		Hub:         fanout,
 		Metadata:    metadata,
 		Checkpoint:  checkpoint,
 		Auth:        auth,
@@ -144,19 +174,24 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 	}, cleanup, nil
 }
 
-func buildBroadcaster(cfg *config.Config, logger *zap.Logger, closers *[]func()) (port.ClusterBroadcaster, error) {
+func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hub, error) {
 	if cfg.Fanout != config.FanoutRedis {
-		return fanoutinmem.New(), nil
+		// The core's shipped single-process hub. Not a no-op: the room publishes and
+		// subscribes on this path too, so single-pod exercises the same code multi-pod
+		// does rather than a stub.
+		return hub.NewInProcess(), nil
 	}
-	// Each pod needs a unique source id for echo suppression; a generated UUID
-	// is sufficient (uniqueness, not stability across restarts, is what matters).
-	b, err := fanoutredis.New(cfg.Redis.URL, uuid.NewString())
+	// The instance id distinguishes THIS process on the wire so its own publishes,
+	// which Redis loops straight back, are not delivered a second time on top of
+	// the synchronous local delivery. Uniqueness is what matters, not stability
+	// across restarts.
+	h, err := hubredis.New(cfg.Redis.URL, uuid.NewString())
 	if err != nil {
 		return nil, fmt.Errorf("redis fan-out: %w", err)
 	}
-	*closers = append(*closers, func() { _ = b.Close() })
+	*closers = append(*closers, func() { _ = h.Close() })
 	logger.Info("redis fan-out enabled")
-	return b, nil
+	return h, nil
 }
 
 // buildMetadata selects the MetadataStore and, for the Alkemio (rabbitmq) bus,

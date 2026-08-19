@@ -40,11 +40,11 @@ func TestEscalationIsCountedNamedAndExplained(t *testing.T) {
 
 	const threshold = 3
 	mgr := NewManager(Deps{
-		Broadcaster: noopBroadcaster{},
-		Metadata:    metainmem.New(),
-		Checkpoint:  store,
-		Auth:        open,
-		AuthZ:       open,
+
+		Metadata:   metainmem.New(),
+		Checkpoint: store,
+		Auth:       open,
+		AuthZ:      open,
 	}, RoomConfig{
 		SaveDebounce: 5 * time.Millisecond,
 		IdleTimeout:  10 * time.Second,

@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -14,13 +17,13 @@ import (
 // unblocked via context. It proves the room bounds an uncancelable backend call
 // with BackendTimeout (and cancels it on release) so a hung backend cannot wedge
 // the single-writer run loop.
-type blockingBroadcaster struct {
+type blockingHub struct {
 	mu         sync.Mutex
 	unblocked  int
 	ctxErrSeen bool
 }
 
-func (b *blockingBroadcaster) Publish(ctx context.Context, _ model.DocumentID, _ []byte, _ bool) error {
+func (b *blockingHub) Publish(ctx context.Context, _ hub.Message) error {
 	<-ctx.Done() // block until the room bounds/cancels us.
 	b.mu.Lock()
 	b.unblocked++
@@ -31,11 +34,19 @@ func (b *blockingBroadcaster) Publish(ctx context.Context, _ model.DocumentID, _
 	return ctx.Err()
 }
 
-func (b *blockingBroadcaster) Subscribe(_ context.Context, _ model.DocumentID, _ func([]byte, bool)) (func(), error) {
-	return func() {}, nil
+func (b *blockingHub) Subscribe(context.Context, backend.DocumentID, backend.SourceID, hub.Handler) (hub.Subscription, error) {
+	return inertSubscription{}, nil
 }
 
-func (b *blockingBroadcaster) stats() (int, bool) {
+func (b *blockingHub) Close() error { return nil }
+
+// inertSubscription is a hub.Subscription that does nothing on close.
+type inertSubscription struct{}
+
+func (inertSubscription) SourceID() backend.SourceID { return "" }
+func (inertSubscription) Close() error               { return nil }
+
+func (b *blockingHub) stats() (int, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.unblocked, b.ctxErrSeen
@@ -47,12 +58,12 @@ func (b *blockingBroadcaster) stats() (int, bool) {
 // blocks on ctx.Done(); the room's bounded opCtx must time it out so the call
 // returns rather than wedging the loop forever.
 func TestBackendCallIsTimeoutBounded(t *testing.T) {
-	bc := &blockingBroadcaster{}
+	bc := &blockingHub{}
 	cfg := fastConfig()
 	cfg.BackendTimeout = 50 * time.Millisecond
 	cfg.Limits.UpdateRatePerSec = 0
 	deps := newTestDeps()
-	deps.Broadcaster = bc
+	deps.Hub = bc
 	mgr := NewManager(deps.Deps, cfg, nil, nil)
 
 	a := newFakeClient(t)
@@ -106,13 +117,13 @@ func TestOpCtxDefaultsAndNilParent(t *testing.T) {
 // goroutine is reclaimed). Before the fix a context.Background() publish could
 // block the single-writer loop indefinitely, leaking the room.
 func TestHungBackendDoesNotWedgeRoomRelease(t *testing.T) {
-	bc := &blockingBroadcaster{}
+	bc := &blockingHub{}
 	cfg := fastConfig()
 	cfg.BackendTimeout = 50 * time.Millisecond
 	cfg.IdleTimeout = 10 * time.Millisecond
 	cfg.Limits.UpdateRatePerSec = 0
 	deps := newTestDeps()
-	deps.Broadcaster = bc
+	deps.Hub = bc
 	mgr := NewManager(deps.Deps, cfg, nil, nil)
 
 	a := newFakeClient(t)

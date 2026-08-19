@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
 	"github.com/antst/go-yjs/backend/persistence"
 
@@ -147,8 +148,12 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	if deps.Broadcaster == nil {
-		deps.Broadcaster = noopBroadcaster{}
+	if deps.Hub == nil {
+		// The core's shipped single-process hub, not a no-op: a room still publishes
+		// and subscribes on the single-pod path, and using the real implementation
+		// means that path is exercised by the same code multi-pod uses rather than
+		// by a stub that silently does nothing.
+		deps.Hub = hub.NewInProcess()
 	}
 	if deps.Contributor == nil {
 		deps.Contributor = noopContributor{}

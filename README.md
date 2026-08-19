@@ -29,14 +29,14 @@ internal/
 ├── config/                     # env config + zap logger
 ├── domain/
 │   ├── model/                  # Metadata, Snapshot, Room, Awareness, Identity
-│   ├── port/                   # ClusterBroadcaster, MetadataStore, BlobStore, Auth, AuthZ
+│   ├── port/                   # MetadataStore, Auth, AuthZ, Contributor
 │   └── service/                # CRDT room mgmt, presence, lifecycle, limits
 └── adapter/
     ├── inbound/
     │   ├── ws/                 # raw WS + y-protocols sync/awareness/ephemeral
     │   └── http/               # /healthz, /metrics
     └── outbound/
-        ├── fanout/{inmemory,redis}/
+        ├── hub/redis/
         ├── metastore/{inmemory,rabbitmq,postgres}/
         ├── persistence/{inprocess,fileservice,metapointer}/
         └── auth/{open,authzeval}/

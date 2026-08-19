@@ -59,11 +59,11 @@ func newGatedManager(t *testing.T) (*Manager, *gatedDeleteStore, *metainmem.Stor
 	meta := metainmem.New()
 	open := authopen.New()
 	mgr := NewManager(Deps{
-		Broadcaster: noopBroadcaster{},
-		Metadata:    meta,
-		Checkpoint:  store,
-		Auth:        open,
-		AuthZ:       open,
+
+		Metadata:   meta,
+		Checkpoint: store,
+		Auth:       open,
+		AuthZ:      open,
 	}, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
 		IdleTimeout:  10 * time.Second, // long: only the cascade releases a room

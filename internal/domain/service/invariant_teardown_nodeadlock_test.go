@@ -7,25 +7,30 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// blockingSubBroadcaster mimics a redis-style fan-out where cancelSub (pubsub.Close)
-// BLOCKS until the subscribe goroutine exits. The subscribe goroutine calls the
-// room's handler exactly once (when triggered); if that handler parks because the
-// decoupled peerUpdates queue is full, cancelSub can only return once teardown
-// cancels the room context and frees the parked write — the property under test.
-type blockingSubBroadcaster struct {
+// blockingSubHub mimics a redis-style fan-out where closing the subscription
+// BLOCKS until the delivery goroutine exits (pubsub.Close semantics). The
+// goroutine calls the room's handler exactly once (when triggered); if that
+// handler parks because the decoupled peerUpdates queue is full, the close can
+// only return once teardown cancels the room context and frees the parked
+// write — the property under test.
+type blockingSubHub struct {
 	trigger        chan struct{}
 	handlerEntered chan struct{}
 	goroutineDone  chan struct{}
 }
 
-func (b *blockingSubBroadcaster) Publish(context.Context, model.DocumentID, []byte, bool) error {
-	return nil
-}
+func (b *blockingSubHub) Publish(context.Context, hub.Message) error { return nil }
 
-func (b *blockingSubBroadcaster) Subscribe(_ context.Context, _ model.DocumentID, handler func(payload []byte, ephemeral bool)) (func(), error) {
+func (b *blockingSubHub) Close() error { return nil }
+
+func (b *blockingSubHub) Subscribe(_ context.Context, doc backend.DocumentID, _ backend.SourceID, handler hub.Handler) (hub.Subscription, error) {
+	subCtx := context.WithoutCancel(context.Background())
 	b.trigger = make(chan struct{})
 	b.handlerEntered = make(chan struct{})
 	b.goroutineDone = make(chan struct{})
@@ -33,11 +38,21 @@ func (b *blockingSubBroadcaster) Subscribe(_ context.Context, _ model.DocumentID
 		defer close(b.goroutineDone)
 		<-b.trigger
 		close(b.handlerEntered)
-		handler([]byte("peer-payload"), false) // may park on the full peerUpdates queue
+		// May park on the full peerUpdates queue.
+		_ = handler(subCtx, hub.Message{
+			DocumentID: doc, Kind: hub.DocumentUpdate, Payload: []byte("peer-payload"),
+		})
 	}()
-	// cancelSub WAITS for the subscribe goroutine to exit (redis pubsub.Close semantics).
-	return func() { <-b.goroutineDone }, nil
+	return blockingSubscription{done: b.goroutineDone}, nil
 }
+
+// blockingSubscription's Close WAITS for the delivery goroutine to exit, which is
+// what makes the teardown ordering observable.
+type blockingSubscription struct{ done chan struct{} }
+
+func (blockingSubscription) SourceID() backend.SourceID { return "" }
+
+func (s blockingSubscription) Close() error { <-s.done; return nil }
 
 // TestInvTeardownNoDeadlock — INV-TEARDOWN-NODEADLOCK (spec 002 FR-009). A subscribe
 // goroutine parked writing a peer update must not deadlock teardown: teardown cancels
@@ -47,8 +62,8 @@ func (b *blockingSubBroadcaster) Subscribe(_ context.Context, _ model.DocumentID
 // cancel can free.
 func TestInvTeardownNoDeadlock(t *testing.T) {
 	deps := newTestDeps()
-	bcast := &blockingSubBroadcaster{}
-	deps.Broadcaster = bcast
+	bcast := &blockingSubHub{}
+	deps.Hub = bcast
 
 	room, err := newRoom(context.Background(), "doc-deadlock", model.ContentTypeMemo,
 		deps.Deps, RoomConfig{SendBuffer: 16, BackendTimeout: 5 * time.Second}, NopMetrics{}, zap.NewNop())

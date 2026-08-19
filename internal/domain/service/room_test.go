@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/persistence"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
@@ -208,11 +209,14 @@ func newTestDeps() testDeps {
 	open := authopen.New()
 	return testDeps{
 		Deps: Deps{
-			Broadcaster: noopBroadcaster{},
-			Metadata:    meta,
-			Checkpoint:  store,
-			Auth:        open,
-			AuthZ:       open,
+			// The core's shipped in-process hub, as NewManager would supply. Tests
+			// that build a Room directly bypass that default, and the room publishes
+			// on every edit — a nil hub panics on the first one.
+			Hub:        hub.NewInProcess(),
+			Metadata:   meta,
+			Checkpoint: store,
+			Auth:       open,
+			AuthZ:      open,
 		},
 		meta:  meta,
 		store: store,

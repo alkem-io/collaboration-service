@@ -27,11 +27,11 @@ func degradedManager(t *testing.T, threshold int) (*Manager, *outageStore, *dura
 		Limits:       Limits{FlushFailureThreshold: threshold},
 	}
 	mgr := NewManager(Deps{
-		Broadcaster: noopBroadcaster{},
-		Metadata:    metainmem.New(),
-		Checkpoint:  store,
-		Auth:        open,
-		AuthZ:       open,
+
+		Metadata:   metainmem.New(),
+		Checkpoint: store,
+		Auth:       open,
+		AuthZ:      open,
 	}, cfg, metrics, zap.NewNop())
 	return mgr, store, metrics
 }

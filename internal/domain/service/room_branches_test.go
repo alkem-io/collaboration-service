@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/persistence"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
@@ -17,37 +19,43 @@ import (
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
-	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
 // --- local fakes for the error-injection branches ---
 
-// erroringSubBroadcaster is a ClusterBroadcaster whose Subscribe fails, to drive
-// newRoom's subscription-error path (a pod that cannot subscribe to peer fan-out
-// must fail materialization rather than silently run unsubscribed, missing every
-// remote edit).
-type erroringSubBroadcaster struct{}
+// erroringSubHub is a hub.Hub whose Subscribe fails, to drive newRoom's
+// subscription-error path (a pod that cannot subscribe to peer fan-out must fail
+// materialization rather than silently run unsubscribed, missing every remote
+// edit).
+type erroringSubHub struct{}
 
-func (erroringSubBroadcaster) Publish(context.Context, model.DocumentID, []byte, bool) error {
-	return nil
-}
+func (erroringSubHub) Publish(context.Context, hub.Message) error { return nil }
 
-func (erroringSubBroadcaster) Subscribe(context.Context, model.DocumentID, func([]byte, bool)) (func(), error) {
+func (erroringSubHub) Subscribe(context.Context, backend.DocumentID, backend.SourceID, hub.Handler) (hub.Subscription, error) {
 	return nil, errors.New("subscribe failed")
 }
 
-// erroringPubBroadcaster is a ClusterBroadcaster whose Publish fails (Subscribe is
-// a no-op), to drive publishToPeers' fan-out-failure path and the FanoutFailed
-// metric.
-type erroringPubBroadcaster struct{}
+func (erroringSubHub) Close() error { return nil }
 
-func (erroringPubBroadcaster) Publish(context.Context, model.DocumentID, []byte, bool) error {
+// erroringPubHub is a hub.Hub whose Publish fails (Subscribe is a no-op), to
+// drive publishToPeers' fan-out-failure path and the FanoutFailed metric.
+type erroringPubHub struct{}
+
+func (erroringPubHub) Publish(context.Context, hub.Message) error {
 	return errors.New("publish failed")
 }
 
-func (erroringPubBroadcaster) Subscribe(context.Context, model.DocumentID, func([]byte, bool)) (func(), error) {
-	return func() {}, nil
+func (erroringPubHub) Subscribe(context.Context, backend.DocumentID, backend.SourceID, hub.Handler) (hub.Subscription, error) {
+	return noopSubscription{}, nil
 }
+
+func (erroringPubHub) Close() error { return nil }
+
+// noopSubscription satisfies hub.Subscription for the fakes above.
+type noopSubscription struct{}
+
+func (noopSubscription) SourceID() backend.SourceID { return "" }
+func (noopSubscription) Close() error               { return nil }
 
 // --- limits.go ---
 
@@ -259,7 +267,7 @@ func TestNewRoomNilMetricsAndContributorDefault(t *testing.T) {
 // fail rather than run blind to remote edits).
 func TestNewRoomFailsOnSubscribeError(t *testing.T) {
 	deps := newTestDeps().Deps
-	deps.Broadcaster = erroringSubBroadcaster{}
+	deps.Hub = erroringSubHub{}
 	if _, err := newRoom(context.Background(), "sub-fail", model.ContentTypeMemo, deps, DefaultRoomConfig(), NopMetrics{}, zap.NewNop()); err == nil {
 		t.Fatal("newRoom must fail when the broadcaster Subscribe errors")
 	}
@@ -465,7 +473,7 @@ func TestPublishToPeersRecordsFanoutFailure(t *testing.T) {
 	room := newBareRoom(t)
 	metrics := &countingMetrics{}
 	room.metrics = metrics
-	room.deps.Broadcaster = erroringPubBroadcaster{}
+	room.deps.Hub = erroringPubHub{}
 
 	room.publishToPeers([]byte{1, 2, 3}, false)
 
@@ -748,9 +756,9 @@ func TestDispatchSyncUnknownSubTagIsNoOp(t *testing.T) {
 	}
 }
 
-// compile-time assertions that the local fakes satisfy the broadcaster port.
+// compile-time assertions that the local fakes satisfy the adopted contracts.
 var (
-	_ port.ClusterBroadcaster = erroringSubBroadcaster{}
-	_ port.ClusterBroadcaster = erroringPubBroadcaster{}
-	_ persistence.Deleter     = failingDeleteStore{}
+	_ hub.Hub             = erroringSubHub{}
+	_ hub.Hub             = erroringPubHub{}
+	_ persistence.Deleter = failingDeleteStore{}
 )

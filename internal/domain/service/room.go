@@ -11,9 +11,11 @@ import (
 	"github.com/antst/go-yjs/backend/persistence"
 
 	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -211,7 +213,12 @@ type Room struct {
 	// and persisted, so the Manager can drop it from its registry.
 	onReleased func()
 
-	// cancelSub tears down the ClusterBroadcaster subscription on release. It is
+	// source is this room's fan-out identity. The hub suppresses echoes by it, so
+	// a room never re-applies an update it published itself. Per-room rather than
+	// per-pod: two rooms in one process are distinct publishers, and a shared id
+	// would make each blind to the other's edits on the single-pod path.
+	source backend.SourceID
+	// cancelSub tears down the hub subscription on release. It is
 	// a no-op for the in-memory (single-pod) broadcaster.
 	cancelSub func()
 
@@ -470,6 +477,31 @@ func DefaultRoomConfig() RoomConfig {
 	}
 }
 
+// withRoomDefaults fills in the dependencies a directly-constructed Room would
+// otherwise be missing.
+//
+// A Room built without the Manager must still work: the Manager supplies these,
+// but tests and any future direct caller do not, and both are load-bearing on the
+// very first edit — the room publishes to the hub and holds a registry handle. A
+// nil either way is a panic, not a degraded mode.
+func withRoomDefaults(deps Deps) Deps {
+	if deps.Hub == nil {
+		// The core's shipped single-process hub, which is exactly single-pod
+		// behaviour: no peer exists, so nothing crosses.
+		deps.Hub = hub.NewInProcess()
+	}
+	if deps.Registry == nil {
+		// A lone room owns exactly one document, so a private registry is
+		// semantically correct; the Manager supplies a shared one so concurrent
+		// opens of the same document coalesce onto a single materialization.
+		deps.Registry = memory.NewRegistry()
+	}
+	if deps.Contributor == nil {
+		deps.Contributor = noopContributor{}
+	}
+	return deps
+}
+
 // newRoom materializes a room for id: it constructs the authoritative GC'd
 // Y.Doc, loads the latest snapshot (if any) into it, and wires the update
 // observer that fans applied changes out to members. It does not start the run
@@ -483,20 +515,11 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	if blobKind == "" {
 		blobKind = model.BlobStoreInline
 	}
-	if deps.Contributor == nil {
-		deps.Contributor = noopContributor{}
-	}
 	if cfg.BackendTimeout <= 0 {
 		cfg.BackendTimeout = defaultBackendTimeout
 	}
+	deps = withRoomDefaults(deps)
 	registry := deps.Registry
-	if registry == nil {
-		// A lone room owns exactly one document, so a private registry is
-		// semantically correct here; Manager supplies a shared one so concurrent
-		// opens of the same document coalesce onto a single materialization.
-		registry = memory.NewRegistry()
-	}
-	deps.Registry = registry
 
 	// The room struct exists BEFORE the document does, because the document is
 	// initialized inside the registry's open function (below) and that function
@@ -606,21 +629,26 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// teardown cancels, so a parked write frees without waiting on the run loop. The
 	// in-memory broadcaster's Subscribe is a no-op that never fires the handler, so
 	// single-pod deployments pay nothing.
-	cancelSub, err := deps.Broadcaster.Subscribe(roomCtx, id, func(payload []byte, ephemeral bool) {
+	// The source id is per-ROOM, so the hub's echo suppression drops this room's
+	// own publishes without the room having to filter them itself.
+	r.source = backend.SourceID(uuid.NewString())
+	sub, err := deps.Hub.Subscribe(roomCtx, backend.DocumentID(id), r.source, func(_ context.Context, msg hub.Message) error {
 		select {
-		case r.peerUpdates <- peerUpdate{data: payload, ephemeral: ephemeral}:
+		case r.peerUpdates <- peerUpdate{data: msg.Payload, ephemeral: msg.Kind == hub.AwarenessUpdate}:
+			return nil
 		case <-roomCtx.Done():
 			// Teardown cancelled roomCtx: drop this peer delta rather than block the
 			// subscribe goroutine. Acceptable — the ORIGINATING pod keeps its doc dirty
 			// and persists it, and the CRDT re-merges on next load (self-healing); a
 			// draining pod's final snapshot is not a relay guarantee (FR-015).
+			return nil
 		}
 	})
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	r.cancelSub = cancelSub
+	r.cancelSub = func() { _ = sub.Close() }
 
 	// Materialized and wired — the room is now ready to serve.
 	r.lc.activate()
@@ -1505,7 +1533,16 @@ func (r *Room) publishToPeers(frame []byte, ephemeral bool) {
 	start := time.Now()
 	ctx, cancel := r.opCtx()
 	defer cancel()
-	if err := r.deps.Broadcaster.Publish(ctx, r.id, frame, ephemeral); err != nil {
+	kind := hub.DocumentUpdate
+	if ephemeral {
+		kind = hub.AwarenessUpdate
+	}
+	if err := r.deps.Hub.Publish(ctx, hub.Message{
+		DocumentID: backend.DocumentID(r.id),
+		SourceID:   r.source,
+		Kind:       kind,
+		Payload:    frame,
+	}); err != nil {
 		r.logger.Warn("cluster fan-out publish failed", zap.Error(err))
 		r.metrics.FanoutFailed()
 		return

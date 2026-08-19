@@ -69,10 +69,10 @@ func TestNewStandaloneWiresAndCloses(t *testing.T) {
 	}
 }
 
-// TestNewFailsOnBroadcasterError asserts a redis fan-out selection with a
-// malformed REDIS_URL fails fast in buildBroadcaster, so New returns an error and
+// TestNewFailsOnHubError asserts a redis fan-out selection with a
+// malformed REDIS_URL fails fast in buildHub, so New returns an error and
 // (via buildDeps' cleanup) leaves nothing started — no half-configured run.
-func TestNewFailsOnBroadcasterError(t *testing.T) {
+func TestNewFailsOnHubError(t *testing.T) {
 	cfg := standaloneConfig()
 	cfg.Fanout = config.FanoutRedis
 	cfg.Redis = config.RedisConfig{URL: "://not-a-redis-url"}
@@ -189,7 +189,7 @@ func TestBuildDepsStandaloneSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDeps (standalone): %v", err)
 	}
-	if deps.Broadcaster == nil || deps.Metadata == nil || deps.Checkpoint == nil ||
+	if deps.Hub == nil || deps.Metadata == nil || deps.Checkpoint == nil ||
 		deps.Auth == nil || deps.AuthZ == nil {
 		t.Fatal("buildDeps left an outbound port nil")
 	}

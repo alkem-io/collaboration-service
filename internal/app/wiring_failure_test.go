@@ -11,7 +11,7 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
 
-// TestBuildBroadcasterSurfacesARedisMisconfiguration covers the redis branch's
+// TestBuildHubSurfacesARedisMisconfiguration covers the redis branch's
 // failure path.
 //
 // The alternative is worse than an error: a broadcaster that silently degrades to
@@ -19,11 +19,11 @@ import (
 // a private copy of every document, diverging from the moment two people connect
 // to different pods. That failure looks like nothing at startup and like data loss
 // to users.
-func TestBuildBroadcasterSurfacesARedisMisconfiguration(t *testing.T) {
+func TestBuildHubSurfacesARedisMisconfiguration(t *testing.T) {
 	var closers []func()
 	cfg := &config.Config{Fanout: config.FanoutRedis, Redis: config.RedisConfig{URL: "not-a-redis-url"}}
 
-	if _, err := buildBroadcaster(cfg, zap.NewNop(), &closers); err == nil {
+	if _, err := buildHub(cfg, zap.NewNop(), &closers); err == nil {
 		t.Fatal("a bad REDIS_URL must fail startup; degrading to single-pod silently gives every pod a private copy of every document")
 	}
 	if len(closers) != 0 {
@@ -133,22 +133,22 @@ func TestLifecycleQueueFallsBackToTheDedicatedDefault(t *testing.T) {
 	}
 }
 
-// TestBuildBroadcasterWiresRedisAndRegistersItsCloser covers the redis SUCCESS
+// TestBuildHubWiresRedisAndRegistersItsCloser covers the redis SUCCESS
 // path, using miniredis rather than a live server.
 //
 // The closer registration is the part worth asserting: a redis broadcaster whose
 // Close is never registered leaks its connection pool on every shutdown, and the
 // symptom appears on the redis side (connections accumulating across pod
 // restarts) rather than anywhere in this service's own logs.
-func TestBuildBroadcasterWiresRedisAndRegistersItsCloser(t *testing.T) {
+func TestBuildHubWiresRedisAndRegistersItsCloser(t *testing.T) {
 	srv := miniredis.RunT(t)
 
 	var closers []func()
 	cfg := &config.Config{Fanout: config.FanoutRedis, Redis: config.RedisConfig{URL: "redis://" + srv.Addr()}}
 
-	b, err := buildBroadcaster(cfg, zap.NewNop(), &closers)
+	b, err := buildHub(cfg, zap.NewNop(), &closers)
 	if err != nil {
-		t.Fatalf("buildBroadcaster with redis: %v", err)
+		t.Fatalf("buildHub with redis: %v", err)
 	}
 	if b == nil {
 		t.Fatal("no broadcaster returned")

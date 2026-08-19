@@ -16,25 +16,6 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// ClusterBroadcaster fans document updates and ephemeral/awareness messages out
-// to other pods so a multi-pod deployment is transparent to clients (a client
-// may connect to any pod). The default adapter is in-memory (single-pod, R4);
-// the Redis adapter publishes on doc:{id} and awareness:{id} channels.
-//
-// Maps to: contracts/ws-protocol.md ("Multi-pod transparent … cross-pod via
-// Redis fan-out (R4)").
-type ClusterBroadcaster interface {
-	// Publish broadcasts a binary payload for a document to every other pod
-	// subscribed to its channel. The local pod delivers to its own clients
-	// directly and MUST NOT receive its own Publish back. ephemeral selects
-	// the awareness:{id} channel (volatile, lossy) versus doc:{id}.
-	Publish(ctx context.Context, id model.DocumentID, payload []byte, ephemeral bool) error
-	// Subscribe registers a handler invoked for every payload other pods
-	// publish for the given document. The returned cancel function tears the
-	// subscription down; it is safe to call once and idempotent thereafter.
-	Subscribe(ctx context.Context, id model.DocumentID, handler func(payload []byte, ephemeral bool)) (cancel func(), err error)
-}
-
 // MetadataStore persists the small, queryable document index (NOT the blob).
 // The default Alkemio adapter rides the existing server RabbitMQ save/fetch
 // pattern, extended with content_pointer + blob_store; the standalone adapter
