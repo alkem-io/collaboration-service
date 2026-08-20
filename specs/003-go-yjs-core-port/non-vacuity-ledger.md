@@ -654,3 +654,25 @@ One setup detail that cost a debugging round: a room only calls `LoadCheckpoint`
 when the metadata index says there is something to restore. Without seeding durable
 state first, the gate is never reached and the test hangs on a window that never
 opens.
+
+### A test race that only CI could find
+
+`TestReplayReturnsDeadLetteredEventsToTheLadder` passed locally every time and
+failed in CI with `x-collab-replays = 0, want 1`.
+
+The setup published an event to Q1, closed the consumer, purged Q1, and then seeded
+the dead-letter queue — a leftover from an earlier approach that drove the event
+through the ladder before I switched to seeding the DLQ directly. **A delivery the
+consumer had taken but not acked is requeued when its channel closes**, and that
+requeue can land *after* the purge. Q1 then holds the original event, and the
+assertion reads that one instead of the replayed one: no replay count, because it
+was never replayed.
+
+Nothing about the replay path was wrong. The fix was to delete the setup that had
+stopped serving a purpose: declare the topology, seed the DLQ, replay, and assert —
+with an explicit check that Q1 is empty first, so the `Get` cannot be reading some
+other message. Five consecutive runs green afterwards, and all five replay probes
+still RED.
+
+Worth recording because the failure mode is generic: a test that closes a consumer
+to "stop" it is not draining it, and any unacked delivery comes back.

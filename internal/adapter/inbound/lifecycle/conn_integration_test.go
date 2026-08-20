@@ -809,27 +809,26 @@ func TestConnectReleasesAnEventParkedForAMissingTarget(t *testing.T) {
 //   - The dead-letter copy is released only after the republish is confirmed, so
 //     a failed publish cannot lose the event.
 func TestReplayReturnsDeadLetteredEventsToTheLadder(t *testing.T) {
-	url := brokerURL(t)
+	brokerURL(t)
 	queue := uniqueName("collab-lifecycle-replay")
 	names := namesFor(queue)
 	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
 
-	// Drive an event all the way to the DLQ: unactionable bodies go straight there.
-	mgr := &recordingManager{}
-	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, mgr, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
 	_, ch := dialTest(t)
-	docID := "doc-replayed"
-	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: docID}))
-	// The purge fails, so the event walks to the first tier, not the DLQ. Put it
-	// in the DLQ directly instead, exactly as an exhausted schedule would: the
-	// attempt header at the end of the ladder.
-	_ = consumer.Close()
-	if _, err := ch.QueuePurge(names.main, false); err != nil {
-		t.Fatalf("purge %s: %v", names.main, err)
+	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
+		t.Fatalf("declare topology: %v", err)
 	}
+
+	// Seed the dead-letter queue exactly as an exhausted schedule leaves it: the
+	// body a producer sent, carrying the attempt header from the end of the ladder.
+	//
+	// Deliberately WITHOUT running a consumer. An earlier version published to Q1
+	// and closed the consumer to get the event moving, then purged Q1 before
+	// seeding — and an unacknowledged delivery is REQUEUED when the consumer's
+	// channel closes, which can land after the purge. The assertion below then read
+	// the original event rather than the replayed one and saw no replay count. It
+	// passed locally and failed in CI, which is exactly the shape of that race.
+	docID := "doc-replayed"
 	if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
@@ -840,6 +839,11 @@ func TestReplayReturnsDeadLetteredEventsToTheLadder(t *testing.T) {
 	}
 	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
 		t.Fatalf("the event never reached %s", names.dlq)
+	}
+	// Q1 must be empty, or the Get below could read something other than the
+	// replayed event and the assertion would be about the wrong message.
+	if got := messageCount(t, names.main); got != 0 {
+		t.Fatalf("%s holds %d messages before the replay", names.main, got)
 	}
 
 	// Replay it.
