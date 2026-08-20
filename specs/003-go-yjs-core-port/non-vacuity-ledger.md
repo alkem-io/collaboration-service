@@ -604,3 +604,53 @@ before doing I/O, and pump refs are **derived** from the live subscriber count. 
 failed subscription that left its entry behind would give the next successful pump a
 ref count that never reaches zero, leaking the Redis subscription and its goroutine
 for the life of the pod — the same leak class as the race-window finding above it.
+
+## The coverage gate, closed
+
+**95.2%, gate passes.** Measured with `.scripts/coverage-gate.sh 95.0` against a
+real RabbitMQ 3.13.2 with the management plugin. Progression, same broker
+throughout: 94.8% at the PR head before any of this work → 93.6% after the
+lifecycle feature → 94.8% after its failure-path tests → 94.9% after the redis
+readiness fix → **95.2%**.
+
+The threshold was not lowered and no exclusion was broadened to get there. The
+0.4% came from two tests over the widest genuinely-uncovered invariant left in the
+tree: `Manager.acquire`'s materialization window.
+
+`acquire` builds a room OFF the registry lock, because `newRoom` does backend I/O
+and holding the lock across it would wedge every other document. That means the
+world can change while a room is loading, and the re-checks afterwards were
+untested:
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| a room materialized during a cascade is registered anyway | `TestACascadeStartingDuringMaterializationLeavesNoLiveRoom` |
+| …is refused but not torn down | ″ |
+| a room materialized during shutdown is registered anyway | `TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom` |
+| …is refused but not torn down | ″ |
+
+Both are real failure stories, not statement-chasing. Registering a room on a
+document a cascade is deleting puts a LIVE room on deleted content, and its first
+flush writes the content and the index row back — the owner deletes a document and
+it reappears. Registering one after `Close` has taken its drain snapshot means the
+room is never drained: its buffered edits are never flushed and the process exits
+with them in memory.
+
+The two teardown rows are the interesting ones. `TestRoomTornDownDuringMaterializationReleasesItsRegistrySlot`
+already existed and proves that *teardown* releases the registry handle — but it
+calls `room.teardown(nil)` directly, by its own admission ("constructed directly
+rather than raced"). So nothing proved `acquire` actually calls it on the refusal
+paths, and deleting either call stayed green. These tests race it for real and
+assert the handle is gone afterwards, via `mgr.registry` — the Manager overwrites
+`Deps.Registry` with its own, so inspecting a registry of one's own would report a
+clean registry no room ever touched.
+
+The window is held open with a gated `CheckpointStore`: `LoadCheckpoint` parks the
+materializing room, `Delete` parks the cascade, so both are in flight
+simultaneously and deterministically. No production seam — the Manager already
+takes its stores as ports, same approach as the redis `blockingSubscribeClient`.
+
+One setup detail that cost a debugging round: a room only calls `LoadCheckpoint`
+when the metadata index says there is something to restore. Without seeding durable
+state first, the gate is never reached and the test hangs on a window that never
+opens.
