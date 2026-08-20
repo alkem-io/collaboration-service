@@ -121,8 +121,11 @@ returns an empty state vector with no error.
 
 **The assets-root validator is not independently rollout-safe, and it is not
 rolling-deploy safe.** Whiteboard updates carrying inline `data:` file locators are
-refused. The currently shipped client can still emit them and ignores the
-`update-rejected` control, so client changes ship FIRST. Beyond that, a mixed fleet
+refused, so a client generation that can still emit them — or that ignores the
+`update-rejected` control — must not be running when the validator is. The
+client-side work is IMPLEMENTED (`client-web` efd44a2a1 + 72686d930 dropped the
+dataURL fallback; 8d69ef4ff + 5c6f4600f handle `update-rejected`), so what remains
+is verifying the DEPLOYED client generation carries it, not waiting for the code. Beyond that, a mixed fleet
 diverges: an old pod accepts poison and publishes it over the hub, a new pod refuses
 that peer update, and the two hold different documents for the same id permanently.
 Ordinary overlapping rolling replacement is not allowed — drain the old pods and cut
