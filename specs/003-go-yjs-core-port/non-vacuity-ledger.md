@@ -224,3 +224,35 @@ acking it meant a lost revocation left no trace anywhere.
   requeue flag recorded a value no code path can produce. The `nacks` counter stays,
   asserted at zero — "must never reject" is a live invariant, since rejecting turns a
   transient publish failure into terminal handling behind an unconfirmed DLX hop.
+
+## Supervisor (broker re-attachment)
+
+Found while wiring metrics, not by a test: `recycle()` closes the channel, but
+nothing re-opened it. The consume loop's only exit is the delivery stream ending,
+so the first unconfirmable transfer permanently stopped the consumer — no purges,
+no revocations — behind a process that stayed healthy in every other respect. The
+same hole swallowed any broker restart or network blip. `Connect` now brings up one
+`session` and a supervisor re-opens it on a bounded backoff until `Close`.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| supervisor removed (a recycle is terminal again) | `TestTheConsumerReAttachesAfterTheDeliveryStreamEnds` |
+| dead session's connection not released before re-attaching | ″ |
+| supervisor keeps re-attaching after `Close` | `TestCloseTearsDownChannelAndConnectionAndStopsSupervising` |
+
+`TestCloseTearsDownChannelAndConnection` had to be rewritten rather than kept: it
+asserted the channel and connection were each closed **exactly once**, which the
+supervisor makes racily false (it releases the dead session too) while the actual
+invariant — they end up released — still holds. Exact-count assertions on an
+idempotent teardown are arithmetic, not invariants. The replacement asserts release
+plus the property that Close actually stands the supervisor down; without that,
+shutdown is indistinguishable from a broker blip and the consumer dials its way back
+up forever behind a process trying to exit.
+
+One claim was **weakened rather than defended**. `transfer` reads the channel and its
+confirm/return streams in a single locked read, and the comment said this guarded
+against a re-attach landing between the publish and the wait. It cannot: the
+supervisor re-attaches from the same goroutine `transfer` runs on, so the interleaving
+has no reachable instance. The probe that split the read stayed green for that reason,
+and the comment was corrected instead of a test being invented to justify it. The lock
+is there for `Close`, which does run on another goroutine.

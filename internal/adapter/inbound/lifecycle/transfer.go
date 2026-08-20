@@ -49,7 +49,12 @@ func (c *Consumer) transfer(ctx context.Context, target string, d amqp.Delivery,
 		Body:         d.Body, // byte-identical; the envelope is never re-encoded
 	}
 
-	if err := c.ch.PublishWithContext(ctx, "", target, true /*mandatory*/, false, pub); err != nil {
+	// The channel and its two answer streams come from one read so they are always
+	// the same attachment's. They cannot be swapped mid-transfer in any case — the
+	// supervisor re-attaches from the very goroutine this runs on — but reading them
+	// apart would leave that as an accident of scheduling rather than a fact.
+	ch, confirms, returns := c.live()
+	if err := ch.PublishWithContext(ctx, "", target, true /*mandatory*/, false, pub); err != nil {
 		return fmt.Errorf("%w: publish to %s: %w", errTransferFailed, target, err)
 	}
 
@@ -59,13 +64,13 @@ func (c *Consumer) transfer(ctx context.Context, target string, d amqp.Delivery,
 	defer deadline.Stop()
 	for {
 		select {
-		case ret, ok := <-c.returns:
+		case ret, ok := <-returns:
 			if !ok {
 				return fmt.Errorf("%w: return channel closed", errTransferFailed)
 			}
 			return fmt.Errorf("%w: %s was unroutable (queue missing?), broker returned it", errTransferFailed, ret.RoutingKey)
 
-		case conf, ok := <-c.confirms:
+		case conf, ok := <-confirms:
 			if !ok {
 				return fmt.Errorf("%w: confirm channel closed", errTransferFailed)
 			}

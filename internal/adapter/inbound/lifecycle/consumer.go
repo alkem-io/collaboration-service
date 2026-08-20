@@ -55,8 +55,17 @@ type Consumer struct {
 	mgr    Manager
 	logger *zap.Logger
 
-	conn brokerConn
-	ch   brokerChannel
+	// cfg is retained so the supervisor can re-open a session after the broker
+	// drops the current one.
+	cfg Config
+
+	// mu guards the live broker attachment. The supervisor goroutine swaps it on
+	// reconnect; Close reads it from whatever goroutine calls Close.
+	mu       sync.Mutex
+	conn     brokerConn
+	ch       brokerChannel
+	confirms chan amqp.Confirmation
+	returns  chan amqp.Return
 
 	// handlerTimeout bounds the processing context of a single delivery (resolved
 	// from Config.HandlerTimeout, defaulting to DefaultHandlerTimeout) so one stuck
@@ -67,19 +76,17 @@ type Consumer struct {
 	// queue so the parts cannot drift apart.
 	names queueNames
 
-	// confirms and returns carry the broker's two answers to a transfer publish.
-	// Both are read in transfer(); with Qos(1) and a serial consume loop there is
-	// exactly one publish outstanding, so correlation is positional.
-	confirms chan amqp.Confirmation
-	returns  chan amqp.Return
-
-	// confirmTimeout bounds the wait for those answers. A broker that neither
+	// confirmTimeout bounds the wait for the broker's confirm/return answers to a
+	// transfer publish. Both channels are read in transfer(); with a bounded QoS and
+	// a serial consume loop there is exactly one publish outstanding, so correlation
+	// is positional. A broker that neither
 	// confirms nor returns must not hold the consume loop open indefinitely; the
 	// delivery stays unacked and is redelivered after the recycle.
 	confirmTimeout time.Duration
 
-	// recycleBackoff delays the channel close after an unconfirmable transfer, so
-	// redelivery is retried at a bounded rate rather than spinning.
+	// recycleBackoff delays the channel close after an unconfirmable transfer, and
+	// paces the supervisor's re-attach attempts, so redelivery is retried at a
+	// bounded rate rather than spinning.
 	recycleBackoff time.Duration
 
 	// closed is shut when Close runs, so a pending recycle does not outlive the

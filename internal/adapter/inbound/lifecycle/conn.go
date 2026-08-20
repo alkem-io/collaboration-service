@@ -132,16 +132,21 @@ var dialBroker = func(url string) (brokerConn, error) {
 	return amqpConn{conn}, nil
 }
 
-// Connect dials RabbitMQ, declares the durable lifecycle queue, starts consuming,
-// and routes each event to the Manager. Close it on shutdown. The returned
-// Consumer keeps running until Close or a connection drop.
-func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
-	if cfg.URL == "" {
-		return nil, fmt.Errorf("lifecycle consumer: URL is required")
-	}
-	if cfg.Queue == "" {
-		return nil, fmt.Errorf("lifecycle consumer: Queue is required")
-	}
+// session is one live broker attachment: a connection, a channel already wired
+// for publisher confirms and returns, and the delivery stream from it. It is the
+// unit the supervisor replaces — a dropped connection invalidates all of it at
+// once, so re-attaching means rebuilding the whole thing, not patching a part.
+type session struct {
+	conn       brokerConn
+	ch         brokerChannel
+	confirms   chan amqp.Confirmation
+	returns    chan amqp.Return
+	deliveries <-chan amqp.Delivery
+}
+
+// openSession dials the broker and brings one attachment all the way up: version
+// floor, topology, confirms, QoS, consume. Every failure closes what it opened.
+func openSession(cfg Config, names queueNames) (*session, error) {
 	conn, err := dialBroker(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rabbitmq: %w", err)
@@ -151,25 +156,25 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	// expire, so refusing here is the only point at which the failure is visible.
 	if err := requireVersionFloor(conn.ServerProperties()); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("lifecycle consumer: %w", err)
+		return nil, err
 	}
 	ch, err := conn.Channel()
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("open channel: %w", err)
 	}
-	names := namesFor(cfg.Queue)
-	if err := declareTopology(ch, names); err != nil {
+	fail := func(err error) (*session, error) {
 		_ = ch.Close()
 		_ = conn.Close()
-		return nil, fmt.Errorf("declare lifecycle topology: %w", err)
+		return nil, err
+	}
+	if err := declareTopology(ch, names); err != nil {
+		return fail(fmt.Errorf("declare lifecycle topology: %w", err))
 	}
 	// Publisher confirms must be enabled before any transfer: the ack/reject
 	// decision for every delivery depends on the broker's answer to a publish.
 	if err := ch.Confirm(false); err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, fmt.Errorf("enable publisher confirms: %w", err)
+		return fail(fmt.Errorf("enable publisher confirms: %w", err))
 	}
 	// Bound the unacked-delivery window BEFORE consuming (channel QoS). With manual
 	// ack and a single-threaded consume loop, an unset prefetch lets the broker
@@ -177,37 +182,122 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	// prefetch keeps the queue on the broker and feeds events only as they are
 	// acked. Must precede Consume to take effect on the first deliveries.
 	if err := ch.Qos(resolvePrefetch(cfg.Prefetch), 0, false); err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, fmt.Errorf("set lifecycle prefetch: %w", err)
+		return fail(fmt.Errorf("set lifecycle prefetch: %w", err))
 	}
 	// Manual ack (autoAck=false): a lifecycle event (e.g. document.deleted) must be
 	// acknowledged only AFTER its idempotent purge succeeds, so a crash or a backend
 	// failure between delivery and completion redelivers the event rather than
 	// silently dropping it (auto-ack is at-most-once; the cascade is a correctness
 	// requirement — no orphan documents).
-	deliveries, err := ch.Consume(cfg.Queue, "", false, false, false, false, nil)
+	deliveries, err := ch.Consume(names.main, "", false, false, false, false, nil)
 	if err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, fmt.Errorf("consume lifecycle queue: %w", err)
+		return fail(fmt.Errorf("consume lifecycle queue: %w", err))
+	}
+	return &session{
+		conn:       conn,
+		ch:         ch,
+		confirms:   ch.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		returns:    ch.NotifyReturn(make(chan amqp.Return, 1)),
+		deliveries: deliveries,
+	}, nil
+}
+
+// Connect dials RabbitMQ, declares the lifecycle topology, starts consuming, and
+// routes each event to the Manager. Close it on shutdown.
+//
+// The first attachment must succeed: a misconfigured URL or a broker below the
+// version floor is a startup error, not something to retry into. After that the
+// consumer supervises itself — a dropped connection, a broker restart, or a
+// deliberate recycle after an unconfirmable transfer is followed by re-attaching
+// on a bounded backoff, indefinitely, until Close.
+func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
+	if cfg.URL == "" {
+		return nil, fmt.Errorf("lifecycle consumer: URL is required")
+	}
+	if cfg.Queue == "" {
+		return nil, fmt.Errorf("lifecycle consumer: Queue is required")
+	}
+	names := namesFor(cfg.Queue)
+	sess, err := openSession(cfg, names)
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle consumer: %w", err)
 	}
 
 	c := &Consumer{
 		mgr:            mgr,
 		logger:         logger,
-		conn:           conn,
-		ch:             ch,
+		cfg:            cfg,
 		handlerTimeout: resolveHandlerTimeout(cfg.HandlerTimeout),
 		names:          names,
-		confirms:       ch.NotifyPublish(make(chan amqp.Confirmation, 1)),
-		returns:        ch.NotifyReturn(make(chan amqp.Return, 1)),
 		confirmTimeout: resolveConfirmTimeout(cfg.ConfirmTimeout),
 		recycleBackoff: resolveRecycleBackoff(cfg.RecycleBackoff),
 		closed:         make(chan struct{}),
 	}
-	go c.consume(deliveries)
+	c.adopt(sess)
+	go c.run(sess)
 	return c, nil
+}
+
+// adopt installs a session as the live attachment.
+func (c *Consumer) adopt(s *session) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn, c.ch = s.conn, s.ch
+	c.confirms, c.returns = s.confirms, s.returns
+}
+
+// live reads the current attachment as one consistent triple. The lock is for
+// Close, which runs on the caller's goroutine; transfer and the supervisor share
+// the run goroutine and cannot interleave with each other.
+func (c *Consumer) live() (brokerChannel, chan amqp.Confirmation, chan amqp.Return) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ch, c.confirms, c.returns
+}
+
+// run is the supervisor. consume returns when the delivery stream ends — which is
+// every way an attachment can die: the broker closed the connection, the channel
+// faulted, or recycle deliberately closed it after an unconfirmable transfer.
+// Without this loop that first recycle would be terminal: the consume goroutine
+// would exit and lifecycle events would stop being processed, silently and
+// permanently, while the process stayed healthy in every other respect.
+func (c *Consumer) run(sess *session) {
+	for {
+		c.consume(sess.deliveries)
+		// Anything still open on the dead session is released before re-attaching,
+		// so a broker-side channel fault does not leak the connection under it.
+		_ = sess.ch.Close()
+		_ = sess.conn.Close()
+
+		next := c.reattach()
+		if next == nil {
+			return // Close was called.
+		}
+		sess = next
+	}
+}
+
+// reattach re-opens a session, retrying on a bounded backoff until it succeeds or
+// the consumer is closed (in which case it returns nil). It retries forever by
+// design: the alternative is a live process that has silently stopped applying
+// deletions and revocations.
+func (c *Consumer) reattach() *session {
+	for {
+		select {
+		case <-c.closed:
+			return nil
+		case <-time.After(c.recycleBackoff):
+		}
+		sess, err := openSession(c.cfg, c.names)
+		if err != nil {
+			c.logger.Error("lifecycle consumer could not re-attach to the broker; retrying",
+				zap.Duration("backoff", c.recycleBackoff), zap.Error(err))
+			continue
+		}
+		c.adopt(sess)
+		c.logger.Info("lifecycle consumer re-attached to the broker")
+		return sess
+	}
 }
 
 // DefaultConfirmTimeout bounds the wait for a broker confirm/return on a transfer.
@@ -334,7 +424,14 @@ func (c *Consumer) recycle() {
 	case <-c.closed:
 		return
 	}
-	if err := c.ch.Close(); err != nil {
+	ch, _, _ := c.live()
+	if ch == nil {
+		return
+	}
+	// Closing the channel ends the delivery stream, which returns consume and hands
+	// control to the supervisor, which re-attaches. The unacked delivery goes back
+	// to the broker and is redelivered on the new attachment.
+	if err := ch.Close(); err != nil {
 		c.logger.Warn("closing the lifecycle channel after a failed transfer", zap.Error(err))
 	}
 }
@@ -372,11 +469,15 @@ func (c *Consumer) Close() error {
 			close(c.closed)
 		}
 	})
-	if c.ch != nil {
-		_ = c.ch.Close()
+	ch, _, _ := c.live()
+	if ch != nil {
+		_ = ch.Close()
 	}
-	if c.conn != nil {
-		return c.conn.Close()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

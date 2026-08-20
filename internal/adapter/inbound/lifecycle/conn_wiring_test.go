@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -163,6 +164,13 @@ func (f *fakeChannel) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed++
+	// A real channel close ends the delivery stream; the consume loop's only exit
+	// is that stream closing, so the fake must do the same or the supervisor is
+	// never reached.
+	if f.deliveries != nil {
+		close(f.deliveries)
+		f.deliveries = nil
+	}
 	return nil
 }
 
@@ -175,8 +183,13 @@ func (f *fakeChannel) closeCount() int {
 type fakeConn struct {
 	ch         *fakeChannel
 	channelErr error
-	closed     int
 	version    string
+
+	// The supervisor closes a dead session's connection from its own goroutine
+	// while Close may be closing the same one from the caller's, exactly as a real
+	// *amqp.Connection tolerates. The counter has to be safe for that.
+	mu     sync.Mutex
+	closed int
 }
 
 func (f *fakeConn) ServerProperties() amqp.Table {
@@ -194,19 +207,33 @@ func (f *fakeConn) Channel() (brokerChannel, error) {
 	return f.ch, nil
 }
 
-func (f *fakeConn) Close() error { f.closed++; return nil }
+func (f *fakeConn) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed++
+	return nil
+}
+
+func (f *fakeConn) closeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
 
 // withFakeBroker swaps the dial factory for the duration of one test.
-func withFakeBroker(t *testing.T, conn *fakeConn, dialErr error) {
+func withFakeBroker(t *testing.T, conn *fakeConn, dialErr error) *atomic.Int64 {
 	t.Helper()
+	var dials atomic.Int64
 	prev := dialBroker
 	dialBroker = func(string) (brokerConn, error) {
+		dials.Add(1)
 		if dialErr != nil {
 			return nil, dialErr
 		}
 		return conn, nil
 	}
 	t.Cleanup(func() { dialBroker = prev })
+	return &dials
 }
 
 // connectForTopologyTest connects against a fake broker and returns the channel
@@ -408,8 +435,8 @@ func TestConnectClosesWhatItOpenedOnEveryFailure(t *testing.T) {
 			if _, err := Connect(Config{URL: "amqp://stub", Queue: "q"}, &fakeManager{}, zap.NewNop()); err == nil {
 				t.Fatal("Connect must fail when the broker rejects a setup step")
 			}
-			if conn.closed != 1 {
-				t.Fatalf("connection closed %d times, want 1; a failed Connect that leaks its connection exhausts broker file descriptors during exactly the instability that causes retries", conn.closed)
+			if conn.closeCount() != 1 {
+				t.Fatalf("connection closed %d times, want 1; a failed Connect that leaks its connection exhausts broker file descriptors during exactly the instability that causes retries", conn.closeCount())
 			}
 			if got := tc.ch.closeCount(); got != tc.wantChClose {
 				t.Fatalf("channel closed %d times, want %d", got, tc.wantChClose)
@@ -451,28 +478,60 @@ func TestConnectRejectsIncompleteConfig(t *testing.T) {
 	}
 }
 
-// TestCloseTearsDownChannelAndConnection covers Close, including the nil-field
-// path a partially built Consumer would have.
-func TestCloseTearsDownChannelAndConnection(t *testing.T) {
+// TestCloseTearsDownChannelAndConnectionAndStopsSupervising covers Close on two
+// counts. It must release the channel and connection — and it must STOP the
+// supervisor. The supervisor's job is to re-attach whenever the delivery stream
+// ends, and Close ends it by closing the channel; if Close did not also stand the
+// supervisor down, shutdown would look exactly like a broker blip and the consumer
+// would dial its way back up forever behind a process that is trying to exit.
+func TestCloseTearsDownChannelAndConnectionAndStopsSupervising(t *testing.T) {
 	ch := &fakeChannel{}
 	conn := &fakeConn{ch: ch}
-	withFakeBroker(t, conn, nil)
+	dials := withFakeBroker(t, conn, nil)
 
-	c, err := Connect(Config{URL: "amqp://stub", Queue: "q"}, &fakeManager{}, zap.NewNop())
+	c, err := Connect(Config{URL: "amqp://stub", Queue: "q", RecycleBackoff: time.Millisecond}, &fakeManager{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("Connect dialled %d times, want 1", got)
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if ch.closeCount() != 1 || conn.closed != 1 {
-		t.Fatalf("Close left resources open: channel=%d connection=%d", ch.closeCount(), conn.closed)
+
+	// The supervisor closes the dead session too, so the counts are "at least once"
+	// rather than exactly once — closing an already-closed AMQP channel is a no-op
+	// error, and the invariant is release, not arithmetic.
+	waitFor(t, "channel and connection released", func() bool {
+		return ch.closeCount() >= 1 && conn.closeCount() >= 1
+	})
+
+	// Well past several backoffs: if the supervisor were still running it would have
+	// re-dialled by now.
+	time.Sleep(50 * time.Millisecond)
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dialled %d times after Close; the supervisor kept re-attaching through shutdown", got)
 	}
 
 	// A Consumer with nothing wired must not panic on Close.
 	if err := (&Consumer{}).Close(); err != nil {
 		t.Fatalf("Close on an unwired Consumer: %v", err)
 	}
+}
+
+// waitFor polls cond until it holds or the test times out. Used where the
+// supervisor goroutine, not the test goroutine, makes the state true.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // fakeAcker records ack/nack decisions. amqp.Delivery.Acknowledger is an
@@ -727,4 +786,74 @@ func TestAttemptHeaderRoutingIsTotalOverWhateverArrives(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheConsumerReAttachesAfterTheDeliveryStreamEnds is the test for the whole
+// point of the supervisor.
+//
+// Every way an attachment dies — the broker closing the connection, a channel
+// fault, or recycle deliberately closing the channel after an unconfirmable
+// transfer — ends the delivery stream, which returns the consume loop. Before the
+// supervisor existed that was terminal: the goroutine exited and the process went
+// on looking perfectly healthy while no document was ever purged and no revoked
+// grant was ever applied again. The retry ladder made it routine rather than
+// exceptional, because recycle closes the channel on purpose.
+//
+// So: kill the stream, then assert an event delivered afterwards is still handled.
+func TestTheConsumerReAttachesAfterTheDeliveryStreamEnds(t *testing.T) {
+	ch := &fakeChannel{confirmAck: true}
+	conn := &fakeConn{ch: ch}
+	dials := withFakeBroker(t, conn, nil)
+	mgr := &fakeManager{}
+
+	c, err := Connect(Config{URL: "amqp://stub", Queue: "q", RecycleBackoff: time.Millisecond}, mgr, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	deliver := func(id string) {
+		ch.mu.Lock()
+		d := ch.deliveries
+		ch.mu.Unlock()
+		if d == nil {
+			t.Fatalf("no delivery stream open when sending %s", id)
+		}
+		d <- amqp.Delivery{
+			Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": id}),
+			Acknowledger: &fakeAcker{},
+			DeliveryTag:  1,
+		}
+	}
+
+	deliver("before")
+	waitFor(t, "the first event to be purged", func() bool {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.purged) == 1
+	})
+
+	// Kill the attachment the way recycle does.
+	_ = ch.Close()
+
+	waitFor(t, "the supervisor to re-attach", func() bool { return dials.Load() >= 2 })
+	// The dead session's connection is released before re-attaching. Nothing else
+	// closes it — the test only closed the channel — so a supervisor that dropped
+	// the reference would leak one connection per blip, during exactly the broker
+	// instability that produces the blips.
+	if conn.closeCount() == 0 {
+		t.Fatal("the supervisor re-attached without releasing the dead session's connection")
+	}
+	waitFor(t, "a fresh delivery stream", func() bool {
+		ch.mu.Lock()
+		defer ch.mu.Unlock()
+		return ch.deliveries != nil
+	})
+
+	deliver("after")
+	waitFor(t, "an event delivered after the re-attach to be purged", func() bool {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.purged) == 2
+	})
 }
