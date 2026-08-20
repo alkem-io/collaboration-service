@@ -304,3 +304,66 @@ channel down whenever a queue is missing, which is exactly the situation worth
 reporting rather than dying on. The declare and the poll share one `topologyFor` list,
 so the arguments used to poll are by construction the ones used to declare — otherwise
 a drift between them would be an inequivalent redeclaration that kills the channel.
+
+## Real-broker integration (RabbitMQ 3.13.2)
+
+The unit tests prove what this code does; these prove what the **broker** does with
+it, which is a separate question and the one that actually bit. Run against a real
+3.13.2 with the management plugin; CI is pinned to that exact version so it proves
+the declared floor is *sufficient*, not merely that some newer broker works.
+
+| Test | What only a real broker can answer |
+|---|---|
+| `TestConsumerConsumesLivePublishedEvents` | the producer's frozen Q1 declaration and the consumer's coexist on one broker |
+| `TestQ1RejectsAnInequivalentProducerDeclaration` | the frozen contract is enforced by RabbitMQ (PRECONDITION_FAILED), not merely agreed in a document |
+| `TestAFailedEventLandsOnTheFirstRetryTier` | the transfer publish actually ROUTES — a confirm alone does not prove it, since a default-exchange publish to a missing queue is a silent discard that still confirms |
+| `TestAnUnactionableEventLandsInTheDeadLetterQueue` | an unreadable envelope is recorded, and skips the ladder |
+| `TestBrokerExpiresARetryTierBackToItsTarget` | the broker honours `x-message-ttl` + `x-dead-letter-strategy` on a quorum queue at all |
+| `TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing` | at-least-once retains an unroutable dead-letter, against an at-most-once control that loses it |
+| `TestTheRealLadderRedeliversAfterTheFirstTierExpires` | the shipped 30s tier round-trips: Q1 → tier → Q1 → next tier, with the attempt header surviving the broker's own republish |
+| `TestDepthPollingReportsRealBrokerCounts` | the depth gauge publishes the broker's number, not ours |
+
+### Negative control: the same tests on 3.9.13
+
+Run against the dev broker (`rabbitmq:3.9.13-management`):
+
+- `Connect` fails closed: *"broker is RabbitMQ 3.9.13; this topology requires >= 3.13.2…"*
+- `TestBrokerExpiresARetryTierBackToItsTarget` **fails**: after the TTL the tier
+  still holds its message and the target holds none. The broker accepted every
+  argument, echoed them back, and expired nothing.
+
+That is the whole justification for the version floor, reproduced as a test rather
+than as a claim. It is also why dev-orchestration must move off 3.9.13 before this
+ships.
+
+### Two assertions that were WRONG before they were right
+
+Both failures were mine, not the broker's, and both are the same mistake in
+different clothing: measuring a proxy instead of the property.
+
+**Reading the ready count for retention.** The first version asserted
+`queue.declare-ok`'s message count on the source tier and reported that at-least-once
+had *dropped* the message. It had not. A message held for a pending dead-letter hop
+is neither ready nor unacknowledged, so the ready count reads 0 for a message that
+is very much still there — the broker's own log said so at the time
+(*"to prevent dead-lettered messages from piling up in the source quorum queue"*)
+and `rabbitmqctl list_queues` confirmed `messages=1, messages_ready=0`. The fix was
+the total, from the management API. The review instruction had said "total count …
+not internal ready state"; I asserted the ready state anyway and then believed the
+result.
+
+**Sampling an eventually-consistent statistic once.** With the total wired up, the
+test passed two runs in three. The management API refreshes queue statistics on
+`collect_statistics_interval` (5s default), so a single sample is stale in both
+directions. The assertion now requires the count to *hold* across the refresh
+interval, and the control's 2-second TTL had to grow to 30 seconds — with a 2s TTL
+and 5s statistics, "the control message was here before it expired" is not an
+observable state, so the control was proving nothing.
+
+### A measured limit, recorded rather than papered over
+
+at-least-once **retains** an expired message whose target is missing. It does **not**
+resume the hop when the target is later created — measured over two minutes; the
+message stays put. Retention is the guarantee; recovery is an operator action. This
+is documented in the runbook rather than worked around, and it is why the topology
+declares all five queues up front.

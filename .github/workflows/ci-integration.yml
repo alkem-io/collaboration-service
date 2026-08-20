@@ -33,9 +33,21 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
 
       rabbitmq:
-        image: rabbitmq:3-alpine
+        # Pinned to the exact version floor the lifecycle topology declares
+        # (lifecycle.MinBrokerVersion), so CI proves the floor is SUFFICIENT rather
+        # than merely that some newer broker happens to work. Below it, a quorum
+        # queue accepts x-message-ttl and x-dead-letter-strategy, echoes them back,
+        # and expires nothing — measured on 3.9.13 — so an unpinned `rabbitmq:3`
+        # could silently drift under the floor and take the retry ladder with it.
+        #
+        # -management, not -alpine: the retention assertion needs a queue's TOTAL
+        # message count, and a message held for a pending dead-letter hop is neither
+        # ready nor unacknowledged, so queue.declare-ok cannot see it. Only the
+        # management API exposes the number.
+        image: rabbitmq:3.13.2-management
         ports:
           - 5672:5672
+          - 15672:15672
         options: >-
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 10s --health-timeout 5s --health-retries 12
@@ -44,6 +56,7 @@ jobs:
       # Integration-suite backend wiring (the build-tagged tests skip when unset).
       POSTGRES_TEST_DSN: postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
       RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
+      RABBITMQ_MANAGEMENT_URL: http://guest:guest@localhost:15672
 
     steps:
       - name: Checkout

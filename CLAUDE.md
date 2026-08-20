@@ -69,6 +69,7 @@ ports. Adapters implement them:
 | `BlobStore` | `.../contracts/persistence-ports.md` (content-blob) |
 | `Auth` | `.../contracts/ws-protocol.md` (handshake AuthN) |
 | `AuthZ` | `.../contracts/ws-protocol.md` + `lifecycle-events.md` (per-document AuthZ) |
+| lifecycle queue Q1 | `.../contracts/lifecycle-retry-runbook.md` (frozen args, retry ladder, DLQ replay) |
 
 ## Configuration (env vars)
 
