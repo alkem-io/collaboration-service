@@ -46,11 +46,15 @@ type fakeChannel struct {
 	// than merely asserted-to-have-happened.
 	calls []string
 
-	declareErr error
-	qosErr     error
-	consumeErr error
-	confirmErr error
-	publishErr error
+	// declaredMessages is the message count QueueDeclare reports, per queue. Depths
+	// differ per queue so a reading that is hardcoded, or taken from the wrong
+	// queue, cannot pass.
+	declaredMessages map[string]int
+	declareErr       error
+	qosErr           error
+	consumeErr       error
+	confirmErr       error
+	publishErr       error
 
 	// confirmAck/returnMsg script the broker's response to the next publish.
 	confirmAck  bool
@@ -135,9 +139,10 @@ func (f *fakeChannel) QueueDeclare(name string, durable, _, _, _ bool, args amqp
 	f.mu.Lock()
 	f.declarations = append(f.declarations, declaredQueue{name: name, durable: durable, args: args})
 	f.calls = append(f.calls, "declare:"+name)
+	msgs := f.declaredMessages[name]
 	defer f.mu.Unlock()
 	f.declared, f.durable = name, durable
-	return amqp.Queue{Name: name}, f.declareErr
+	return amqp.Queue{Name: name, Messages: msgs}, f.declareErr
 }
 
 func (f *fakeChannel) Qos(prefetchCount, _ int, _ bool) error {
@@ -573,7 +578,7 @@ func consumerForTest(t *testing.T, mgr Manager, ch *fakeChannel) *Consumer {
 	t.Helper()
 	ch.confirmAck = true
 	c := &Consumer{
-		mgr: mgr, logger: zap.NewNop(), ch: ch,
+		mgr: mgr, logger: zap.NewNop(), ch: ch, obs: NopObserver{},
 		handlerTimeout: time.Second,
 		names:          namesFor("lifecycle-q"),
 		confirms:       ch.NotifyPublish(make(chan amqp.Confirmation, 1)),
@@ -856,4 +861,204 @@ func TestTheConsumerReAttachesAfterTheDeliveryStreamEnds(t *testing.T) {
 		defer mgr.mu.Unlock()
 		return len(mgr.purged) == 2
 	})
+}
+
+// recordingObserver captures the operational signals the consumer emits.
+type recordingObserver struct {
+	mu        sync.Mutex
+	transfers []transferSignal
+	depths    map[string]int
+}
+
+type transferSignal struct {
+	queue     string
+	confirmed bool
+}
+
+func newRecordingObserver() *recordingObserver {
+	return &recordingObserver{depths: map[string]int{}}
+}
+
+func (o *recordingObserver) EventTransferred(queue string, confirmed bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.transfers = append(o.transfers, transferSignal{queue, confirmed})
+}
+
+func (o *recordingObserver) QueueDepth(queue string, messages int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.depths[queue] = messages
+}
+
+func (o *recordingObserver) snapshot() ([]transferSignal, map[string]int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	d := map[string]int{}
+	for k, v := range o.depths {
+		d[k] = v
+	}
+	return append([]transferSignal(nil), o.transfers...), d
+}
+
+// TestEveryTransferIsReported asserts each ladder hop reports where it went and
+// whether the broker took it — including the hop that did NOT happen.
+//
+// The unconfirmed case is the one worth stating. A transfer that is not confirmed
+// leaves the delivery unacked and recycles the channel, so nothing else in the
+// system records that anything went wrong; without this signal a broker that
+// accepts publishes but routes none of them looks, from outside, exactly like a
+// quiet day.
+func TestEveryTransferIsReported(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+
+	for _, tc := range []struct {
+		name      string
+		attempt   any
+		body      []byte
+		confirm   bool
+		wantQueue string
+		wantOK    bool
+	}{
+		{"first failure", nil, deleted, true, "lifecycle-q.retry.30s", true},
+		{"exhausted", tierCount, deleted, true, "lifecycle-q.dlq", true},
+		{"unactionable", nil, []byte("not json"), true, "lifecycle-q.dlq", true},
+		{"broker nacked the transfer", nil, deleted, false, "lifecycle-q.retry.30s", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := newRecordingObserver()
+			ch := &fakeChannel{}
+			c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+			c.obs = obs
+			ch.mu.Lock()
+			ch.confirmAck = tc.confirm
+			ch.mu.Unlock()
+
+			d := amqp.Delivery{Body: tc.body, Acknowledger: &fakeAcker{}, DeliveryTag: 1}
+			if tc.attempt != nil {
+				d.Headers = amqp.Table{headerAttempt: tc.attempt}
+			}
+			c.processOne(d)
+
+			transfers, _ := obs.snapshot()
+			if len(transfers) != 1 {
+				t.Fatalf("reported %d transfers, want exactly 1: %v", len(transfers), transfers)
+			}
+			if transfers[0].queue != tc.wantQueue || transfers[0].confirmed != tc.wantOK {
+				t.Fatalf("reported %+v, want {queue:%s confirmed:%v}", transfers[0], tc.wantQueue, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestSuccessIsNotReportedAsATransfer asserts a handled event emits nothing.
+// If success counted as a transfer, the "anything on the ladder" alert would fire
+// continuously on a perfectly healthy service and be turned off within a day.
+func TestSuccessIsNotReportedAsATransfer(t *testing.T) {
+	obs := newRecordingObserver()
+	ch := &fakeChannel{confirmAck: true}
+	c := consumerForTest(t, &fakeManager{}, ch)
+	c.obs = obs
+
+	c.processOne(amqp.Delivery{
+		Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"}),
+		Acknowledger: &fakeAcker{}, DeliveryTag: 1,
+	})
+
+	if transfers, _ := obs.snapshot(); len(transfers) != 0 {
+		t.Fatalf("a successfully handled event reported %v; the ladder alert would fire on a healthy service", transfers)
+	}
+}
+
+// TestQueueDepthIsPolledForEveryQueueInTheTopology asserts the level signal covers
+// the whole ladder, not just the DLQ.
+//
+// Depth is what a counter cannot give: it only goes up, so the increment that put
+// events in the DLQ scrolls out of the alert window while the events stay there.
+// Every tier is polled because per-tier depth is also how long things have been
+// failing — an event in the 30m tier has already survived 30s + 5m — and AMQP has
+// no message-age reading short of the management API.
+func TestQueueDepthIsPolledForEveryQueueInTheTopology(t *testing.T) {
+	obs := newRecordingObserver()
+	depths := map[string]int{
+		"lifecycle-q":           11,
+		"lifecycle-q.retry.30s": 22,
+		"lifecycle-q.retry.5m":  33,
+		"lifecycle-q.retry.30m": 44,
+		"lifecycle-q.dlq":       55,
+	}
+	ch := &fakeChannel{confirmAck: true, declaredMessages: depths}
+	conn := &fakeConn{ch: ch}
+	withFakeBroker(t, conn, nil)
+
+	c, err := Connect(Config{
+		URL: "amqp://stub", Queue: "lifecycle-q",
+		DepthPollInterval: time.Millisecond, Observer: obs,
+	}, &fakeManager{}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	waitFor(t, "every queue in the topology to report a depth", func() bool {
+		_, got := obs.snapshot()
+		for q := range depths {
+			if _, ok := got[q]; !ok {
+				return false
+			}
+		}
+		return true
+	})
+
+	_, got := obs.snapshot()
+	for q, want := range depths {
+		if got[q] != want {
+			t.Errorf("depth for %s = %d, want the broker's reported %d", q, got[q], want)
+		}
+	}
+}
+
+// TestDepthPollIntervalResolution pins the three-way meaning of the configured
+// interval. Asserted on the resolver rather than by waiting: a test that watches
+// for polls over a short window cannot tell "disabled" from "every 30 seconds",
+// and would pass against a resolver that quietly ignored the operator's choice.
+func TestDepthPollIntervalResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"unset takes the default", 0, DefaultDepthPollInterval},
+		{"configured is honoured", 5 * time.Second, 5 * time.Second},
+		{"negative disables polling", -1, -1},
+	} {
+		if got := resolveDepthPollInterval(tc.in); got != tc.want {
+			t.Errorf("%s: resolveDepthPollInterval(%v) = %v, want %v", tc.name, tc.in, got, tc.want)
+		}
+	}
+	if resolveDepthPollInterval(-1) > 0 {
+		t.Error("a negative interval resolved to a positive one; Connect starts the poller on >0, so polling could not be turned off")
+	}
+}
+
+// TestDepthPollingCanBeDisabled asserts the resolved decision is acted on: a
+// disabled poll starts no poller (and does not panic on a negative ticker).
+func TestDepthPollingCanBeDisabled(t *testing.T) {
+	obs := newRecordingObserver()
+	ch := &fakeChannel{confirmAck: true, declaredMessages: map[string]int{"lifecycle-q": 4}}
+	withFakeBroker(t, &fakeConn{ch: ch}, nil)
+
+	c, err := Connect(Config{
+		URL: "amqp://stub", Queue: "lifecycle-q",
+		DepthPollInterval: -1, Observer: obs,
+	}, &fakeManager{}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	time.Sleep(20 * time.Millisecond)
+	if _, depths := obs.snapshot(); len(depths) != 0 {
+		t.Fatalf("polling was disabled but reported %v", depths)
+	}
 }

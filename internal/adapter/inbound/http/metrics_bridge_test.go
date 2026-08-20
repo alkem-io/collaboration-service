@@ -98,3 +98,49 @@ func histogramCount(t *testing.T, name string) int {
 	}
 	return 0 // not yet observed.
 }
+
+// TestLifecycleObserverBridgeMovesItsSeries asserts the two lifecycle signals
+// reach the collectors and land on distinct label sets.
+//
+// The label split is the point. A single undifferentiated "a transfer happened"
+// counter would answer neither question the ladder poses: a transfer to the 30s
+// tier is a backend that just failed and has ~35 minutes of runway, while a
+// transfer to the DLQ is a deletion or revocation that will now never be applied
+// without a human. Collapsing them means either alerting on everything or noticing
+// nothing.
+func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
+	InitMetrics()
+	o := PrometheusLifecycleObserver{}
+
+	o.EventTransferred("lifecycle-q.retry.30s", true)
+	o.EventTransferred("lifecycle-q.dlq", true)
+	o.EventTransferred("lifecycle-q.retry.5m", false)
+	o.QueueDepth("lifecycle-q.dlq", 7)
+	o.QueueDepth("lifecycle-q.retry.30m", 2)
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.retry.30s"} 1`,
+		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.dlq"} 1`,
+		`collaboration_lifecycle_transfers_total{outcome="unconfirmed",queue="lifecycle-q.retry.5m"} 1`,
+		`collaboration_lifecycle_queue_depth{queue="lifecycle-q.dlq"} 7`,
+		`collaboration_lifecycle_queue_depth{queue="lifecycle-q.retry.30m"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+
+	// Depth is a LEVEL, not a running total: a later poll replaces the reading.
+	// If it accumulated, a queue that drained would still read as backed up and
+	// the DLQ alert would never clear.
+	o.QueueDepth("lifecycle-q.dlq", 3)
+	rr = httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rr.Body.String(); !strings.Contains(body, `collaboration_lifecycle_queue_depth{queue="lifecycle-q.dlq"} 3`) {
+		t.Error("a second depth reading did not replace the first; depth must be a level, or a drained queue still reads as backed up")
+	}
+}

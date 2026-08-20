@@ -145,6 +145,8 @@ func InitMetrics() {
 			FanoutTotal,
 			FanoutLagSeconds,
 			ContributingActors,
+			LifecycleTransfersTotal,
+			LifecycleQueueDepth,
 		)
 	})
 }
@@ -228,3 +230,60 @@ func (PrometheusMetrics) FanoutFailed() { FanoutTotal.WithLabelValues("error").I
 // flush is one observation, so the metric aggregates correctly across rooms (an
 // unlabeled .Set per room would be last-window-wins).
 func (PrometheusMetrics) ContributingActors(n int) { ContributingActors.Observe(float64(n)) }
+
+// LifecycleTransfersTotal counts lifecycle events republished onto the retry
+// ladder or into the dead-letter queue, by target queue and whether the broker
+// confirmed the publish.
+//
+// The first transfer to a retry tier is the alertable moment. A lifecycle event
+// that failed once means the backend behind the cascade is down, and the ladder
+// buys ~35 minutes before the event reaches the DLQ — which is the window in which
+// a human can act. Waiting for the DLQ to fill up is waiting until it is too late.
+//
+//	increase(collaboration_lifecycle_transfers_total{queue=~".+\\.retry\\..+"}[5m]) > 0
+//
+// outcome="unconfirmed" is separate and more serious: the event was NOT handed to
+// the broker, so it is still an unacknowledged delivery waiting on a channel
+// recycle. A sustained rate there means transfers are not landing at all.
+var LifecycleTransfersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "collaboration",
+	Name:      "lifecycle_transfers_total",
+	Help:      "Lifecycle events republished to a retry tier or the DLQ, by target queue and publish outcome.",
+}, []string{"queue", "outcome"})
+
+// LifecycleQueueDepth is the current message count of each queue in the lifecycle
+// topology.
+//
+// This is the signal LifecycleTransfersTotal cannot give. A counter only goes up,
+// so the increment that put ten events in the DLQ scrolls out of the alert window
+// while the events stay there. DLQ depth is the number of deletions and
+// revocations currently NOT applied, and it stays visible until someone drains it:
+//
+//	collaboration_lifecycle_queue_depth{queue=~".+\\.dlq"} > 0
+//
+// Per-tier depth also stands in for message age, quantized by the ladder: an event
+// in the 30m tier has already survived 30s + 5m.
+var LifecycleQueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "collaboration",
+	Name:      "lifecycle_queue_depth",
+	Help:      "Current message count of each queue in the lifecycle topology.",
+}, []string{"queue"})
+
+// PrometheusLifecycleObserver bridges the lifecycle consumer's operational
+// signals (lifecycle.Observer) to these collectors, keeping the AMQP adapter free
+// of a Prometheus import (hexagon §I).
+type PrometheusLifecycleObserver struct{}
+
+// EventTransferred counts one republished event by target queue and outcome.
+func (PrometheusLifecycleObserver) EventTransferred(queue string, confirmed bool) {
+	outcome := "unconfirmed"
+	if confirmed {
+		outcome = "confirmed"
+	}
+	LifecycleTransfersTotal.WithLabelValues(queue, outcome).Inc()
+}
+
+// QueueDepth publishes one queue's current message count.
+func (PrometheusLifecycleObserver) QueueDepth(queue string, messages int) {
+	LifecycleQueueDepth.WithLabelValues(queue).Set(float64(messages))
+}

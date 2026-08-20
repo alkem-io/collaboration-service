@@ -52,6 +52,11 @@ type Config struct {
 	// RecycleBackoff delays the channel close after an unconfirmable transfer.
 	// Zero uses DefaultRecycleBackoff.
 	RecycleBackoff time.Duration
+	// DepthPollInterval paces the queue-depth poll. Zero uses
+	// DefaultDepthPollInterval; a negative value disables polling.
+	DepthPollInterval time.Duration
+	// Observer receives the consumer's operational signals. Nil means NopObserver.
+	Observer Observer
 	// Prefetch caps the unacked deliveries the broker pushes at once (channel QoS),
 	// providing backpressure for the manual-ack, single-threaded consumer. Zero
 	// falls back to DefaultPrefetch.
@@ -223,9 +228,14 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 		return nil, fmt.Errorf("lifecycle consumer: %w", err)
 	}
 
+	obs := cfg.Observer
+	if obs == nil {
+		obs = NopObserver{}
+	}
 	c := &Consumer{
 		mgr:            mgr,
 		logger:         logger,
+		obs:            obs,
 		cfg:            cfg,
 		handlerTimeout: resolveHandlerTimeout(cfg.HandlerTimeout),
 		names:          names,
@@ -235,7 +245,60 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	}
 	c.adopt(sess)
 	go c.run(sess)
+	if every := resolveDepthPollInterval(cfg.DepthPollInterval); every > 0 {
+		go c.pollDepths(every)
+	}
 	return c, nil
+}
+
+// DefaultDepthPollInterval paces the queue-depth poll. Depth is a slow-moving
+// level, and each poll is one cheap RPC per queue, so this only needs to be fast
+// enough that a scrape never sees a stale level for long.
+const DefaultDepthPollInterval = 30 * time.Second
+
+// resolveDepthPollInterval maps a configured interval to its effective value:
+// zero takes the default, negative disables polling entirely.
+func resolveDepthPollInterval(d time.Duration) time.Duration {
+	if d == 0 {
+		return DefaultDepthPollInterval
+	}
+	return d
+}
+
+// pollDepths publishes each queue's message count until the consumer is closed.
+//
+// The depth comes from re-declaring the queue rather than from a passive declare
+// or the management API. An equivalent re-declaration is a no-op that returns the
+// current count, and the arguments come from the same topologyFor list used to
+// declare in the first place, so it cannot drift into an inequivalent declaration.
+// A passive declare would take the channel down whenever a queue was missing —
+// exactly the situation worth reporting rather than dying on.
+func (c *Consumer) pollDepths(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.closed:
+			return
+		case <-t.C:
+		}
+		ch, _, _ := c.live()
+		if ch == nil {
+			continue
+		}
+		for _, q := range topologyFor(c.names) {
+			info, err := ch.QueueDeclare(q.name, true, false, false, false, q.args)
+			if err != nil {
+				// The channel is likely dead; the supervisor re-attaches when the
+				// delivery stream ends. Report and give up on this round rather than
+				// hammering a broken channel with the remaining queues.
+				c.logger.Warn("lifecycle queue depth poll failed",
+					zap.String("queue", q.name), zap.Error(err))
+				break
+			}
+			c.obs.QueueDepth(q.name, info.Messages)
+		}
+	}
 }
 
 // adopt installs a session as the live attachment.
@@ -387,6 +450,7 @@ func (c *Consumer) processOne(d amqp.Delivery) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.confirmTimeout)
 	err := c.transfer(ctx, target, d, attempt+1)
 	cancel()
+	c.obs.EventTransferred(target, err == nil)
 
 	if err == nil {
 		if aerr := d.Ack(false); aerr != nil {

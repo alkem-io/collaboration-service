@@ -54,6 +54,7 @@ type envelope struct {
 type Consumer struct {
 	mgr    Manager
 	logger *zap.Logger
+	obs    Observer
 
 	// cfg is retained so the supervisor can re-open a session after the broker
 	// drops the current one.

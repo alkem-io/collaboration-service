@@ -215,6 +215,9 @@ func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Lo
 	queue := lifecycleQueue(cfg)
 	consumer, err := lifecycle.Connect(lifecycle.Config{
 		URL: cfg.RabbitMQ.URL, Queue: queue,
+		// Without an Observer the retry ladder is invisible: events would move to
+		// the DLQ and stay there with nothing to alert on.
+		Observer: httpAdapter.PrometheusLifecycleObserver{},
 	}, manager, logger.Named("lifecycle"))
 	if err != nil {
 		return fmt.Errorf("lifecycle consumer: %w", err)

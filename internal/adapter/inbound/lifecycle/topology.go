@@ -60,28 +60,30 @@ func namesFor(main string) queueNames {
 	return n
 }
 
-// declareTopology declares every queue this consumer owns.
+// queueSpec is one queue's declaration: the name and the exact argument table.
+// Declaration and depth-polling both go through this list, so the arguments used
+// to poll are by construction the ones used to declare — a re-declare with a
+// different table would fail PRECONDITION_FAILED and take the channel down.
+type queueSpec struct {
+	name string
+	args amqp.Table
+}
+
+// topologyFor is the whole topology as data.
 //
 // The TTL is int32 rather than int: AMQP argument types participate in
 // declaration equivalence, so a value that arrives as a different numeric type is
 // an inequivalent redeclaration and fails PRECONDITION_FAILED against a queue
 // declared by anything else.
-func declareTopology(ch brokerChannel, n queueNames) error {
-	// Q1: frozen contract, mirrored by the producer. Nothing but the queue type.
-	if _, err := ch.QueueDeclare(n.main, true, false, false, false, amqp.Table{
-		"x-queue-type": "quorum",
-	}); err != nil {
-		return fmt.Errorf("declare %s: %w", n.main, err)
-	}
-
-	// Q5: terminal. No TTL, no dead-lettering — a message here has exhausted the
-	// schedule and waits for a human.
-	if _, err := ch.QueueDeclare(n.dlq, true, false, false, false, amqp.Table{
-		"x-queue-type": "quorum",
-	}); err != nil {
-		return fmt.Errorf("declare %s: %w", n.dlq, err)
-	}
-
+func topologyFor(n queueNames) []queueSpec {
+	specs := make([]queueSpec, 0, 2+len(retryTiers))
+	specs = append(specs,
+		// Q1: frozen contract, mirrored by the producer. Nothing but the queue type.
+		queueSpec{n.main, amqp.Table{"x-queue-type": "quorum"}},
+		// Q5: terminal. No TTL, no dead-lettering — a message here has exhausted the
+		// schedule and waits for a human.
+		queueSpec{n.dlq, amqp.Table{"x-queue-type": "quorum"}},
+	)
 	// Q2-Q4: no consumer. A message sits for its TTL and is dead-lettered back to
 	// Q1 by the broker.
 	//
@@ -90,15 +92,24 @@ func declareTopology(ch brokerChannel, n queueNames) error {
 	// that exists to PROVIDE durability — silently drops messages. It requires
 	// x-overflow=reject-publish; at-least-once is refused with drop-head.
 	for i, t := range retryTiers {
-		if _, err := ch.QueueDeclare(n.tiers[i], true, false, false, false, amqp.Table{
+		specs = append(specs, queueSpec{n.tiers[i], amqp.Table{
 			"x-queue-type":              "quorum",
 			"x-message-ttl":             t.ttlMS,
 			"x-dead-letter-exchange":    "",
 			"x-dead-letter-routing-key": n.main,
 			"x-dead-letter-strategy":    "at-least-once",
 			"x-overflow":                "reject-publish",
-		}); err != nil {
-			return fmt.Errorf("declare %s: %w", n.tiers[i], err)
+		}})
+	}
+	return specs
+}
+
+// declareTopology declares every queue this consumer owns. Durable throughout: a
+// broker restart must not vaporise a pending deletion or revocation.
+func declareTopology(ch brokerChannel, n queueNames) error {
+	for _, q := range topologyFor(n) {
+		if _, err := ch.QueueDeclare(q.name, true, false, false, false, q.args); err != nil {
+			return fmt.Errorf("declare %s: %w", q.name, err)
 		}
 	}
 	return nil

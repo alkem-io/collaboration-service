@@ -256,3 +256,51 @@ supervisor re-attaches from the same goroutine `transfer` runs on, so the interl
 has no reachable instance. The probe that split the read stayed green for that reason,
 and the comment was corrected instead of a test being invented to justify it. The lock
 is there for `Close`, which does run on another goroutine.
+
+## Lifecycle observability
+
+Two signals, because they answer two questions a single metric cannot. Twelve
+probes, all RED.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| transfers are never reported | `TestEveryTransferIsReported` |
+| an unconfirmed transfer is reported as confirmed | ″ |
+| every transfer reports the same queue | ″ |
+| success also reports a transfer | `TestSuccessIsNotReportedAsATransfer` |
+| depth polling never starts | `TestQueueDepthIsPolledForEveryQueueInTheTopology` |
+| only the DLQ depth is polled | ″ |
+| the depth reading is discarded | ″ |
+| every queue reports the main queue's depth | ″ |
+| a configured poll interval is ignored | ″ + `TestDepthPollIntervalResolution` |
+| a negative poll interval falls back to the default | `TestDepthPollIntervalResolution` |
+| the Prometheus bridge collapses the outcome label | `TestLifecycleObserverBridgeMovesItsSeries` |
+| queue depth accumulates instead of replacing | ″ |
+
+Two of those probes were **VACUOUS on the first run**, and both times the test was
+at fault:
+
+- *"the depth reading is discarded"* — the fake reported `4` for every queue and
+  the probe hardcoded `4`, so the mutation was indistinguishable from the truth.
+  The fake now reports a **different count per queue**, which also catches a
+  reading taken from the wrong queue.
+- *"a negative poll interval falls back to the default"* — `TestDepthPollingCanBeDisabled`
+  waited 20ms and saw no poll. So would a 30-second default. A window-based test
+  cannot tell *disabled* from *slow*, so the three-way meaning of the interval is
+  now pinned on the resolver itself, with the behavioural test kept only for the
+  part it can actually observe (no poller, no panic on a negative ticker).
+
+`QueueDepth` is a level and `EventTransferred` is a rate, deliberately. A counter
+alone cannot answer "is there unattended work": it only goes up, so the increment
+that put ten events in the DLQ scrolls out of the alert window while the events sit
+there. A gauge alone cannot answer "did anything just fail", because a transfer that
+lands in a tier and expires back out is invisible between polls. Per-tier depth also
+substitutes for message age — the ladder quantizes it, and AMQP offers no age reading
+short of the management API or consuming the queue to peek.
+
+Depth is read by **re-declaring** each queue, not by a passive declare. An equivalent
+re-declaration is a no-op that returns the current count; a passive declare takes the
+channel down whenever a queue is missing, which is exactly the situation worth
+reporting rather than dying on. The declare and the poll share one `topologyFor` list,
+so the arguments used to poll are by construction the ones used to declare — otherwise
+a drift between them would be an inequivalent redeclaration that kills the channel.
