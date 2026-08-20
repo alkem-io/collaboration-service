@@ -1,7 +1,8 @@
 package model
 
 // CollaboratorMode is a participant's per-document interaction mode, granted by
-// AuthZ at the handshake and re-evaluated on document.access_changed. An
+// AuthZ once at the handshake. It is the SESSION's capability and holds for
+// the life of that WebSocket; a reconnect is evaluated again. An
 // inactive collaborator may be downgraded to viewer (FR-014).
 type CollaboratorMode string
 

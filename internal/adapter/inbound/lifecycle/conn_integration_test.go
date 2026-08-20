@@ -40,10 +40,9 @@ import (
 
 // recordingManager records the lifecycle calls the consumer routes to it.
 type recordingManager struct {
-	mu          sync.Mutex
-	purged      []string
-	reEvaluated []string
-	purgeErr    error
+	mu       sync.Mutex
+	purged   []string
+	purgeErr error
 }
 
 func (m *recordingManager) Purge(_ context.Context, id model.DocumentID) error {
@@ -51,12 +50,6 @@ func (m *recordingManager) Purge(_ context.Context, id model.DocumentID) error {
 	defer m.mu.Unlock()
 	m.purged = append(m.purged, string(id))
 	return m.purgeErr
-}
-
-func (m *recordingManager) ReEvaluate(_ context.Context, id model.DocumentID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.reEvaluated = append(m.reEvaluated, string(id))
 }
 
 func (m *recordingManager) count(list *[]string) int {

@@ -30,8 +30,6 @@ func (b *blockingManager) Purge(ctx context.Context, _ model.DocumentID) error {
 	return ctx.Err()
 }
 
-func (b *blockingManager) ReEvaluate(_ context.Context, _ model.DocumentID) {}
-
 func (b *blockingManager) PreRegister(_ context.Context, _ model.Metadata) error { return nil }
 
 // TestHandleDeliveryBoundsAStuckHandler defends the per-delivery timeout context

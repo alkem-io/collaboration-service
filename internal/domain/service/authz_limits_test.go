@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -267,142 +266,6 @@ func TestMaxDocSizeRejectsBeforeCommit(t *testing.T) {
 	}
 }
 
-// TestReEvaluateDowngradesOnAccessChange asserts a re-evaluation that revokes
-// update-content downgrades a live collaborator to viewer (read-only-state),
-// the document.access_changed path (T014).
-func TestReEvaluateDowngradesOnAccessChange(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "access-change", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	// Revoke update-content, then trigger a re-evaluation.
-	authz.set(allow, deny)
-	mgr.ReEvaluate(context.Background(), "access-change")
-
-	waitFor(t, "downgrade on access change", func() bool { return hasReadOnly(a, true) })
-}
-
-// TestReEvaluateUpgradesOnAccessChange asserts a re-evaluation that grants
-// update-content upgrades a live viewer to collaborator, emitting a
-// read-only-state{false} control so the client re-enables editing (T014).
-func TestReEvaluateUpgradesOnAccessChange(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: deny}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "upgrade", model.ContentTypeMemo)
-	a.observeUpdates()
-	// Joined as a viewer (read-only on join).
-	if !hasReadOnly(a, true) {
-		t.Fatal("expected viewer read-only on join")
-	}
-
-	// Grant update-content, then re-evaluate → upgrade to collaborator.
-	authz.set(allow, allow)
-	mgr.ReEvaluate(context.Background(), "upgrade")
-
-	waitFor(t, "upgrade clears read-only", func() bool { return hasReadOnly(a, false) })
-}
-
-// TestReEvaluateFailsClosed asserts that an AuthZ error during a re-evaluation
-// downgrades a live collaborator to viewer (never silently keeps a stale grant).
-func TestReEvaluateFailsClosed(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "authz-flaps", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	authz.setErr(errors.New("auth service degraded"))
-	mgr.ReEvaluate(context.Background(), "authz-flaps")
-
-	waitFor(t, "fail-closed downgrade", func() bool { return hasReadOnly(a, true) })
-}
-
-// TestReEvaluateDisconnectsOnReadRevocation asserts that when a re-evaluation
-// finds READ access revoked, the member is DISCONNECTED (room-closed control),
-// not downgraded to viewer. A viewer still receives every doc update, so a
-// read-revoked member kept as a viewer would keep reading the document — an
-// access-revocation leak (CR critical, presence.go). The fix must eject.
-func TestReEvaluateDisconnectsOnReadRevocation(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "read-revoked", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	// Revoke READ (and update-content), then trigger a re-evaluation.
-	authz.set(deny, deny)
-	mgr.ReEvaluate(context.Background(), "read-revoked")
-
-	// The member is ejected with a room-closed control carrying the revoke reason —
-	// NOT merely downgraded to a read-only viewer.
-	waitFor(t, "read-revoked member disconnected", func() bool {
-		for _, m := range controlMessages(a) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "read access revoked" {
-				return true
-			}
-		}
-		return false
-	})
-	// And it must NOT have been left connected as a viewer (the leak we are fixing):
-	// the room drops the member, so the room count returns to zero once it idles out.
-	waitFor(t, "room releases after the only member is ejected", func() bool {
-		return mgr.RoomCount() == 0
-	})
-	if hasReadOnly(a, true) {
-		// A read-revoked member must be ejected, never downgraded to a viewer that
-		// keeps receiving updates.
-		// (A read-only-state control would indicate the leaky downgrade path.)
-		t.Fatal("read-revoked member was downgraded to viewer instead of disconnected")
-	}
-}
-
-// TestReEvaluateDisconnectsAllReadRevokedMembers asserts the re-evaluation loop
-// disconnects EVERY member whose read access was revoked (not just the first),
-// exercising the snapshot-iteration path with multiple ejections in one pass.
-func TestReEvaluateDisconnectsAllReadRevokedMembers(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "multi-revoke", model.ContentTypeMemo)
-	a.observeUpdates()
-	b := newFakeClient(t)
-	b.join(mgr, "multi-revoke", model.ContentTypeMemo)
-	b.observeUpdates()
-
-	authz.set(deny, deny) // revoke read for everyone
-	mgr.ReEvaluate(context.Background(), "multi-revoke")
-
-	closed := func(c *fakeClient) bool {
-		for _, m := range controlMessages(c) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "read access revoked" {
-				return true
-			}
-		}
-		return false
-	}
-	waitFor(t, "both members disconnected on read revocation", func() bool {
-		return closed(a) && closed(b) && mgr.RoomCount() == 0
-	})
-}
-
 // TestMaxDocSizeDisabledAllowsAnySize asserts that with MaxDocBytes disabled (0),
 // the pre-commit size gate is a no-op: a large update applies and broadcasts
 // normally (the limit check short-circuits without scratch-applying).
@@ -430,40 +293,6 @@ func TestMaxDocSizeDisabledAllowsAnySize(t *testing.T) {
 			t.Fatalf("unexpected disconnect with MaxDocBytes disabled: %q", m.Error)
 		}
 	}
-}
-
-// mutableAuthZ is an AuthZ whose decisions can change between calls, to drive the
-// re-evaluation path. A non-nil err makes every evaluation fail closed.
-type mutableAuthZ struct {
-	mu     sync.Mutex
-	read   model.AuthDecision
-	update model.AuthDecision
-	err    error
-}
-
-func (a *mutableAuthZ) set(read, update model.AuthDecision) {
-	a.mu.Lock()
-	a.read, a.update = read, update
-	a.err = nil
-	a.mu.Unlock()
-}
-
-func (a *mutableAuthZ) setErr(err error) {
-	a.mu.Lock()
-	a.err = err
-	a.mu.Unlock()
-}
-
-func (a *mutableAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.DocumentID, p model.Privilege) (model.AuthDecision, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.err != nil {
-		return model.AuthDecision{}, a.err
-	}
-	if p == model.PrivilegeRead {
-		return a.read, nil
-	}
-	return a.update, nil
 }
 
 // controlMessages returns a copy of every control message a client received.

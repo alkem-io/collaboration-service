@@ -1,8 +1,6 @@
 package service
 
 import (
-	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -110,63 +108,6 @@ func TestInactivityDowngradeReason(t *testing.T) {
 	}
 }
 
-// TestReEvaluateDowngradeReason asserts a member that loses update-content on a
-// re-evaluation is downgraded read-only with the `no-update-access` reason
-// (OPEN-1, document.access_changed path).
-func TestReEvaluateDowngradeReason(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClientWithIdentity(t, "actor-revoked")
-	a.join(mgr, "reeval-reason", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	authz.set(allow, deny)
-	mgr.ReEvaluate(context.Background(), "reeval-reason")
-
-	waitFor(t, "downgrade on access change", func() bool {
-		_, ok := readOnlyReason(a)
-		return ok
-	})
-	reason, _ := readOnlyReason(a)
-	if reason != model.ReasonNoUpdateAccess {
-		t.Fatalf("read-only reason = %q, want %q", reason, model.ReasonNoUpdateAccess)
-	}
-}
-
-// TestReEvaluateUpgradeClearsReason asserts a re-evaluation that grants
-// update-content clears read-only with no reason (the empty Reason on the
-// readOnly:false frame), and emits no collaborator-mode downgrade.
-func TestReEvaluateUpgradeClearsReason(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: deny}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClientWithIdentity(t, "actor-granted")
-	a.join(mgr, "upgrade-reason", model.ContentTypeMemo)
-	a.observeUpdates()
-	// Joined as a viewer (read-only on join).
-	waitFor(t, "viewer read-only on join", func() bool { return hasReadOnly(a, true) })
-
-	authz.set(allow, allow)
-	mgr.ReEvaluate(context.Background(), "upgrade-reason")
-
-	waitFor(t, "upgrade clears read-only", func() bool { return hasReadOnly(a, false) })
-
-	// The clearing frame carries no reason.
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, m := range a.control {
-		// An explicit-false (regain/clear) read-only-state frame must carry no reason.
-		if m.Kind == model.ControlReadOnlyState && m.ReadOnly != nil && !*m.ReadOnly && m.Reason != "" {
-			t.Fatalf("read-only clear frame carried a reason %q, want empty", m.Reason)
-		}
-	}
-}
-
 // TestReadOnlyReasonForIdentity is the focused unit test for the identity→reason
 // mapping (OPEN-1): anonymous → not-authenticated, authenticated → no-update-access.
 func TestReadOnlyReasonForIdentity(t *testing.T) {
@@ -175,31 +116,5 @@ func TestReadOnlyReasonForIdentity(t *testing.T) {
 	}
 	if got := readOnlyReasonForIdentity(model.Identity{ActorID: "x"}); got != model.ReasonNoUpdateAccess {
 		t.Errorf("authenticated reason = %q, want %q", got, model.ReasonNoUpdateAccess)
-	}
-}
-
-// TestReEvaluateFailClosedReason asserts a fail-closed authZ error on a
-// re-evaluation downgrades a member read-only with the access reason (never a
-// silent stale grant), exercising the err path's reason mapping.
-func TestReEvaluateFailClosedReason(t *testing.T) {
-	authz := &mutableAuthZ{read: allow, update: allow}
-	deps := newTestDeps()
-	deps.AuthZ = authz
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	a := newFakeClientWithIdentity(t, "actor-flap")
-	a.join(mgr, "reeval-failclosed", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	authz.setErr(errors.New("auth degraded"))
-	mgr.ReEvaluate(context.Background(), "reeval-failclosed")
-
-	waitFor(t, "fail-closed downgrade", func() bool {
-		_, ok := readOnlyReason(a)
-		return ok
-	})
-	reason, _ := readOnlyReason(a)
-	if reason != model.ReasonNoUpdateAccess {
-		t.Fatalf("fail-closed read-only reason = %q, want %q", reason, model.ReasonNoUpdateAccess)
 	}
 }

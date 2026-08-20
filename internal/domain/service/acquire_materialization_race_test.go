@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/memory"
 	"github.com/antst/go-yjs/backend/persistence"
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"go.uber.org/zap"
@@ -234,7 +235,25 @@ func TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 	if registered {
 		t.Fatal("a room materialized during shutdown was registered after the drain snapshot; nothing will ever flush it")
 	}
-	if residentInRegistry(t, mgr.registry, doc) {
+	// Probe only while the registry is still open. Close() closes it last, and a
+	// CLOSED registry cannot be holding anything — so "closed" is not evidence of
+	// the leak this guards against, it is the absence of the possibility. Racing
+	// the probe against Close and calling the resulting error a failure is what
+	// made this flake.
+	if registryOpen(mgr.registry) && residentInRegistry(t, mgr.registry, doc) {
 		t.Fatal("the refused room was never torn down; its document stays resident and its registry handle outlives the Manager that made it")
 	}
+}
+
+// registryOpen reports whether a registry still accepts acquisitions.
+func registryOpen(reg memory.Registry) bool {
+	handle, err := reg.Acquire(context.Background(), backend.DocumentID("registry-open-probe"), func(context.Context) (*ycrdt.Doc, error) {
+		return newRoomDoc("registry-open-probe"), nil
+	})
+	if err != nil {
+		return false
+	}
+	handle.Release()
+	_ = reg.Evict(backend.DocumentID("registry-open-probe"))
+	return true
 }

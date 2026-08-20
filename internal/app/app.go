@@ -198,7 +198,7 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 }
 
 // startLifecycle starts the RabbitMQ lifecycle consumer (document.deleted cascade,
-// optional created/access_changed) on the Alkemio bus, registering its closer.
+// document.deleted) on the Alkemio bus, registering its closer.
 // It is a no-op in standalone mode — the create/delete HTTP API replaces the bus
 // events there (T015/T016). A failure to connect is fatal in Alkemio mode (the
 // cascade is a correctness requirement: no orphan documents).

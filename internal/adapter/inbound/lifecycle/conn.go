@@ -24,10 +24,10 @@ const DefaultPrefetch = 1
 // DefaultHandlerTimeout bounds the processing of a single lifecycle delivery when
 // Config.HandlerTimeout is unset. The consumer is single-threaded (one goroutine
 // draining the delivery channel serially), so a handler that blocks indefinitely
-// — a wedged Purge/ReEvaluate backend call — would head-of-line-block
+// — a wedged Purge backend call — would head-of-line-block
 // every subsequent lifecycle event. A per-delivery deadline keeps a stuck handler
 // from freezing the consumer: a handler that observes the context (PreRegister,
-// ReEvaluate) is abandoned at the deadline and treated as a failure. A Purge that hands the
+// abandoned at the deadline and treated as a failure. A Purge that hands the
 // delete to a live room's run loop is instead bounded by that room's own
 // BackendTimeout per queued command — still bounded, never indefinite.
 const DefaultHandlerTimeout = 30 * time.Second
@@ -69,8 +69,6 @@ type Config struct {
 type Manager interface {
 	// Purge runs the owner-delete cascade (disconnect, release, purge durable).
 	Purge(ctx context.Context, id model.DocumentID) error
-	// ReEvaluate re-runs per-document authZ for a live room's members.
-	ReEvaluate(ctx context.Context, id model.DocumentID)
 }
 
 // brokerChannel and brokerConn are the narrow slices of amqp091-go this consumer

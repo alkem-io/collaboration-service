@@ -59,8 +59,12 @@ type command struct {
 	src      connID
 	conn     Conn
 	identity model.Identity
-	data     []byte
-	done     chan joinResult
+	// mode is the session capability the Manager evaluated BEFORE this room was
+	// materialized. The room does not re-derive it: authorization is established
+	// once per connection and holds for the life of the socket.
+	mode model.CollaboratorMode
+	data []byte
+	done chan joinResult
 	// done2 returns the result of a cmdPurge run on the room loop (T015).
 	done2 chan error
 }
@@ -76,9 +80,6 @@ const (
 	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
 	// (room-closed), purge metadata + blob, and release the room (T015).
 	cmdPurge
-	// cmdReEvaluate re-runs per-document authZ for connected members on the run
-	// loop (lifecycle document.access_changed, T014).
-	cmdReEvaluate
 )
 
 // peerUpdate is a fan-out payload received from another pod. It is delivered to the
@@ -261,26 +262,6 @@ func (r *Room) persistNow() {
 	r.persist(ctx)
 }
 
-// reEvaluateNow re-evaluates members under a bounded, room-scoped context so a
-// slow/hung authZ backend cannot wedge the loop.
-func (r *Room) reEvaluateNow() {
-	ctx, cancel := r.opCtx()
-	defer cancel()
-	r.reEvaluateMembers(ctx)
-}
-
-// handleReEvaluate runs a re-evaluation and re-arms the idle timer if it emptied
-// the room. A re-evaluation can disconnect members whose read access was revoked;
-// if that left the room empty, the idle timer must be re-armed so the now-empty
-// room is released (and its goroutine reclaimed) rather than leaking — mirroring
-// cmdLeave.
-func (r *Room) handleReEvaluate(armIdle func()) {
-	r.reEvaluateNow()
-	if len(r.members) == 0 {
-		armIdle()
-	}
-}
-
 // flushContributionNow flushes the contribution window under a bounded,
 // room-scoped context (the bus Contributor call must not stall the loop).
 func (r *Room) flushContributionNow() {
@@ -326,7 +307,7 @@ func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
 	default:
 	}
 	// Slow path: the command buffer is full. Bounded-block so a producer (Forward /
-	// Leave / ReEvaluate) is never wedged behind a stuck loop — it gives up at the
+	// Leave / Purge) is never wedged behind a stuck loop — it gives up at the
 	// caller's ctx (e.g. the lifecycle handler timeout) or the deadline backstop.
 	t := time.NewTimer(enqueueDeadline)
 	defer t.Stop()
@@ -907,7 +888,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	switch cmd.kind {
 	case cmdJoin:
 		stopTimer(idleTimer)
-		res := r.handleJoin(cmd.conn, cmd.identity)
+		res := r.handleJoin(cmd.conn, cmd.identity, cmd.mode)
 		// Guard the result send like cmd.done2: the only cmdJoin producer always
 		// supplies a buffered done, but a nil channel here would panic the loop.
 		if cmd.done != nil {
@@ -935,9 +916,6 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	case cmdPersist:
 		r.persistNow()
 
-	case cmdReEvaluate:
-		r.handleReEvaluate(armIdle)
-
 	case cmdPurge:
 		r.teardown(func() {
 			err := r.purgeNow()
@@ -957,22 +935,19 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	return true
 }
 
-// handleJoin registers a connection after enforcing the connection cap (FR-024)
-// and resolving its collaborator mode via per-document authZ (T014). It returns
-// the joiner's id and the initial frames it must send (SyncStep1 + the current
-// awareness snapshot so the newcomer sees existing presence) and a `read-only-
-// state` control for a viewer; or an error when the room is full (ErrRoomFull),
-// read is denied (ErrForbidden), or authZ failed closed.
-func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
+// handleJoin registers a connection after enforcing the connection cap (FR-024).
+// It returns the joiner's id and the initial frames it must send (SyncStep1 + the
+// current awareness snapshot so the newcomer sees existing presence) and a
+// `read-only-state` control for a viewer; or ErrRoomFull.
+//
+// Authorization is NOT decided here. The Manager evaluated it before this room
+// was materialized (authorizeSession) and passed the result in: a connection that
+// lacks read access never reaches a room at all. Re-deriving it here would mean
+// the expensive materialization had already happened for a caller who may be
+// refused, which is exactly what the pre-acquire check removed.
+func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.CollaboratorMode) joinResult {
 	if r.maxConns > 0 && len(r.members) >= r.maxConns {
 		return joinResult{err: ErrRoomFull}
-	}
-
-	joinCtx, cancel := r.opCtx()
-	mode, err := r.resolveMode(joinCtx, identity)
-	cancel()
-	if err != nil {
-		return joinResult{err: err}
 	}
 
 	r.nextID++
@@ -1012,29 +987,6 @@ func (r *Room) handleJoin(c Conn, identity model.Identity) joinResult {
 	})
 
 	return joinResult{id: id, frames: frames}
-}
-
-// resolveMode decides a joiner's collaborator mode from per-document authZ
-// (T014). It first checks read access (a clean deny → ErrForbidden), then
-// update-content (granted → collaborator, denied → viewer). Any authZ port error
-// is returned so the join fails closed (constitution §V). In open/standalone mode
-// the AuthZ adapter grants everything, so every join is a collaborator.
-func (r *Room) resolveMode(ctx context.Context, identity model.Identity) (model.CollaboratorMode, error) {
-	read, err := r.deps.AuthZ.Evaluate(ctx, identity, r.id, model.PrivilegeRead)
-	if err != nil {
-		return "", fmt.Errorf("authorize read: %w", err)
-	}
-	if !read.Allowed {
-		return "", ErrForbidden
-	}
-	write, err := r.deps.AuthZ.Evaluate(ctx, identity, r.id, model.PrivilegeUpdateContent)
-	if err != nil {
-		return "", fmt.Errorf("authorize update-content: %w", err)
-	}
-	if write.Allowed {
-		return model.ModeCollaborator, nil
-	}
-	return model.ModeViewer, nil
 }
 
 // readOnlyReasonForIdentity maps a viewer's identity to its read-only reason

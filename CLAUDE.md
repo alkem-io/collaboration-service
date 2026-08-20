@@ -68,7 +68,7 @@ ports. Adapters implement them:
 | `MetadataStore` | `.../contracts/persistence-ports.md` (metadata/index) |
 | `BlobStore` | `.../contracts/persistence-ports.md` (content-blob) |
 | `Auth` | `.../contracts/ws-protocol.md` (handshake AuthN) |
-| `AuthZ` | `.../contracts/ws-protocol.md` + `lifecycle-events.md` (per-document AuthZ) |
+| `AuthZ` | `.../contracts/ws-protocol.md` (per-document AuthZ, evaluated once per session) |
 | lifecycle queue Q1 | `.../contracts/lifecycle-retry-runbook.md` (frozen args, retry ladder, DLQ replay) |
 
 ## Configuration (env vars)
@@ -89,6 +89,13 @@ zero-dependency run costs one explicit line per selector:
   `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
   client-controllable `Authorization` default is rejected at startup.
 - `AUTHZ_MODE` — `authzeval` | `open` (derived from `AUTH_MODE` when unset)
+
+**Authorization is per WebSocket session.** READ and UPDATE are evaluated once, at
+connection open and BEFORE the room is materialized, and the resulting capability
+holds until that socket closes. There are no per-frame checks and no lease. A
+revocation therefore takes effect on the client's next connection, not immediately —
+see the runbook. A denied session closes `1008`; an authorization backend outage
+closes `1011`, so clients keep retrying.
 
 ## Development Workflow
 
@@ -112,13 +119,20 @@ bytes, and the file-service store accepts V2 only because its blob is a bare Yjs
 update other systems read. Nothing infers a codec from bytes — the wrong decoder
 returns an empty state vector with no error.
 
-**Deployment is blocked**, and not on this repo. The lifecycle retry topology needs
-**RabbitMQ >= 3.13.2** and the service refuses to start below it; dev-orchestration
-runs 3.9.13, where a quorum queue accepts the TTL and dead-letter arguments, echoes
-them back, and expires nothing. Every environment also needs its existing queue
-state checked first — queue arguments are immutable after declaration, so a queue
-that already exists with different ones cannot be reconfigured, only deleted and
-recreated. Preconditions and the check are in
+**Broker requirement.** The lifecycle retry topology needs **RabbitMQ >= 3.13.2**
+and the service refuses to start below it: on 3.9.13 a quorum queue accepts the TTL
+and dead-letter arguments, echoes them back, and expires nothing. CI and
+dev-orchestration now run **4.0.5**, so the floor is satisfied.
+
+4.0 changed a default that this topology cares about — quorum queues now set
+`delivery-limit=20` where 3.x was unlimited — and that interacts with the
+transfer-failure contract, which deliberately leaves a delivery unacked and
+recycles the channel. **Audit open**; see the runbook.
+
+Every environment also needs its existing queue state checked before deploying:
+queue arguments are immutable after declaration, so a queue that already exists
+with different ones cannot be reconfigured, only deleted and recreated.
+Preconditions and the check are in
 [`specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md`](./specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md).
 Do not lower the floor to make a local environment work: it does not buy
 compatibility, it buys a service that looks healthy while silently dropping

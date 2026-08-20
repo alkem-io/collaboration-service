@@ -10,32 +10,6 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// TestResolveModeUpdateErrorFailsClosed asserts resolveMode returns an error
-// (fails closed) when read is granted but the update-content evaluation errors —
-// the connection must not be silently admitted as a viewer.
-func TestResolveModeUpdateErrorFailsClosed(t *testing.T) {
-	room := newBareRoom(t)
-	room.deps.AuthZ = privAuthZ{
-		read:   func() (model.AuthDecision, error) { return model.AuthDecision{Allowed: true}, nil },
-		update: func() (model.AuthDecision, error) { return model.AuthDecision{}, errors.New("eval failed") },
-	}
-	if _, err := room.resolveMode(context.Background(), model.Identity{ActorID: "a"}); err == nil {
-		t.Fatal("expected resolveMode to fail closed on an update-content error")
-	}
-}
-
-// TestResolveModeReadErrorFailsClosed asserts resolveMode fails closed when the
-// read evaluation itself errors.
-func TestResolveModeReadErrorFailsClosed(t *testing.T) {
-	room := newBareRoom(t)
-	room.deps.AuthZ = privAuthZ{
-		read: func() (model.AuthDecision, error) { return model.AuthDecision{}, errors.New("eval failed") },
-	}
-	if _, err := room.resolveMode(context.Background(), model.Identity{ActorID: "a"}); err == nil {
-		t.Fatal("expected resolveMode to fail closed on a read error")
-	}
-}
-
 // TestTrackAwarenessIDIgnoresMalformed asserts a malformed awareness payload does
 // not corrupt the member's awareness mapping (it stays unset).
 func TestTrackAwarenessIDIgnoresMalformed(t *testing.T) {
@@ -184,33 +158,4 @@ func TestApplyPeerEphemeralCustomChannel(t *testing.T) {
 	if local.count() == 0 {
 		t.Fatal("peer ephemeral frame not fanned to the local member")
 	}
-}
-
-// TestReEvaluateNoChangeKeepsMode asserts a re-evaluation that yields the same
-// grant does not emit a redundant read-only-state control.
-func TestReEvaluateNoChangeKeepsMode(t *testing.T) {
-	room := newBareRoom(t) // open AuthZ → everyone is a collaborator
-	c := &captureConn{}
-	room.members[1] = roomMember{id: 1, conn: c, mode: model.ModeCollaborator}
-	room.reEvaluateMembers(context.Background())
-	if c.count() != 0 {
-		t.Fatal("a no-op re-evaluation emitted a control message")
-	}
-}
-
-// privAuthZ is an AuthZ stub whose per-privilege outcomes are supplied as
-// closures, to drive resolveMode's read/update branches.
-type privAuthZ struct {
-	read   func() (model.AuthDecision, error)
-	update func() (model.AuthDecision, error)
-}
-
-func (a privAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.DocumentID, p model.Privilege) (model.AuthDecision, error) {
-	if p == model.PrivilegeRead {
-		return a.read()
-	}
-	if a.update != nil {
-		return a.update()
-	}
-	return model.AuthDecision{Allowed: true}, nil
 }

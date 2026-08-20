@@ -2,7 +2,6 @@
 // Alkemio server's owner-driven document lifecycle events (FR-023) on the same
 // bus as the metadata persistence. `document.deleted` cascades a purge (the room
 // is closed and the metadata + snapshot are deleted, no orphan);
-// `document.created` pre-registers metadata; `document.access_changed` re-runs
 // per-document authorization for connected clients. The wire shape is the NestJS
 // event envelope { pattern, data, id }, so a NestJS @EventPattern publisher on
 // the server reaches it natively.
@@ -27,18 +26,10 @@ import (
 const (
 	// PatternDocumentDeleted is the owner-delete cascade trigger.
 	PatternDocumentDeleted = "document.deleted"
-	// PatternDocumentAccessChanged re-evaluates per-document authorization.
-	PatternDocumentAccessChanged = "document.access_changed"
 )
 
 // DeletedEvent is the document.deleted payload: the document to purge.
 type DeletedEvent struct {
-	ID string `json:"id"`
-}
-
-// AccessChangedEvent is the optional document.access_changed payload: the
-// document whose connected clients must be re-authorized.
-type AccessChangedEvent struct {
 	ID string `json:"id"`
 }
 
@@ -133,8 +124,6 @@ func (c *Consumer) handle(ctx context.Context, body []byte) ackAction {
 	switch env.Pattern {
 	case PatternDocumentDeleted:
 		return c.handleDeleted(ctx, env.Data)
-	case PatternDocumentAccessChanged:
-		return c.handleAccessChanged(ctx, env.Data)
 	default:
 		return ackTerminal // outside the contract: record it.
 	}
@@ -153,16 +142,5 @@ func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackA
 			zap.String("doc", ev.ID), zap.Error(err))
 		return retryLater
 	}
-	return ackSuccess
-}
-
-func (c *Consumer) handleAccessChanged(ctx context.Context, data json.RawMessage) ackAction {
-	var ev AccessChangedEvent
-	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return ackTerminal // malformed payload: record it rather than swallow it.
-	}
-	// ReEvaluate cannot fail: it downgrades what it can reach and leaves the rest
-	// to the next join. There is no transient outcome to retry.
-	c.mgr.ReEvaluate(ctx, model.DocumentID(ev.ID))
 	return ackSuccess
 }

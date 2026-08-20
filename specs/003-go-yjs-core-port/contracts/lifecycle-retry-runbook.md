@@ -1,15 +1,50 @@
 # Lifecycle retry ladder — contract and operations runbook
 
-The lifecycle consumer applies two events from `server`:
+The lifecycle consumer applies ONE event from `server`:
 
 | Pattern | What it does | Why losing it matters |
 |---|---|---|
 | `document.deleted` | runs the owner-delete cascade (disconnect, release, purge durable state) | the only path that purges a document; losing it orphans content the owner believes is gone |
-| `document.access_changed` | re-evaluates authorization for a live room's members | the only revocation path; losing it leaves a revoked member editing |
 
-Neither is recoverable by any other route, so the consumer never drops an event it
-could not apply. It moves the event down a delay ladder instead, and finally to a
+Anything else — an unrecognised pattern, an unparseable body — goes straight to the
+dead-letter queue; see "What lands where".
+
+**There is no `document.access_changed`.** Authorization is decided once per
+WebSocket session, before the room is materialized, and holds until that socket
+closes; a revocation takes effect when the client next connects. There is nothing
+for a mid-session event to do, so the pattern, its handler, and the re-evaluation
+they drove were removed rather than left inert.
+
+The delete cascade is not recoverable by any other route, so the consumer never
+drops an event it could not apply. It moves the event down a delay ladder instead, and finally to a
 queue where a person can see it.
+
+## Authorization is per WebSocket session
+
+Worth knowing before anything below, because it decides what an operator can and
+cannot fix by changing permissions:
+
+**A session's capability is decided once, when the socket opens, and lasts until it
+closes.** The service authenticates, then asks the authorization-evaluation service
+for READ and UPDATE on that document, derives viewer/collaborator, and uses that for
+the life of the connection. It does not re-check per frame, and there is no lease or
+TTL.
+
+**Revoking someone's access does not disconnect them.** It takes effect the next
+time they connect. A WebSocket session can last hours, so a user whose permission
+was removed may keep reading — and writing, if they had write — until they close the
+tab, lose their network, or the pod restarts. That is the deliberate contract, not a
+gap: authorization is a property of the connection.
+
+If a revocation must take effect NOW, end the sessions rather than changing
+permissions and waiting: delete the document (`document.deleted` disconnects
+everyone), or restart the pods serving it. There is no in-band mechanism for
+mid-session revocation, by design.
+
+A reconnect is a new session and is evaluated afresh, so a revoked user is refused
+with a `1008` policy close on their next attempt. An authorization backend outage
+closes with `1011` instead, so clients keep retrying rather than treating an outage
+as a permanent denial.
 
 ## Before deploying — preconditions, not suggestions
 
@@ -17,12 +52,18 @@ The service **fails closed** on both of these. That is deliberate: each failure 
 silent and unrecoverable if it is allowed through, so it is a startup refusal
 instead.
 
-**1. Every target broker runs RabbitMQ >= 3.13.2.** Not just production —
-dev-orchestration too, which at the time of writing runs `rabbitmq:3.9.13-management`
-and therefore cannot run this service at all. On 3.9.13 a quorum queue *accepts*
-`x-message-ttl` and `x-dead-letter-strategy`, reports both back on inspection, and
-never expires anything. Every retry piles up in its tier, is redelivered never, and
-produces no error anywhere.
+**1. Every target broker runs RabbitMQ >= 3.13.2.** On 3.9.13 a quorum queue
+*accepts* `x-message-ttl` and `x-dead-letter-strategy`, reports both back on
+inspection, and never expires anything. Every retry piles up in its tier, is
+redelivered never, and produces no error anywhere.
+
+CI and dev-orchestration now run **4.0.5**, so the floor is met. Note that 4.0
+changed a default this topology depends on: quorum queues now apply
+`delivery-limit=20`, where 3.x was unlimited. Our transfer-failure contract
+deliberately leaves a delivery unacked and recycles the channel, so an event can be
+redelivered repeatedly — and Q1 has no dead-letter exchange, so at the limit the
+broker would DROP it. **That audit is open and is not yet reflected in the topology
+below.**
 
 **Do not weaken the floor to make a local environment work.** Lowering it does not
 buy compatibility, it buys a service that looks healthy while silently dropping
@@ -243,9 +284,8 @@ the event's history, and that counter is what puts it back: it reaches the
 been replayed three times and failed again is visibly different from one failing for
 the first time. That difference is the signal to escalate rather than repeat.
 
-Both handlers are **idempotent** — purging an already-purged document succeeds, and
-re-evaluating access is a recomputation — so replaying a message that was in fact
-applied is safe.
+The handler is **idempotent** — purging an already-purged document succeeds — so
+replaying a message that was in fact applied is safe.
 
 ## Failure modes worth knowing
 

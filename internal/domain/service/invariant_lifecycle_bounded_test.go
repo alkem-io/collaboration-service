@@ -9,12 +9,17 @@ import (
 )
 
 // TestInvLifecycleBounded — INV-LIFECYCLE-BOUNDED (spec 002 FR-014). A lifecycle
-// event must be bounded per delivery on EVERY event type. document.access_changed →
-// ReEvaluate enqueues onto a room; if that room's command buffer is full, the enqueue
-// must give up at the handler's deadline so one busy room cannot head-of-line-block
-// the single-threaded lifecycle consumer. RED before 002: handleAccessChanged took no
-// ctx and ReEvaluate's enqueue was unbounded, so a full-buffer room blocked the
-// consumer indefinitely.
+// event must be bounded per delivery. document.deleted → Purge enqueues onto the
+// room; if that room's command buffer is full, the enqueue must give up rather
+// than block, so one busy room cannot head-of-line-block the single-threaded
+// lifecycle consumer.
+//
+// Purge is now the only lifecycle event — document.access_changed and the
+// re-evaluation it drove were removed with the session-lifetime authorization
+// contract. It reaches the room through enqueue (a background context), so what
+// bounds it is enqueueCtx's own deadline backstop rather than the caller's ctx;
+// that is what this pins. On give-up, Purge falls through to the direct durable
+// purge, so the cascade still completes.
 func TestInvLifecycleBounded(t *testing.T) {
 	m, deps := testManager(t, RoomConfig{SendBuffer: 16, SaveDebounce: time.Hour, IdleTimeout: time.Hour, BackendTimeout: 5 * time.Second})
 	id := model.DocumentID("doc-lifecycle-bounded")
@@ -25,17 +30,17 @@ func TestInvLifecycleBounded(t *testing.T) {
 		room.commands <- command{kind: cmdMessage}
 	}
 
-	// A document.access_changed delivery, bounded by a short handler timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// A document.deleted delivery against that wedged room.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { m.ReEvaluate(ctx, id); close(done) }()
+	go func() { _ = m.Purge(ctx, id); close(done) }()
 
 	select {
 	case <-done:
-		// good: ReEvaluate honoured the handler deadline instead of blocking on the
-		// full buffer.
-	case <-time.After(3 * time.Second):
-		t.Fatal("ReEvaluate (access_changed) blocked on a full command buffer — a busy room head-of-line-blocks the lifecycle consumer past its deadline (FR-014)")
+		// good: the enqueue gave up at its backstop instead of blocking on the full
+		// buffer, and the cascade completed durably.
+	case <-time.After(enqueueDeadline + 5*time.Second):
+		t.Fatal("Purge (document.deleted) blocked on a full command buffer — a busy room head-of-line-blocks the single-threaded lifecycle consumer (FR-014)")
 	}
 }

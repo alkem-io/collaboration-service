@@ -57,11 +57,12 @@ type Auth interface {
 
 // AuthZ evaluates per-document authorization for an authenticated identity via
 // the authorization-evaluation-service (h2c HTTP/2 POST /internal/auth/evaluate,
-// or NATS). It is re-evaluated on document.access_changed. The 'open' adapter
+// or NATS). It is evaluated ONCE per WebSocket
+// session, before the room is materialized, and holds until that socket closes. The 'open' adapter
 // grants everything for standalone use.
 //
 // Maps to: contracts/ws-protocol.md ("AuthZ per document … viewer-vs-
-// collaborator") and lifecycle-events.md (document.access_changed).
+// collaborator").
 type AuthZ interface {
 	// Evaluate decides whether the identity holds the privilege on the
 	// document. A non-nil error means the question could not be answered;

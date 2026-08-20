@@ -676,3 +676,87 @@ still RED.
 
 Worth recording because the failure mode is generic: a test that closes a consumer
 to "stop" it is not draining it, and any unacked delivery comes back.
+
+## Authorization moved in front of materialization
+
+Found by tracing, then measured before it was fixed: authorization was decided
+INSIDE the room, which meant the room already existed by the time anyone asked.
+`Manager.Join` called `acquire` — which loads the document out of durable storage,
+opens a fan-out subscription and takes a registry slot — and only then ran
+`resolveMode` on the room's run loop.
+
+Measured on the unfixed tree: a denied actor produced `LoadCheckpoint=1` and left
+the room live; **25 denied joins on 25 distinct ids produced 25 live rooms**. No
+content was ever sent to the denied caller — that boundary always held, and this was
+never a disclosure — but the fetch, the memory, the fan-out subscription and the
+existence/latency signal were all reachable without authorization.
+
+`Manager.authorizeSession` now runs before the acquire loop. It evaluates READ, then
+UPDATE, derives the session's capability once, and passes it into the room on the
+join command. `handleJoin` no longer decides authorization at all; it enforces the
+connection cap and uses the capability it was given.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the pre-acquire gate removed (authorize after materialization) | `TestADeniedReadNeverMaterializesTheDocument`, `TestAnAuthZOutageFailsClosedWithoutMaterializing`, `TestASessionCostsExactlyTwoEvaluations` |
+| a denied read treated as viewer instead of refused | `TestADeniedReadNeverMaterializesTheDocument` |
+| an authz backend error reported as a denial | `TestAnAuthZOutageFailsClosedWithoutMaterializing` |
+| write capability assumed rather than evaluated | `TestASessionCostsExactlyTwoEvaluations` |
+
+The denial test asserts against the backend rather than inferring: zero
+`LoadCheckpoint` calls, zero live rooms, not resident in `mgr.registry`, and exactly
+ONE evaluation — there is nothing to decide about writing once reading is refused.
+
+The session test asserts the evaluation count is exactly `[read, update-content]`
+and **does not grow while document traffic flows**. That is the assertion that would
+catch a drift back to per-frame authorization, which is a different contract with a
+different cost.
+
+At the WebSocket boundary the two failure kinds are kept distinct, because the
+client behaves differently: a denial closes `1008` (a verdict — do not retry), an
+authorization backend outage closes `1011` (transient — keep retrying). Coercing the
+outage to a denial would make a five-minute authz outage look to every user like
+permanent loss of access to their own documents.
+
+## The mid-session re-authorization surface, deleted
+
+The settled contract is that authorization is established once per WebSocket session
+and holds until the socket closes; a revocation takes effect on the next connect.
+`document.access_changed` re-authorized mid-session and disconnected members, which
+is the opposite of that.
+
+It was also never reachable: **zero producers anywhere in the workspace** — not in
+`server/src` (worktree or clone), not in any `.ts` or `.go` outside this repo. A
+consumer for an event nobody emits.
+
+Removed: `PatternDocumentAccessChanged`, `AccessChangedEvent`, `handleAccessChanged`,
+the lifecycle port's `ReEvaluate`, `Manager.ReEvaluate`, `cmdReEvaluate`,
+`handleReEvaluate`, `reEvaluateNow`, `reEvaluateMembers`, `Room.resolveMode`,
+`mustReadOnlyControl`, and eleven tests that asserted mid-session downgrade,
+upgrade, and disconnect-on-revocation.
+
+Two things were **retargeted rather than deleted**, because the property survived
+and only its home moved:
+
+- `TestResolveModeUpdateErrorFailsClosed` / `TestResolveModeReadErrorFailsClosed`
+  became `TestASessionFailsClosedOnEitherEvaluation` against `authorizeSession`. The
+  update-content half is the one worth keeping: read succeeded, so the caller is
+  entitled to the document, and the tempting failure is to admit them as a viewer —
+  silently converting an infrastructure outage into a permission decision that the
+  client has no reason to retry.
+- `TestInvLifecycleBounded` (FR-014) used `ReEvaluate` as its vehicle. Before
+  deleting it I checked whether the invariant still holds for the one remaining
+  event: `Purge` reaches the room through `enqueue`, which is `enqueueCtx` with a
+  background context — but `enqueueCtx` has its own `enqueueDeadline` backstop
+  independent of ctx, so a busy room still cannot head-of-line-block the consumer.
+  The invariant is live; the test now drives it through `Purge`.
+
+## A flake in my own earlier test
+
+`TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom` (landed in 215afa2)
+failed roughly one run in six with `memory: registry closed`. `Manager.Close()`
+closes the registry last, and the test probed the registry after Close had been
+started — so the probe raced the teardown and reported the resulting error as a
+leak. A CLOSED registry cannot be holding anything; "closed" is the absence of the
+failure, not evidence of it. The probe now runs only while the registry is open.
+Ten consecutive runs green.

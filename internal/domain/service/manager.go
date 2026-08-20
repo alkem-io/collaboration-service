@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -208,6 +209,22 @@ type JoinRequest struct {
 // the joiner's collaborator mode (T014) and enforces the connection cap (FR-024);
 // a join can therefore be refused (errRoomFull) or fail closed on an authZ error.
 func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte, error) {
+	// AUTHORIZE FIRST — before acquire, which materializes the room: it loads the
+	// document from durable storage, opens a fan-out subscription, and takes a
+	// registry slot. Evaluating after that let an actor with no read access make
+	// the service fetch and decode any document it could name, and leave a live
+	// room behind for the idle timeout. Nothing was ever sent to them, so it was
+	// never a disclosure — but the work, the memory, the Redis subscription and
+	// the timing signal were all reachable without authorization.
+	//
+	// The grant is evaluated ONCE per connection and travels with the join. It is
+	// the session's capability for as long as the socket is open; see
+	// authorizeSession.
+	mode, err := m.authorizeSession(ctx, req.ID, req.Identity)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Retry once if the acquired room tears down between acquire and join (a
 	// narrow race where the last member left and the idle timer fired). A second
 	// acquire materializes a fresh room.
@@ -218,7 +235,7 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		}
 
 		res := make(chan joinResult, 1)
-		if !room.enqueue(command{kind: cmdJoin, conn: req.Conn, identity: req.Identity, done: res}) {
+		if !room.enqueue(command{kind: cmdJoin, conn: req.Conn, identity: req.Identity, mode: mode, done: res}) {
 			continue
 		}
 		select {
@@ -238,6 +255,40 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		}
 	}
 	return nil, nil, errRoomUnavailable
+}
+
+// authorizeSession evaluates the connecting identity's capability for one
+// document, once, at connection establishment.
+//
+// Both privileges are decided here rather than one now and one later: they are a
+// single question about one session ("may this connection read, and may it
+// write"), and answering half of it before materialization and half after would
+// put the expensive work between the two halves for no benefit.
+//
+// The result is the SESSION's capability and stays valid until the socket closes.
+// That is the product contract, not an optimization: authorization is established
+// per connection, and a permission revoked elsewhere takes effect when the client
+// next connects. A reconnect is a new session and is evaluated again.
+//
+// Fail-closed (constitution §V): a port error is returned as-is, NOT as
+// ErrForbidden, so the handshake closes with a transient/internal status and the
+// client keeps retrying rather than treating a backend outage as a denial.
+func (m *Manager) authorizeSession(ctx context.Context, id model.DocumentID, identity model.Identity) (model.CollaboratorMode, error) {
+	read, err := m.deps.AuthZ.Evaluate(ctx, identity, id, model.PrivilegeRead)
+	if err != nil {
+		return "", fmt.Errorf("authorize read: %w", err)
+	}
+	if !read.Allowed {
+		return "", ErrForbidden
+	}
+	write, err := m.deps.AuthZ.Evaluate(ctx, identity, id, model.PrivilegeUpdateContent)
+	if err != nil {
+		return "", fmt.Errorf("authorize update-content: %w", err)
+	}
+	if write.Allowed {
+		return model.ModeCollaborator, nil
+	}
+	return model.ModeViewer, nil
 }
 
 // Purge runs the owner-delete cascade for a document (FR-023, T015): it
@@ -323,21 +374,6 @@ func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
 		return err
 	}
 	return nil
-}
-
-// ReEvaluate asks a live room to re-run per-document authorization for its
-// connected members (lifecycle document.access_changed, T014/T015). It is a no-op
-// when no room is live for the document.
-func (m *Manager) ReEvaluate(ctx context.Context, id model.DocumentID) {
-	m.mu.Lock()
-	room, live := m.rooms[id]
-	m.mu.Unlock()
-	if live {
-		// Bound the enqueue by the caller's context (the lifecycle handler timeout),
-		// so a busy room cannot head-of-line-block the single lifecycle consumer
-		// past its deadline (002 FR-014).
-		room.enqueueCtx(ctx, command{kind: cmdReEvaluate})
-	}
 }
 
 // PreRegister writes an initial metadata row for a document ahead of its first

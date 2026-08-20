@@ -17,7 +17,6 @@ import (
 type fakeManager struct {
 	mu          sync.Mutex
 	purged      []model.DocumentID
-	reEvaluated []model.DocumentID
 	registered  []model.Metadata
 	purgeErr    error
 	registerErr error
@@ -28,12 +27,6 @@ func (f *fakeManager) Purge(_ context.Context, id model.DocumentID) error {
 	defer f.mu.Unlock()
 	f.purged = append(f.purged, id)
 	return f.purgeErr
-}
-
-func (f *fakeManager) ReEvaluate(_ context.Context, id model.DocumentID) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.reEvaluated = append(f.reEvaluated, id)
 }
 
 func (f *fakeManager) PreRegister(_ context.Context, meta model.Metadata) error {
@@ -91,21 +84,6 @@ func TestDocumentDeletedIdempotentOnError(t *testing.T) {
 	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-2"}))
 }
 
-// TestDocumentAccessChangedReEvaluates asserts document.access_changed triggers a
-// re-evaluation for the document (T014/T015).
-func TestDocumentAccessChangedReEvaluates(t *testing.T) {
-	mgr := &fakeManager{}
-	c := newConsumer(mgr)
-
-	c.handle(context.Background(), eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: "doc-4"}))
-
-	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	if len(mgr.reEvaluated) != 1 || mgr.reEvaluated[0] != "doc-4" {
-		t.Fatalf("reEvaluated = %v, want [doc-4]", mgr.reEvaluated)
-	}
-}
-
 // TestUnknownPatternIgnored asserts an unrelated pattern is ignored without error
 // (the consumer shares the bus with the metadata-store RPC replies).
 func TestUnknownPatternIgnored(t *testing.T) {
@@ -128,10 +106,8 @@ func TestMalformedAndEmptyEventsAreTerminal(t *testing.T) {
 
 	bodies := [][]byte{
 		eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}),
-		eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: ""}),
 		// Non-object data for each pattern → unmarshal error.
 		eventBody(t, PatternDocumentDeleted, "not-an-object"),
-		eventBody(t, PatternDocumentAccessChanged, []int{1, 2}),
 	}
 	for i, body := range bodies {
 		if got := c.handle(context.Background(), body); got != ackTerminal {
@@ -141,9 +117,9 @@ func TestMalformedAndEmptyEventsAreTerminal(t *testing.T) {
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
-	if len(mgr.purged)+len(mgr.registered)+len(mgr.reEvaluated) != 0 {
-		t.Fatalf("empty/malformed events drove a cascade: purged=%v registered=%v reEvaluated=%v",
-			mgr.purged, mgr.registered, mgr.reEvaluated)
+	if len(mgr.purged)+len(mgr.registered) != 0 {
+		t.Fatalf("empty/malformed events drove a cascade: purged=%v registered=%v",
+			mgr.purged, mgr.registered)
 	}
 }
 
@@ -161,7 +137,6 @@ func TestHandleVerdictsSeparateSuccessFromUnactionable(t *testing.T) {
 		want ackAction
 	}{
 		{"deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"}), ackSuccess},
-		{"access_changed", eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: "a"}), ackSuccess},
 		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"}), ackTerminal},
 		{"not-json", []byte("not json"), ackTerminal},
 		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}), ackTerminal},
