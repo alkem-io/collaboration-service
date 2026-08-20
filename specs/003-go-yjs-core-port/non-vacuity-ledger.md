@@ -787,13 +787,10 @@ so nothing increments a delivery count. They keep the broker default deliberatel
 |---|---|
 | Q1 falls back to the 4.0 default | `TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries` (real 4.0.5) |
 | the DLQ falls back to the 4.0 default | `TestTheDeadLetterQueueSurvivesRepeatedFailedReplays` (real 4.0.5) |
-| the limit set at the wrong width (`int`, not `int32`) | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` |
+| the limit written at a different width (`int`, not `int32`) | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` (a CONVENTION check — see the correction below) |
 | a tier gains a limit it must not have | ″ |
 
-The width matters as much as the value. Argument TYPE participates in declaration
-equivalence, and Q1 is declared by `server` too — `int` and `int32` are different
-wire types, so a width mismatch fails `PRECONDITION_FAILED` and whichever side
-declares second does not start. The frozen Q1 literal is now, exactly:
+The frozen Q1 literal is now, exactly:
 
 ```go
 amqp.Table{"x-queue-type": "quorum", "x-delivery-limit": int32(-1)}
@@ -816,3 +813,38 @@ shorter than the round trip needed to look. The poll recreated the queue before 
 "it is really gone" check could see the gap. The test now uses a deliberately slow
 2-second poll so both halves are observable, and allows the quorum delete to become
 visible rather than assuming a Raft operation is instant. Six consecutive runs green.
+
+### Correction: integer width is not declaration-equivalence load-bearing
+
+I claimed, in the commit message for the 4.0 fix and in the topology comments, the
+runbook, CLAUDE.md and this ledger, that `int` versus `int32` on a queue argument
+would fail `PRECONDITION_FAILED` and stop whichever side declared second. **That is
+wrong.** RabbitMQ normalizes integer widths for these arguments.
+
+Raised by a cross-language gate (a Go `int32(-1)` queue reasserted successfully by
+amqplib with plain `-1`, `int8`, `int16`, `int32` and `int64`), then reproduced here
+against real 4.0.5 rather than taken on trust:
+
+| Redeclaration of a queue holding `x-delivery-limit: int32(-1)` | Result |
+|---|---|
+| same value as a plain Go `int` | accepted |
+| same value as `int8` / `int16` / `int64` | accepted |
+| **different value** (`int32(5)`) | `PRECONDITION_FAILED — received '5' but current is '-1'` |
+| **argument omitted** | `PRECONDITION_FAILED — received none but current is the value '-1' of type 'signedint'` |
+
+The same is true of `x-message-ttl`: `int` and `int64` at the same value redeclare
+fine; only a changed value is refused.
+
+So what is actually load-bearing across the producer/consumer boundary is the
+argument **set** and its **values** — including that omitting an argument the queue
+already has is refused just as a changed value is, which is the more useful half and
+is the one the runbook now leads with. Width is a repo convention, matching the
+`signedint` type the broker reports back. The unit assertions on `int32` are kept and
+relabelled as convention checks; they no longer claim to model a broker refusal.
+
+Worth recording how I got it wrong, because the evidence was already in front of me:
+the mutation probe "the limit is set at the wrong width (int, not int32)" came back
+**VACUOUS** against the real-broker integration tests. I noted that, attributed the
+RED to the unit wiring test, and moved on — when the vacuous result against the
+broker was precisely the finding. A probe that fails to go RED where the claim says
+it should is evidence about the claim, not noise to be routed around.

@@ -303,9 +303,11 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	t.Cleanup(func() { _ = consumer.Close() })
 
 	_, ch := dialTest(t)
-	// The producer's own declaration of Q1 — the frozen contract, byte-for-byte.
-	// If this drifts from declareTopology's table the broker refuses one of them,
-	// which is exactly the failure this asserts cannot happen.
+	// The producer's own declaration of Q1 — the frozen contract. If the argument
+	// SET or its VALUES drift from declareTopology's table the broker refuses one
+	// of them, which is exactly the failure this asserts cannot happen. (Integer
+	// widths are normalized by the broker, so it is the values that must match, not
+	// the Go types.)
 	if _, err := ch.QueueDeclare(queue, true, false, false, false, amqp.Table{
 		"x-queue-type":     "quorum",
 		"x-delivery-limit": int32(-1),

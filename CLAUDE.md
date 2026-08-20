@@ -128,7 +128,7 @@ dev-orchestration now run **4.0.5**, so the floor is satisfied.
 which would silently drop an event redelivered past it on a queue with no
 dead-letter exchange — measured: the 21st delivery loses it. Q1 and the DLQ
 therefore declare `x-delivery-limit: int32(-1)`; the retry tiers deliberately do
-not. Q1's literal is mirrored byte-for-byte by `server`.
+not. Q1's arguments are mirrored by `server`: the same set, with the same values.
 
 Every environment also needs its existing queue state checked before deploying:
 queue arguments are immutable after declaration, so a queue that already exists

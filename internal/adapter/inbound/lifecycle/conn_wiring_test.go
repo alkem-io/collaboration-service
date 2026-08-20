@@ -343,15 +343,20 @@ func TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues(t *testing.T) {
 		}
 	}
 	// Q1's arguments are the frozen cross-repo literal, asserted exactly: it is the
-	// one queue the producer also declares, and ANY difference — an extra argument,
-	// a missing one, or the same value at a different width — is an inequivalent
-	// redeclaration that stops whichever side declares second.
+	// one queue the producer also declares, and a difference in the SET or the
+	// VALUES — an extra argument, a missing one, a changed number — is an
+	// inequivalent redeclaration that stops whichever side declares second.
+	//
+	// The int32 assertions below pin a CONVENTION, not a broker requirement: 4.0.5
+	// normalizes integer widths, so a plain Go int would be accepted by the broker.
+	// Pinning the width keeps the two repos writing the same thing; it does not
+	// model PRECONDITION_FAILED.
 	q1 := byName["lifecycle-q"].args
 	if len(q1) != 2 {
 		t.Fatalf("Q1 args = %v, want EXACTLY {x-queue-type: quorum, x-delivery-limit: int32(-1)}", q1)
 	}
 	if q1["x-delivery-limit"] != int32(-1) {
-		t.Fatalf("Q1 x-delivery-limit = %v (%T), want int32(-1). RabbitMQ 4.0 defaults quorum queues to 20, and Q1 has no dead-letter exchange, so at the limit a document.deleted is DROPPED rather than diverted",
+		t.Fatalf("Q1 x-delivery-limit = %v (%T), want int32(-1). RabbitMQ 4.0 defaults quorum queues to 20, and Q1 has no dead-letter exchange, so at the limit a document.deleted is DROPPED rather than diverted. (int32 is this repo's convention; the broker compares the VALUE.)",
 			q1["x-delivery-limit"], q1["x-delivery-limit"])
 	}
 	if dlq := byName["lifecycle-q.dlq"].args; dlq["x-delivery-limit"] != int32(-1) {
@@ -383,7 +388,7 @@ func TestRetryTiersCarryTheirScheduleAndTheDLQIsTerminal(t *testing.T) {
 	} {
 		a := byName[tier.name].args
 		if a["x-message-ttl"] != tier.ttl {
-			t.Errorf("%s x-message-ttl = %v (%T), want int32 %d — argument TYPE participates in declaration equivalence", tier.name, a["x-message-ttl"], a["x-message-ttl"], tier.ttl)
+			t.Errorf("%s x-message-ttl = %v (%T), want int32 %d (the repo's convention; the VALUE is what the broker compares)", tier.name, a["x-message-ttl"], a["x-message-ttl"], tier.ttl)
 		}
 		if a["x-dead-letter-routing-key"] != "lifecycle-q" {
 			t.Errorf("%s must dead-letter back to the main queue, got %v", tier.name, a["x-dead-letter-routing-key"])

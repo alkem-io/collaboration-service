@@ -85,7 +85,7 @@ exactly:
 
 | Queue | Required |
 |---|---|
-| `<queue>` (Q1) | `quorum`, args exactly `{"x-queue-type":"quorum","x-delivery-limit":-1}` (the -1 as a 32-bit int) |
+| `<queue>` (Q1) | `quorum`, args exactly `{"x-queue-type":"quorum","x-delivery-limit":-1}` |
 | `<queue>.retry.{30s,5m,30m}` | `quorum` + the TTL/dead-letter/overflow args below |
 | `<queue>.dlq` | `quorum`, args exactly `{"x-queue-type":"quorum","x-delivery-limit":-1}` |
 
@@ -130,9 +130,15 @@ queue name. No exchange is declared or bound.
 { "x-queue-type": "quorum", "x-delivery-limit": -1 }
 ```
 
-Nothing else, and the `-1` must be a 32-bit int on both sides — argument TYPE
-participates in equivalence, so the same value at a different width is still an
-inequivalent redeclaration. An inequivalent redeclaration on either side fails
+Nothing else, and nothing missing: **omitting** an argument the queue already has is
+refused exactly as a **changed value** is. Both sides must declare the same set with
+the same values.
+
+Integer width is NOT part of that — verified on 4.0.5 across languages: `-1` sent as
+an 8-, 16-, 32- or 64-bit integer all redeclare equivalently, because RabbitMQ
+normalizes them. This repo writes `int32` by convention, matching the type the broker
+reports back; a producer in another language does not have to match the width, only
+the value. An inequivalent redeclaration on either side fails
 `PRECONDITION_FAILED` and the declaring party does not start. In particular Q1
 carries **no** dead-letter arguments: transfers out of it are explicit confirmed
 publishes by the consumer, not broker dead-lettering.

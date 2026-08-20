@@ -81,14 +81,19 @@ type queueSpec struct {
 
 // topologyFor is the whole topology as data.
 //
-// The TTL is int32 rather than int: AMQP argument types participate in
-// declaration equivalence, so a value that arrives as a different numeric type is
-// an inequivalent redeclaration and fails PRECONDITION_FAILED against a queue
-// declared by anything else.
+// Integer arguments are written as int32 by convention, matching the type the
+// broker reports back ('signedint'). That is a convention, NOT a requirement:
+// measured on 4.0.5, RabbitMQ normalizes integer widths for these arguments, so
+// int8/int16/int32/int64 and a plain Go int carrying the same value all redeclare
+// equivalently. What IS load-bearing is the VALUE and the PRESENCE — a different
+// value, or omitting an argument the queue already has, fails PRECONDITION_FAILED
+// and the declaring party does not start.
 func topologyFor(n queueNames) []queueSpec {
 	specs := make([]queueSpec, 0, 2+len(retryTiers))
 	specs = append(specs,
-		// Q1: frozen contract, mirrored byte-for-byte by the producer.
+		// Q1: frozen contract, mirrored by the producer. Every argument here must
+		// also be on the producer's declaration with the same VALUE — omitting one it
+		// already has is refused just as a different value is.
 		queueSpec{n.main, amqp.Table{
 			"x-queue-type":     "quorum",
 			"x-delivery-limit": int32(-1),
