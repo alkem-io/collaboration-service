@@ -69,14 +69,17 @@ honest: it passes on 3.13.2 and fails on 3.9.13.
 | Metric | Kind | Question it answers |
 |---|---|---|
 | `collaboration_lifecycle_transfers_total{queue,outcome}` | counter | is anything failing right now, and how far down the ladder |
-| `collaboration_lifecycle_queue_ready_depth{queue}` | gauge | is there unattended work |
+| `collaboration_lifecycle_queue_ready_depth{queue}` | gauge | is READY work waiting (a lower bound on unattended work — see below) |
+| RabbitMQ's own `messages` column / `rabbitmq_queue_messages` | gauge | is there unattended work, INCLUDING messages parked for a dead-letter hop |
 | `collaboration_lifecycle_dead_lettered_total{pattern,replays}` | counter | has a person already tried to fix this |
 
 Suggested alerts:
 
 ```promql
 # Page-worthy: an event has exhausted the ladder. A deletion or revocation is
-# NOT applied and will not be retried without a person.
+# NOT applied and will not be retried without a person. Ready depth is exact for
+# the DLQ — nothing consumes it and nothing dead-letters out of it, so no message
+# there is ever in the parked state.
 collaboration_lifecycle_queue_ready_depth{queue=~".+\\.dlq"} > 0
 
 # Escalate rather than repeat: this event has already been replayed and failed
@@ -101,22 +104,34 @@ quantization is the age signal.
 
 ### What the depth gauge does not see
 
-It is **ready** depth, and the name says so because the distinction is real. AMQP's
+It is **ready** depth — how many messages the broker would hand to a consumer right
+now — and that is a *lower bound* on unattended work, not the whole of it. AMQP's
 `queue.declare-ok` reports only the ready count, and a message the broker is holding
 for a *pending dead-letter hop* is neither ready nor unacknowledged. It reads as
 zero here while being very much present.
 
-That state has exactly one cause: an expired retry whose dead-letter target is
-missing. It is bounded rather than open-ended — the consumer re-declares every
-queue in the topology on each re-attach and on each depth poll, so a deleted queue
-comes back within one poll interval and the broker then releases the parked message
-on its own (see below). While such a window is being examined, read the total from
-the broker rather than from this metric:
+**Use RabbitMQ's own reading for the parked state**, because only the broker can see
+it:
 
 ```bash
 rabbitmqctl list_queues name messages messages_ready
 #   <queue>.retry.30s   1   0     <- one message parked, invisible to ready depth
 ```
+
+Where the management/prometheus plugin is scraped, `rabbitmq_queue_messages` is the
+same total per queue. The broker also *says so in its log* while a hop is stuck:
+
+```
+Cannot forward any dead-letter messages from source quorum queue '<queue>.retry.30s'
+… Fix this issue to prevent dead-lettered messages from piling up in the source
+quorum queue.
+```
+
+That state has exactly one cause: an expired retry whose dead-letter target is
+missing. It is bounded rather than open-ended — the consumer re-declares every
+queue in the topology on each re-attach and on each depth poll, so a deleted queue
+comes back within one poll interval and the broker then releases the parked message
+on its own (see below).
 
 ## What lands where
 

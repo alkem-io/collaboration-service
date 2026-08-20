@@ -11,25 +11,29 @@ package lifecycle
 //     the alertable moment: a lifecycle event that failed once is a backend that
 //     is down, and the ~35 minutes of ladder is the window in which a human can
 //     act before the event lands in the DLQ.
-//   - QueueReadyDepth is a level. It answers "is there unattended work". A counter
-//     cannot: it only ever goes up, so the increment that put ten events in the
-//     DLQ scrolls out of the alert window while the events stay there. The DLQ's
-//     ready depth is the number of deletions and revocations currently NOT applied.
+//   - QueueReadyDepth is a level. It answers "is READY work waiting" — how many
+//     messages the broker would hand to a consumer right now. A counter cannot
+//     answer even that: it only ever goes up, so the increment that put ten events
+//     in the DLQ scrolls out of the alert window while the events stay there.
 //
-// READY, not total, and the difference is not academic. AMQP's queue.declare-ok
-// reports only the ready count, and a message the broker is holding for a pending
-// dead-letter hop — the state at-least-once puts an expired retry into when its
-// target is missing — is neither ready nor unacknowledged. It reads as ZERO here
-// while being very much present. That state is measured and reproducible (see
-// TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing), so the metric is named for
-// what it measures rather than for what would be convenient.
+// It does NOT answer "is there unattended work", and the gap is not academic.
+// AMQP's queue.declare-ok reports only the ready count, and a message the broker
+// is holding for a pending dead-letter hop — the state at-least-once puts an
+// expired retry into when its target is missing — is neither ready nor
+// unacknowledged. It reads as ZERO here while being very much present, measured
+// and reproducible (TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing). So this
+// is a lower bound on unattended work, never the whole of it.
 //
-// The blind spot is bounded rather than open-ended: it needs the dead-letter
-// target to be missing, and the consumer re-declares every queue in the topology
-// on each re-attach AND on each depth poll, so a deleted queue comes back within
-// one poll interval and the broker releases the retained message a few minutes
-// later on its own. The runbook names the broker-side reading (`rabbitmqctl
-// list_queues name messages`) for the total when that window is being examined.
+// The signal for the parked state is RabbitMQ's own, because only the broker can
+// see it: the `messages` column of `rabbitmqctl list_queues name messages
+// messages_ready` (or `rabbitmq_queue_messages` where the management/prometheus
+// plugin is scraped), and the broker log line `Cannot forward any dead-letter
+// messages from source quorum queue …`, which it emits while a hop is stuck.
+//
+// The gap is also bounded rather than open-ended: it needs the dead-letter target
+// to be missing, and the consumer re-declares every queue in the topology on each
+// re-attach AND on each depth poll, so a deleted queue comes back within one poll
+// interval and the broker releases the parked message a few minutes later.
 //
 // Ready depth still stands in for message age across the ladder: an event sitting
 // in the 30m tier has already survived 30s + 5m. AMQP offers no age reading at

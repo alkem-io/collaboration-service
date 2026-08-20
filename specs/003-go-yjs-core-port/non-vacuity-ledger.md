@@ -291,7 +291,7 @@ at fault:
   part it can actually observe (no poller, no panic on a negative ticker).
 
 `QueueDepth` is a level and `EventTransferred` is a rate, deliberately. A counter
-alone cannot answer "is there unattended work": it only goes up, so the increment
+alone cannot answer even "is READY work waiting": it only goes up, so the increment
 that put ten events in the DLQ scrolls out of the alert window while the events sit
 there. A gauge alone cannot answer "did anything just fail", because a transfer that
 lands in a tier and expires back out is invisible between polls. Per-tier depth also

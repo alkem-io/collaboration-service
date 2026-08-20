@@ -66,9 +66,17 @@ type ReplayResult struct {
 //
 // afterConsume is a test seam: it runs once the consumer is attached, which is the
 // only point at which a fake broker can start delivering. Production passes none.
-func Replay(ctx context.Context, ch brokerChannel, queue string, limit int, afterConsume ...func()) (ReplayResult, error) {
+func Replay(ctx context.Context, ch brokerChannel, queue string, limit int, afterConsume ...func()) (res ReplayResult, err error) {
 	names := namesFor(queue)
-	var res ReplayResult
+
+	// Exactly ONE place decides whether work is left behind. Every exit except
+	// "the queue went quiet" leaves some: the delivery in hand is unacknowledged
+	// and anything behind it was never read, and a run that could not even start
+	// has not touched the queue at all. Setting the flag per-exit is how three of
+	// the five paths came to miss it — and an operator who reads "0 remaining"
+	// after a cancelled run believes the queue is drained and stops looking.
+	drained := false
+	defer func() { res.Remaining = !drained }()
 
 	if err := ch.Confirm(false); err != nil {
 		return res, fmt.Errorf("enable publisher confirms: %w", err)
@@ -106,7 +114,8 @@ func Replay(ctx context.Context, ch brokerChannel, queue string, limit int, afte
 			}
 			d = got
 		case <-time.After(2 * time.Second):
-			// Nothing more waiting: the queue is drained.
+			// Nothing more waiting: the queue is drained. The ONLY exit that says so.
+			drained = true
 			return res, nil
 		case <-ctx.Done():
 			return res, ctx.Err()
@@ -116,7 +125,6 @@ func Replay(ctx context.Context, ch brokerChannel, queue string, limit int, afte
 			// The DLQ copy was never acked, so it is still there. Reject without
 			// requeue would dead-letter it out of a terminal queue; leaving it
 			// unacknowledged returns it when this channel closes.
-			res.Remaining = true
 			return res, err
 		}
 		if err := d.Ack(false); err != nil {
@@ -127,7 +135,6 @@ func Replay(ctx context.Context, ch brokerChannel, queue string, limit int, afte
 		}
 		res.Moved++
 	}
-	res.Remaining = true
 	return res, nil
 }
 

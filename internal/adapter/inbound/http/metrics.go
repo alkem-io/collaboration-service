@@ -258,18 +258,25 @@ var LifecycleTransfersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 //
 // This is the signal LifecycleTransfersTotal cannot give. A counter only goes up,
 // so the increment that put ten events in the DLQ scrolls out of the alert window
-// while the events stay there. The DLQ's ready depth is the number of deletions and
-// revocations currently NOT applied, and it stays visible until someone drains it:
+// while the events stay there. Ready depth stays visible until someone drains the
+// queue — and for the DLQ it is exact, because nothing consumes it and nothing
+// dead-letters out of it, so no message there is ever in the parked state below:
 //
 //	collaboration_lifecycle_queue_ready_depth{queue=~".+\\.dlq"} > 0
 //
-// READY is the honest word. It comes from AMQP's queue.declare-ok, which does not
-// report a total, and a message the broker has parked for a pending dead-letter hop
-// is neither ready nor unacknowledged — so it reads as zero here while being
-// present. That state is reachable only while a dead-letter target is missing, and
-// the consumer re-declares the whole topology on every re-attach and every poll, so
-// it is bounded rather than open-ended. For the total during such a window, read the
-// broker: `rabbitmqctl list_queues name messages messages_ready`.
+// READY is the honest word, and it makes this a LOWER BOUND on unattended work
+// rather than a measure of it. The number comes from AMQP's queue.declare-ok, which
+// does not report a total, and a message the broker has parked for a pending
+// dead-letter hop is neither ready nor unacknowledged — so it reads as zero here
+// while being present.
+//
+// The signal for that state is RabbitMQ's own, because only the broker can see it:
+// the `messages` column of `rabbitmqctl list_queues name messages messages_ready`,
+// or `rabbitmq_queue_messages` where the plugin is scraped, plus the broker log line
+// "Cannot forward any dead-letter messages from source quorum queue …". The state is
+// reachable only while a dead-letter target is missing, and the consumer re-declares
+// the whole topology on every re-attach and every poll, so it is bounded rather than
+// open-ended.
 //
 // Per-tier ready depth stands in for message age, quantized by the ladder: an event
 // in the 30m tier has already survived 30s + 5m.

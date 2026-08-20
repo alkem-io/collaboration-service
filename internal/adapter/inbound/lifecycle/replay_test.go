@@ -264,3 +264,80 @@ func TestRepublishSurfacesAPublishError(t *testing.T) {
 		t.Fatal("a failed publish was reported as success")
 	}
 }
+
+// TestReplayOnlyReportsTheQueueDrainedWhenItActuallyIs asserts every early exit
+// reports work remaining, and that only a quiet queue reports none.
+//
+// This is the flag an operator reads to decide whether to run again. Getting it
+// wrong in the safe direction costs a second run that finds nothing; getting it
+// wrong the other way means events sit in the dead-letter queue because the tool
+// said the queue was empty. It was previously set per-exit and three of the five
+// paths missed it.
+func TestReplayOnlyReportsTheQueueDrainedWhenItActuallyIs(t *testing.T) {
+	deleted := []byte(`{"pattern":"document.deleted","data":{"id":"d"}}`)
+
+	t.Run("a quiet queue is drained", func(t *testing.T) {
+		ch := &fakeChannel{confirmAck: true}
+		res, err := Replay(context.Background(), ch, "lifecycle-q", 0)
+		if err != nil {
+			t.Fatalf("Replay: %v", err)
+		}
+		if res.Remaining {
+			t.Fatal("an empty dead-letter queue was reported as having events remaining")
+		}
+	})
+
+	t.Run("a cancelled run leaves work", func(t *testing.T) {
+		ch := &fakeChannel{confirmAck: true}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		res, err := Replay(ctx, ch, "lifecycle-q", 0)
+		if err == nil {
+			t.Fatal("a cancelled Replay reported success")
+		}
+		if !res.Remaining {
+			t.Fatal("a cancelled run reported the queue drained; the operator stops looking and the events stay put")
+		}
+	})
+
+	t.Run("a closed delivery stream leaves work", func(t *testing.T) {
+		ch := &fakeChannel{confirmAck: true}
+		res, err := Replay(context.Background(), ch, "lifecycle-q", 0, func() {
+			ch.mu.Lock()
+			d := ch.deliveries
+			ch.deliveries = nil
+			ch.mu.Unlock()
+			close(d)
+		})
+		if err == nil {
+			t.Fatal("Replay reported success after its delivery stream closed under it")
+		}
+		if !res.Remaining {
+			t.Fatal("a run whose channel died reported the queue drained")
+		}
+	})
+
+	t.Run("a failed republish leaves work", func(t *testing.T) {
+		ch := &fakeChannel{confirmAck: false}
+		res, err := Replay(context.Background(), ch, "lifecycle-q", 0, func() {
+			ch.deliver(amqp.Delivery{Body: deleted, Acknowledger: &fakeAcker{}, DeliveryTag: 1})
+		})
+		if err == nil {
+			t.Fatal("Replay reported success after a nacked republish")
+		}
+		if !res.Remaining {
+			t.Fatal("a run that could not republish reported the queue drained")
+		}
+	})
+
+	t.Run("a run that could not start leaves work", func(t *testing.T) {
+		ch := &fakeChannel{confirmAck: true, confirmErr: errTestBroker}
+		res, err := Replay(context.Background(), ch, "lifecycle-q", 0)
+		if err == nil {
+			t.Fatal("Replay reported success without publisher confirms")
+		}
+		if !res.Remaining {
+			t.Fatal("a run that never started reported the queue drained, having not looked at it")
+		}
+	})
+}
