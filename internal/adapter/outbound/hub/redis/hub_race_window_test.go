@@ -30,7 +30,7 @@ func (c *blockingSubscribeClient) Publish(ctx context.Context, channel string, m
 	return c.inner.Publish(ctx, channel, message)
 }
 
-func (c *blockingSubscribeClient) Subscribe(ctx context.Context, channels ...string) *goredis.PubSub {
+func (c *blockingSubscribeClient) Subscribe(ctx context.Context, channels ...string) pubsubConn {
 	c.once.Do(func() {
 		close(c.entered)
 		<-c.release
@@ -62,7 +62,7 @@ func (c *blockingSubscribeClient) Close() error { return c.inner.Close() }
 func TestSubscriberClosingInsideThePumpStartWindowLeavesNoPump(t *testing.T) {
 	srv := miniredis.RunT(t)
 	blocking := &blockingSubscribeClient{
-		inner:   goredis.NewClient(&goredis.Options{Addr: srv.Addr()}),
+		inner:   goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}

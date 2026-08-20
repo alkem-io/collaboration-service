@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/antst/go-yjs/backend"
 	yhub "github.com/antst/go-yjs/backend/hub"
@@ -32,8 +33,29 @@ const (
 // client surface.
 type client interface {
 	Publish(ctx context.Context, channel string, message any) *goredis.IntCmd
-	Subscribe(ctx context.Context, channels ...string) *goredis.PubSub
+	Subscribe(ctx context.Context, channels ...string) pubsubConn
 	Close() error
+}
+
+// pubsubConn is the slice of *goredis.PubSub this hub uses. Subscribe returns it
+// as an interface rather than the concrete type so the readiness handshake — how
+// many confirmations are awaited, what happens to a message that arrives between
+// them, what a keep-alive counts as — is reachable from a test. Those are the
+// parts a real server produces only occasionally, or not at all.
+type pubsubConn interface {
+	ReceiveTimeout(ctx context.Context, timeout time.Duration) (any, error)
+	Channel(opts ...goredis.ChannelOption) <-chan *goredis.Message
+	Close() error
+}
+
+// goredisClient adapts *goredis.Client to client. The wrapper exists because
+// Client.Subscribe returns the CONCRETE *goredis.PubSub, so the real type cannot
+// satisfy an interface whose Subscribe returns an interface.
+type goredisClient struct{ *goredis.Client }
+
+// Subscribe opens a pub/sub connection and returns it as the narrow pubsubConn.
+func (c goredisClient) Subscribe(ctx context.Context, channels ...string) pubsubConn {
+	return c.Client.Subscribe(ctx, channels...)
 }
 
 // Hub fans document and awareness messages across pods over Redis pub/sub.
@@ -86,7 +108,7 @@ func (s *subscription) Close() error {
 
 // pump owns one document's Redis subscription and the goroutine draining it.
 type pump struct {
-	pubsub *goredis.PubSub
+	pubsub pubsubConn
 	cancel context.CancelFunc
 	done   chan struct{}
 	refs   int
@@ -100,7 +122,7 @@ func New(url, instance string) (*Hub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse REDIS_URL: %w", err)
 	}
-	return NewWithClient(goredis.NewClient(opts), instance), nil
+	return NewWithClient(goredisClient{goredis.NewClient(opts)}, instance), nil
 }
 
 // NewWithClient constructs a Hub over an existing client (tests, and callers
@@ -147,9 +169,17 @@ func (h *Hub) Subscribe(ctx context.Context, doc backend.DocumentID, source back
 	}
 	h.mu.Unlock()
 
-	// Start the document's Redis subscription off the lock: Subscribe does I/O,
-	// and holding the hub lock across it would stall every other document.
-	p := h.startPump(doc)
+	// Start the document's Redis subscription off the lock: it does I/O and waits
+	// for the server's confirmation, and holding the hub lock across that would
+	// stall every other document.
+	p, err := h.startPump(ctx, doc)
+	if err != nil {
+		// No subscription, so there is nothing to hand back. Drop the entry made
+		// above, or the document keeps a subscriber that will never receive
+		// anything and whose presence keeps a later pump's refs above zero.
+		h.removeSubscriber(doc, sub.id)
+		return nil, err
+	}
 
 	h.mu.Lock()
 	if h.closed {
@@ -309,30 +339,102 @@ func (h *Hub) removeSubscriber(doc backend.DocumentID, id uint64) {
 }
 
 // startPump subscribes to the document's two channels and drains them.
-func (h *Hub) startPump(doc backend.DocumentID) *pump {
-	ctx, cancel := context.WithCancel(context.Background())
-	pubsub := h.client.Subscribe(ctx,
-		documentChannelPrefix+string(doc),
-		awarenessChannelPrefix+string(doc),
-	)
-	p := &pump{pubsub: pubsub, cancel: cancel, done: make(chan struct{})}
+// subscribeConfirmTimeout bounds the wait for Redis to confirm a subscription. It
+// is a network round-trip to a server this pod already has a connection to, so
+// silence means something is wrong rather than slow — and a join must not hang on
+// it indefinitely.
+const subscribeConfirmTimeout = 10 * time.Second
 
+// startPump opens this document's Redis subscription and returns only once the
+// server has CONFIRMED it.
+//
+// Both halves of that matter, and neither is free with go-redis:
+//
+//   - Client.Subscribe discards the error from pubsub.Subscribe (`_ = ...`), so a
+//     subscription that failed outright is indistinguishable from one that worked.
+//     The pump would sit on a PubSub that never delivers anything, for the life of
+//     the document.
+//   - Even when it succeeds, pubsub.Subscribe has only WRITTEN the SUBSCRIBE
+//     command. The server may not have registered it yet. A publish issued right
+//     after Subscribe returns can be processed first, and Redis pub/sub has no
+//     replay or backlog: that message is gone permanently. Cross-pod, that is a
+//     document update or an awareness state that simply never arrives, and no
+//     amount of waiting on the receiving side recovers it.
+//
+// Reading the confirmations fixes both: it is the only place the discarded error
+// resurfaces, and it establishes a happens-before between "Subscribe returned" and
+// "the server will deliver".
+func (h *Hub) startPump(ctx context.Context, doc backend.DocumentID) (*pump, error) {
+	pumpCtx, cancel := context.WithCancel(context.Background())
+	// One list, used for both the SUBSCRIBE and the count of confirmations to wait
+	// for. Document and awareness are separate subscriptions, confirmed one at a
+	// time and each able to fail on its own; deriving the count from the same slice
+	// makes "confirm every channel we subscribed" true by construction rather than
+	// by two numbers agreeing.
+	channels := []string{
+		documentChannelPrefix + string(doc),
+		awarenessChannelPrefix + string(doc),
+	}
+	pubsub := h.client.Subscribe(pumpCtx, channels...)
+
+	early, err := awaitSubscribed(ctx, pubsub, len(channels))
+	if err != nil {
+		cancel()
+		_ = pubsub.Close()
+		return nil, err
+	}
+
+	p := &pump{pubsub: pubsub, cancel: cancel, done: make(chan struct{})}
 	ch := pubsub.Channel()
 	go func() {
 		defer close(p.done)
+		// Anything that arrived between the two confirmations was consumed by the
+		// wait above and will not be redelivered by Channel(); dispatch it first or
+		// it is dropped, which is the very loss this function exists to prevent.
+		for _, m := range early {
+			h.dispatchRemote(pumpCtx, doc, m)
+		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pumpCtx.Done():
 				return
 			case m, ok := <-ch:
 				if !ok {
 					return
 				}
-				h.dispatchRemote(ctx, doc, m)
+				h.dispatchRemote(pumpCtx, doc, m)
 			}
 		}
 	}()
-	return p
+	return p, nil
+}
+
+// awaitSubscribed reads want subscription confirmations, returning any real
+// messages that arrived among them.
+//
+// Interleaving is possible: SUBSCRIBE with two channels is confirmed one channel
+// at a time, and a publish on the first can land before the second is confirmed.
+// Those messages are already off the connection, so they are handed back rather
+// than discarded.
+func awaitSubscribed(ctx context.Context, ps pubsubConn, want int) ([]*goredis.Message, error) {
+	var early []*goredis.Message
+	for confirmed := 0; confirmed < want; {
+		raw, err := ps.ReceiveTimeout(ctx, subscribeConfirmTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("redis hub: subscription not confirmed: %w", err)
+		}
+		switch m := raw.(type) {
+		case *goredis.Subscription:
+			confirmed++
+		case *goredis.Message:
+			early = append(early, m)
+		case *goredis.Pong:
+			// Keep-alive; not a confirmation and not data.
+		default:
+			return nil, fmt.Errorf("redis hub: unexpected %T while waiting for a subscription confirmation", raw)
+		}
+	}
+	return early, nil
 }
 
 // dispatchRemote routes one inbound Redis message to local subscribers.

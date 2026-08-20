@@ -25,6 +25,6 @@ import (
 func TestHubConformance(t *testing.T) {
 	conformance.Hub(t, func() yhub.Hub {
 		srv := miniredis.RunT(t)
-		return NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "instance-under-test")
+		return NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "instance-under-test")
 	})
 }

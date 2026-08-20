@@ -40,22 +40,21 @@ func (r *recorder) snapshot() []yhub.Message {
 func twoPods(t *testing.T) (*Hub, *Hub) {
 	t.Helper()
 	srv := miniredis.RunT(t)
-	a := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "pod-a")
-	b := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "pod-b")
+	a := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "pod-a")
+	b := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "pod-b")
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	return a, b
 }
 
-// waitFor polls cond until it holds. The budget is generous on purpose: what is
-// being waited on is a goroutine hop through miniredis pub/sub, which takes
-// microseconds when the machine is idle and can take far longer on a loaded CI
-// runner scheduling dozens of test goroutines. A tight budget here does not detect
-// a slow hub — nothing in this adapter has a latency requirement — it just fails
-// the build when the runner is busy, which is exactly how the earlier 3-second
-// deadline behaved.
+// waitFor polls cond until it holds. Three seconds is ample for a goroutine hop
+// through miniredis pub/sub even on a loaded runner — and it stays that way only
+// because Subscribe now returns after the server has confirmed the subscription.
+// Before that, a publish could beat the subscription and the message was gone for
+// good, which no deadline can wait out; the fix for that flake belongs in the hub,
+// not here.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

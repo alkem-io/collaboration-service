@@ -17,7 +17,7 @@ import (
 func newTestHub(t *testing.T) *Hub {
 	t.Helper()
 	srv := miniredis.RunT(t)
-	h := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "instance-under-test")
+	h := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "instance-under-test")
 	t.Cleanup(func() { _ = h.Close() })
 	return h
 }
@@ -63,8 +63,8 @@ func TestCancelledPublishIsRejected(t *testing.T) {
 // fan-out would appear to work locally and silently deliver nothing across pods.
 func TestGeneratedInstanceIDWhenNoneGiven(t *testing.T) {
 	srv := miniredis.RunT(t)
-	a := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "")
-	b := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "")
+	a := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "")
+	b := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "")
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 
 	if a.instance == "" || b.instance == "" {
@@ -80,7 +80,7 @@ func TestGeneratedInstanceIDWhenNoneGiven(t *testing.T) {
 // serving while silently isolated from every other pod.
 func TestPublishSurfacesARedisFailure(t *testing.T) {
 	srv := miniredis.RunT(t)
-	h := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "instance")
+	h := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "instance")
 	t.Cleanup(func() { _ = h.Close() })
 	srv.Close() // the broker goes away
 
@@ -97,7 +97,7 @@ func TestPublishSurfacesARedisFailure(t *testing.T) {
 // App.Close runs closers unconditionally and a double close is ordinary.
 func TestClosingAnAlreadyClosedHubIsANoOp(t *testing.T) {
 	srv := miniredis.RunT(t)
-	h := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "instance")
+	h := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "instance")
 	if err := h.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestOversizeIdentifiersAreTruncatedNotCorrupted(t *testing.T) {
 // path, which App.Close can race with a late room materialization.
 func TestSubscribeAfterCloseIsRejected(t *testing.T) {
 	srv := miniredis.RunT(t)
-	h := NewWithClient(goredis.NewClient(&goredis.Options{Addr: srv.Addr()}), "instance")
+	h := NewWithClient(goredisClient{goredis.NewClient(&goredis.Options{Addr: srv.Addr()})}, "instance")
 	if err := h.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}

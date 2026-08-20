@@ -535,3 +535,72 @@ goroutine hop through miniredis pub/sub, which takes microseconds on an idle mac
 and much longer on a loaded runner. A tight deadline there detects nothing — the
 adapter has no latency requirement — it only fails the build when the runner is
 busy. Raised to 30s with that reasoning recorded at the call site.
+
+## Redis hub: Subscribe returned before the subscription existed
+
+The CI flake I had "fixed" by widening a test deadline was a real message-loss
+bug, and the deadline could never have fixed it.
+
+`go-redis`'s `Client.Subscribe` does two unhelpful things:
+
+```go
+func (c *Client) Subscribe(ctx context.Context, channels ...string) *PubSub {
+	pubsub := c.pubSub()
+	if len(channels) > 0 {
+		_ = pubsub.Subscribe(ctx, channels...)   // error DISCARDED
+	}
+	return pubsub
+}
+```
+
+- The error is thrown away, so a subscription that failed outright is
+  indistinguishable from one that worked. The pump then sits on a connection that
+  never delivers, for the life of the document, and it looks like a quiet document.
+- Even on success, `pubsub.Subscribe` has only **written** the SUBSCRIBE command;
+  `_subscribe` does not read the server's confirmation. A publish issued right
+  after `Subscribe` returns can be processed first, and Redis pub/sub has no replay
+  or backlog — **that message is gone**. Cross-pod, that is a document update or an
+  awareness state that simply never arrives.
+
+No deadline on the receiving side can wait out a message that was never queued,
+which is why `TestAwarenessAndDocumentUpdatesStayOnSeparateChannels` failed at
+exactly 3.01s: not slowness, a lost message. The 30s workaround is reverted and the
+budget is back to 3s.
+
+`Hub.Subscribe` now returns only after the server has confirmed **every** channel
+it subscribed. The count comes from the same slice used for the SUBSCRIBE, so
+"confirm every channel we subscribed" holds by construction rather than by two
+numbers agreeing.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| Subscribe returns with no handshake (the original race) | `TestSubscribeIsReadyBeforeItReturns`, `TestSubscribeFailsWhenTheSubscriptionCannotBeEstablished`, `TestAFailedSubscribeLeavesNoTraceBehind` |
+| only one channel is confirmed (awareness still races) | `TestSubscribeWaitsForAConfirmationPerChannel` + two others |
+| a keep-alive Pong is counted as a confirmation | `TestAKeepAliveIsNotASubscriptionConfirmation` |
+| a read failure is counted as a confirmation | `TestAwaitSubscribedSurfacesAReadFailure` + two others |
+| a message arriving between confirmations is not collected | `TestAwaitSubscribedKeepsMessagesThatArriveBetweenConfirmations`, `TestAMessageArrivingDuringTheHandshakeIsStillDelivered` |
+| …or is collected and then dropped | `TestAMessageArrivingDuringTheHandshakeIsStillDelivered` |
+| a failed Subscribe leaves its subscriber registered | `TestAFailedSubscribeLeavesNoTraceBehind` |
+
+Three of those were **VACUOUS on the first attempt**, and the reason is worth
+recording: they live at the call site, and the call site could only be driven
+through a real miniredis, which never produces the interleaving or the keep-alive.
+The fix was not to write cleverer tests but to widen the seam — `client.Subscribe`
+now returns a `pubsubConn` interface rather than the concrete `*goredis.PubSub`, so
+a scripted connection can hand the hub exactly the reply sequence a real server
+produces only occasionally. Same principle as the existing
+`blockingSubscribeClient`: prove it from outside the production code, but make sure
+the outside can actually reach it.
+
+The handshake introduces a narrow loss of its own, which is why the collected
+messages exist at all: a two-channel SUBSCRIBE is confirmed one channel at a time,
+so a publish on the first can land before the second is confirmed. That message is
+already off the connection — `PubSub.Channel()` will never redeliver it — so the
+handshake hands it to the pump. Dropping it would lose the message exactly as the
+original race did, in a smaller window.
+
+The subscriber-cleanup entry is not cosmetic. `Subscribe` registers its subscriber
+before doing I/O, and pump refs are **derived** from the live subscriber count. A
+failed subscription that left its entry behind would give the next successful pump a
+ref count that never reaches zero, leaking the Redis subscription and its goroutine
+for the life of the pod — the same leak class as the race-window finding above it.
