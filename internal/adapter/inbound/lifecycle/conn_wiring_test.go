@@ -342,8 +342,26 @@ func TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues(t *testing.T) {
 			t.Fatalf("queue %q is not a quorum queue (args=%v); classic dead-lettering is at-most-once", want, d.args)
 		}
 	}
-	if got := byName["lifecycle-q"].args; len(got) != 1 {
-		t.Fatalf("Q1 args = %v, want EXACTLY {x-queue-type: quorum} — it is the one queue the producer also declares, and any extra argument is an inequivalent redeclaration", got)
+	// Q1's arguments are the frozen cross-repo literal, asserted exactly: it is the
+	// one queue the producer also declares, and ANY difference — an extra argument,
+	// a missing one, or the same value at a different width — is an inequivalent
+	// redeclaration that stops whichever side declares second.
+	q1 := byName["lifecycle-q"].args
+	if len(q1) != 2 {
+		t.Fatalf("Q1 args = %v, want EXACTLY {x-queue-type: quorum, x-delivery-limit: int32(-1)}", q1)
+	}
+	if q1["x-delivery-limit"] != int32(-1) {
+		t.Fatalf("Q1 x-delivery-limit = %v (%T), want int32(-1). RabbitMQ 4.0 defaults quorum queues to 20, and Q1 has no dead-letter exchange, so at the limit a document.deleted is DROPPED rather than diverted",
+			q1["x-delivery-limit"], q1["x-delivery-limit"])
+	}
+	if dlq := byName["lifecycle-q.dlq"].args; dlq["x-delivery-limit"] != int32(-1) {
+		t.Fatalf("DLQ x-delivery-limit = %v (%T), want int32(-1); a replay that fails and closes its channel is a delivery, so repeated failed replays would drop the message the DLQ exists to preserve",
+			dlq["x-delivery-limit"], dlq["x-delivery-limit"])
+	}
+	for _, tier := range []string{"lifecycle-q.retry.30s", "lifecycle-q.retry.5m", "lifecycle-q.retry.30m"} {
+		if _, present := byName[tier].args["x-delivery-limit"]; present {
+			t.Fatalf("%s carries x-delivery-limit; the tiers keep the broker default deliberately — they have a dead-letter exchange, so the limit diverts rather than drops, and they have no consumer to increment it", tier)
+		}
 	}
 }
 

@@ -57,13 +57,12 @@ instead.
 inspection, and never expires anything. Every retry piles up in its tier, is
 redelivered never, and produces no error anywhere.
 
-CI and dev-orchestration now run **4.0.5**, so the floor is met. Note that 4.0
-changed a default this topology depends on: quorum queues now apply
-`delivery-limit=20`, where 3.x was unlimited. Our transfer-failure contract
-deliberately leaves a delivery unacked and recycles the channel, so an event can be
-redelivered repeatedly — and Q1 has no dead-letter exchange, so at the limit the
-broker would DROP it. **That audit is open and is not yet reflected in the topology
-below.**
+CI and dev-orchestration run **4.0.5**, so the floor is met — and the topology is
+declared for it. 4.0 applies a default `delivery-limit` of 20 to quorum queues where
+3.x was unlimited, which would silently drop an event that has been redelivered past
+it on a queue with no dead-letter exchange. Q1 and the DLQ therefore set
+`x-delivery-limit: -1` explicitly; the retry tiers do not, because they have a DLX
+(the limit diverts rather than drops) and no consumer to increment it.
 
 **Do not weaken the floor to make a local environment work.** Lowering it does not
 buy compatibility, it buys a service that looks healthy while silently dropping
@@ -86,9 +85,9 @@ exactly:
 
 | Queue | Required |
 |---|---|
-| `<queue>` (Q1) | `quorum`, args exactly `{"x-queue-type":"quorum"}` |
+| `<queue>` (Q1) | `quorum`, args exactly `{"x-queue-type":"quorum","x-delivery-limit":-1}` (the -1 as a 32-bit int) |
 | `<queue>.retry.{30s,5m,30m}` | `quorum` + the TTL/dead-letter/overflow args below |
-| `<queue>.dlq` | `quorum`, args exactly `{"x-queue-type":"quorum"}` |
+| `<queue>.dlq` | `quorum`, args exactly `{"x-queue-type":"quorum","x-delivery-limit":-1}` |
 
 A `classic` queue under any of those names is a hard conflict. The pre-Yjs services
 own **differently named** classic queues — on dev-orchestration today,
@@ -128,10 +127,12 @@ queue name. No exchange is declared or bound.
 `<queue>` is declared by **both** `server` and this service, with exactly:
 
 ```json
-{ "x-queue-type": "quorum" }
+{ "x-queue-type": "quorum", "x-delivery-limit": -1 }
 ```
 
-Nothing else. An inequivalent redeclaration on either side fails
+Nothing else, and the `-1` must be a 32-bit int on both sides — argument TYPE
+participates in equivalence, so the same value at a different width is still an
+inequivalent redeclaration. An inequivalent redeclaration on either side fails
 `PRECONDITION_FAILED` and the declaring party does not start. In particular Q1
 carries **no** dead-letter arguments: transfers out of it are explicit confirmed
 publishes by the consumer, not broker dead-lettering.

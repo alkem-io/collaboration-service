@@ -33,18 +33,23 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
 
       rabbitmq:
-        # Pinned to the exact version floor the lifecycle topology declares
-        # (lifecycle.MinBrokerVersion), so CI proves the floor is SUFFICIENT rather
-        # than merely that some newer broker happens to work. Below it, a quorum
-        # queue accepts x-message-ttl and x-dead-letter-strategy, echoes them back,
-        # and expires nothing — measured on 3.9.13 — so an unpinned `rabbitmq:3`
-        # could silently drift under the floor and take the retry ladder with it.
+        # Pinned to the exact broker infrastructure-operations deploys, so CI
+        # proves the topology against the version that actually runs it rather
+        # than against one that merely satisfies the floor.
+        #
+        # The pin is load-bearing in BOTH directions. Below lifecycle.MinBrokerVersion
+        # a quorum queue accepts x-message-ttl and x-dead-letter-strategy, echoes
+        # them back, and expires nothing (measured on 3.9.13). From 4.0 a quorum
+        # queue applies a default delivery-limit of 20 where 3.x was unlimited,
+        # which drops an unacked-and-redelivered message on a queue with no
+        # dead-letter exchange — Q1 and the DLQ both — unless x-delivery-limit=-1
+        # is set explicitly. An unbounded tag could drift into either failure.
         #
         # -management, not -alpine: the retention assertion needs a queue's TOTAL
         # message count, and a message held for a pending dead-letter hop is neither
         # ready nor unacknowledged, so queue.declare-ok cannot see it. Only the
         # management API exposes the number.
-        image: rabbitmq:3.13.2-management
+        image: rabbitmq:4.0.5-management
         ports:
           - 5672:5672
           - 15672:15672
@@ -87,8 +92,9 @@ jobs:
       #
       # Those tests are t.Skip'd under -short, so adding -short here looks like a
       # free six minutes. It is not: it silently deletes the only assertions that
-      # prove the retry ladder works against a real 3.13.2 — the behaviour 3.9.13
-      # accepts, echoes back, and never performs. Reviewed and kept deliberately;
+      # prove the retry ladder works against a real 4.0.5, including that Q1 and
+      # the DLQ survive more than twenty unacknowledged redeliveries. Reviewed and
+      # kept deliberately;
       # see specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md.
       - name: Integration + e2e + coverage gate (≥95%)
         run: ./.scripts/coverage-gate.sh 95.0

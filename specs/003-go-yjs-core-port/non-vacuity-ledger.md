@@ -760,3 +760,59 @@ started — so the probe raced the teardown and reported the resulting error as 
 leak. A CLOSED registry cannot be holding anything; "closed" is the absence of the
 failure, not evidence of it. The probe now runs only while the registry is open.
 Ten consecutive runs green.
+
+## RabbitMQ 4.0 silently drops what our contract keeps
+
+RabbitMQ 4.0 gives quorum queues a default `delivery-limit` of **20**; 3.x was
+unlimited. Our transfer-failure contract deliberately leaves a delivery UNACKED and
+recycles the channel so the event stays broker-owned — and every recycle is another
+delivery. Neither Q1 nor the DLQ has a dead-letter exchange, so at the limit there
+is nowhere to divert to.
+
+Measured on real `rabbitmq:4.0.5-management`, reproduced twice, by consuming and
+closing the channel without acking 25 times:
+
+| Shape | Args | Result |
+|---|---|---|
+| Q1 as shipped | `{x-queue-type: quorum}` | 21 deliveries, then **gone** |
+| Q1 fixed | `+ x-delivery-limit: int32(-1)` | 25/25, **retained** |
+| DLQ as shipped | `{x-queue-type: quorum}` | 21 deliveries, then **gone** |
+| Retry tier | quorum + ttl + dlx + at-least-once + reject-publish | forced 21 deliveries → tier empty, **target holds it** |
+
+So the tiers were proven NOT to need it, both ways: they have a DLX, so the limit
+**dead-letters instead of dropping**, and in production they have no consumer at all,
+so nothing increments a delivery count. They keep the broker default deliberately.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| Q1 falls back to the 4.0 default | `TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries` (real 4.0.5) |
+| the DLQ falls back to the 4.0 default | `TestTheDeadLetterQueueSurvivesRepeatedFailedReplays` (real 4.0.5) |
+| the limit set at the wrong width (`int`, not `int32`) | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` |
+| a tier gains a limit it must not have | ″ |
+
+The width matters as much as the value. Argument TYPE participates in declaration
+equivalence, and Q1 is declared by `server` too — `int` and `int32` are different
+wire types, so a width mismatch fails `PRECONDITION_FAILED` and whichever side
+declares second does not start. The frozen Q1 literal is now, exactly:
+
+```go
+amqp.Table{"x-queue-type": "quorum", "x-delivery-limit": int32(-1)}
+```
+
+The DLQ exposure is the less obvious one. The DLQ normally has no consumer, so
+nothing increments a delivery count — until someone runs a replay. A replay that
+cannot land leaves the dead-letter copy unacked and closes its channel, which is
+correct (that copy is the last one in existence, so it must not be released before
+the republish is confirmed) and which is a delivery. Twenty-five failed replays
+against a still-broken backend would discard the very message the DLQ exists to
+preserve for a human.
+
+### A test race with the mechanism it tested
+
+`TestTheDepthPollRecreatesADeletedQueue` failed intermittently on 4.0.5 under the
+full suite while passing in isolation. It deleted a tier and asserted it was gone
+before waiting for the poll to recreate it — but the poll ran every 200ms, which is
+shorter than the round trip needed to look. The poll recreated the queue before the
+"it is really gone" check could see the gap. The test now uses a deliberately slow
+2-second poll so both halves are observable, and allows the quorum delete to become
+visible rather than assuming a Raft operation is instant. Six consecutive runs green.

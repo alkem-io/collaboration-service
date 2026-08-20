@@ -124,10 +124,11 @@ and the service refuses to start below it: on 3.9.13 a quorum queue accepts the 
 and dead-letter arguments, echoes them back, and expires nothing. CI and
 dev-orchestration now run **4.0.5**, so the floor is satisfied.
 
-4.0 changed a default that this topology cares about — quorum queues now set
-`delivery-limit=20` where 3.x was unlimited — and that interacts with the
-transfer-failure contract, which deliberately leaves a delivery unacked and
-recycles the channel. **Audit open**; see the runbook.
+4.0 sets a default `delivery-limit` of 20 on quorum queues where 3.x was unlimited,
+which would silently drop an event redelivered past it on a queue with no
+dead-letter exchange — measured: the 21st delivery loses it. Q1 and the DLQ
+therefore declare `x-delivery-limit: int32(-1)`; the retry tiers deliberately do
+not. Q1's literal is mirrored byte-for-byte by `server`.
 
 Every environment also needs its existing queue state checked before deploying:
 queue arguments are immutable after declaration, so a queue that already exists

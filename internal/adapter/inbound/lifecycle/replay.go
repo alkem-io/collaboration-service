@@ -33,7 +33,10 @@ const headerReplays = "x-collab-replays"
 // reason for the tool to die.
 func DeadLetterDepth(ch brokerChannel, queue string) (int, error) {
 	names := namesFor(queue)
-	q, err := ch.QueueDeclare(names.dlq, true, false, false, false, amqp.Table{"x-queue-type": "quorum"})
+	q, err := ch.QueueDeclare(names.dlq, true, false, false, false, amqp.Table{
+		"x-queue-type":     "quorum",
+		"x-delivery-limit": int32(-1),
+	})
 	if err != nil {
 		return 0, fmt.Errorf("inspect %s: %w", names.dlq, err)
 	}

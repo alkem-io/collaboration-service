@@ -18,6 +18,16 @@ import (
 // PRECONDITION_FAILED and the declaring party does not start. Q1 deliberately
 // carries NO dead-letter arguments — transfers out of it are explicit confirmed
 // publishes by this consumer, not broker dead-lettering.
+//
+// x-delivery-limit=-1 on Q1 and the DLQ is what keeps that true on RabbitMQ 4.0.
+// 4.0 gives quorum queues a default delivery-limit of 20 where 3.x was unlimited,
+// and our transfer-failure contract deliberately leaves a delivery UNACKED and
+// recycles the channel — every recycle is another delivery. Measured on 4.0.5: the
+// 21st delivery DROPS the message, silently, because neither queue has a
+// dead-letter exchange to divert it to. A finite limit is only safe where there is
+// somewhere to divert to, which is why the retry tiers keep the default: they have
+// a DLX, so the limit dead-letters instead of dropping — and they have no consumer,
+// so nothing increments a delivery count in the first place.
 const (
 	suffixRetry30s = ".retry.30s"
 	suffixRetry5m  = ".retry.5m"
@@ -78,11 +88,18 @@ type queueSpec struct {
 func topologyFor(n queueNames) []queueSpec {
 	specs := make([]queueSpec, 0, 2+len(retryTiers))
 	specs = append(specs,
-		// Q1: frozen contract, mirrored by the producer. Nothing but the queue type.
-		queueSpec{n.main, amqp.Table{"x-queue-type": "quorum"}},
+		// Q1: frozen contract, mirrored byte-for-byte by the producer.
+		queueSpec{n.main, amqp.Table{
+			"x-queue-type":     "quorum",
+			"x-delivery-limit": int32(-1),
+		}},
 		// Q5: terminal. No TTL, no dead-lettering — a message here has exhausted the
-		// schedule and waits for a human.
-		queueSpec{n.dlq, amqp.Table{"x-queue-type": "quorum"}},
+		// schedule and waits for a human. Its redeliveries come from replay sessions
+		// that fail and close their channel, so it needs the same unlimited limit.
+		queueSpec{n.dlq, amqp.Table{
+			"x-queue-type":     "quorum",
+			"x-delivery-limit": int32(-1),
+		}},
 	)
 	// Q2-Q4: no consumer. A message sits for its TTL and is dead-lettered back to
 	// Q1 by the broker.

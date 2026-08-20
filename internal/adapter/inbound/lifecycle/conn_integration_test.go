@@ -303,8 +303,13 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	t.Cleanup(func() { _ = consumer.Close() })
 
 	_, ch := dialTest(t)
-	// The producer's own declaration of Q1 — the frozen contract.
-	if _, err := ch.QueueDeclare(queue, true, false, false, false, amqp.Table{"x-queue-type": "quorum"}); err != nil {
+	// The producer's own declaration of Q1 — the frozen contract, byte-for-byte.
+	// If this drifts from declareTopology's table the broker refuses one of them,
+	// which is exactly the failure this asserts cannot happen.
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, amqp.Table{
+		"x-queue-type":     "quorum",
+		"x-delivery-limit": int32(-1),
+	}); err != nil {
 		t.Fatalf("the producer's declaration of Q1 was refused: %v", err)
 	}
 	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: docID}))
@@ -418,7 +423,8 @@ func TestAnUnactionableEventLandsInTheDeadLetterQueue(t *testing.T) {
 func probeTier(t *testing.T, ch *amqp.Channel, mainQueue, tierQueue, dlRoutingKey string, ttlMS int32) {
 	t.Helper()
 	if _, err := ch.QueueDeclare(mainQueue, true, false, false, false, amqp.Table{
-		"x-queue-type": "quorum",
+		"x-queue-type":     "quorum",
+		"x-delivery-limit": int32(-1),
 	}); err != nil {
 		t.Fatalf("declare %s: %v", mainQueue, err)
 	}
@@ -676,8 +682,15 @@ func TestTheDepthPollRecreatesADeletedQueue(t *testing.T) {
 	names := namesFor(queue)
 	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
 
+	// A DELIBERATELY SLOW poll. The gap between deleting the queue and the poll
+	// recreating it is the only window in which "it is really gone" is observable,
+	// and at a 200ms interval that window is shorter than the round trip needed to
+	// look — the poll would recreate the queue before the check ran, and the test
+	// failed intermittently on a busy broker for that reason. Two seconds makes
+	// both halves observable without changing what is being tested.
+	const poll = 2 * time.Second
 	consumer, err := Connect(Config{
-		URL: url, Queue: queue, DepthPollInterval: 200 * time.Millisecond,
+		URL: url, Queue: queue, DepthPollInterval: poll,
 	}, &recordingManager{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -688,11 +701,14 @@ func TestTheDepthPollRecreatesADeletedQueue(t *testing.T) {
 	if _, err := ch.QueueDelete(names.tiers[2], false, false, false); err != nil {
 		t.Fatalf("delete %s: %v", names.tiers[2], err)
 	}
-	if queueExists(t, names.tiers[2]) {
-		t.Fatalf("%s still exists right after being deleted", names.tiers[2])
+	// Deleting a quorum queue is a Raft operation, so allow it to become visible
+	// rather than assuming it is instant — but well inside one poll interval, so
+	// the recreation below is still the poll's doing and not the delete failing.
+	if !eventuallyWithin(poll/2, func() bool { return !queueExists(t, names.tiers[2]) }) {
+		t.Fatalf("%s was still present half a poll interval after being deleted", names.tiers[2])
 	}
 
-	if !eventuallyWithin(15*time.Second, func() bool { return queueExists(t, names.tiers[2]) }) {
+	if !eventuallyWithin(30*time.Second, func() bool { return queueExists(t, names.tiers[2]) }) {
 		t.Fatalf("%s was not recreated by the depth poll; a deleted tier stays missing, and anything dead-lettering into it parks in a state nothing reports", names.tiers[2])
 	}
 }
@@ -1048,4 +1064,128 @@ func TestDeadLetterDepthReportsWhatIsWaiting(t *testing.T) {
 		n, _ := DeadLetterDepth(shim, queue)
 		t.Fatalf("DeadLetterDepth = %d, want 3; -dry-run would tell an operator there is nothing to replay", n)
 	}
+}
+
+// redeliverByChannelClose consumes one message and closes the channel WITHOUT
+// acking it, n times. That is precisely what the transfer-failure path does: leave
+// the delivery unacknowledged, recycle the channel, let the broker redeliver.
+//
+// It returns how many deliveries it actually received.
+func redeliverByChannelClose(t *testing.T, queue string, n int) int {
+	t.Helper()
+	seen := 0
+	for i := 0; i < n; i++ {
+		conn, err := amqp.Dial(brokerURL(t))
+		if err != nil {
+			t.Fatalf("redelivery %d: dial: %v", i, err)
+		}
+		ch, err := conn.Channel()
+		if err != nil {
+			_ = conn.Close()
+			t.Fatalf("redelivery %d: channel: %v", i, err)
+		}
+		if err := ch.Qos(1, 0, false); err != nil {
+			t.Fatalf("redelivery %d: qos: %v", i, err)
+		}
+		deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
+		if err != nil {
+			t.Fatalf("redelivery %d: consume: %v", i, err)
+		}
+		select {
+		case _, ok := <-deliveries:
+			if ok {
+				seen++
+			}
+		case <-time.After(2 * time.Second):
+		}
+		_ = ch.Close()
+		_ = conn.Close()
+	}
+	return seen
+}
+
+// TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries is the RabbitMQ 4.0 guard.
+//
+// 4.0 gives quorum queues a default delivery-limit of 20; 3.x was unlimited. Our
+// transfer-failure contract deliberately leaves the delivery UNACKED and recycles
+// the channel so the event stays broker-owned — and every recycle is another
+// delivery. Q1 has no dead-letter exchange by design, because transfers out of it
+// are our own confirmed publishes rather than broker dead-lettering. So at the
+// limit there is nowhere to divert to and the broker DROPS the message.
+//
+// Measured on 4.0.5 without the argument: the 21st delivery loses it, silently. A
+// document.deleted vanishing that way means a document the owner deleted is never
+// purged, with nothing in any log to say so.
+//
+// This test fails on a default-limit queue and passes with x-delivery-limit=-1.
+func TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries(t *testing.T) {
+	brokerURL(t)
+	queue := uniqueName("collab-q1-redelivery")
+	names := namesFor(queue)
+	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+
+	_, ch := dialTest(t)
+	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
+		t.Fatalf("declare topology: %v", err)
+	}
+	publishRaw(t, ch, names.main, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-redelivered"}))
+	if !eventually(func() bool { return messageCount(t, names.main) == 1 }) {
+		t.Fatal("the event never landed on Q1")
+	}
+
+	const rounds = 25 // past the 4.0 default of 20
+	if got := redeliverByChannelClose(t, names.main, rounds); got != rounds {
+		t.Fatalf("received %d of %d redeliveries; the broker stopped redelivering before the run finished", got, rounds)
+	}
+
+	requireStableTotal(t, names.main, 1,
+		"Q1 lost the event after more than twenty unacknowledged redeliveries. RabbitMQ 4.0 applies a default quorum delivery-limit of 20 and Q1 has no dead-letter exchange, so the message is DROPPED rather than diverted — a deleted document is never purged and nothing reports it.")
+}
+
+// TestTheDeadLetterQueueSurvivesRepeatedFailedReplays is the same limit on the
+// other consumer-owned queue.
+//
+// The DLQ normally has no consumer, so nothing increments a delivery count — until
+// somebody runs a replay. A replay that cannot land leaves the dead-letter copy
+// UNACKED and its channel closes, which is a delivery; that is the documented,
+// correct behaviour (the DLQ copy is the last one in existence, so it must not be
+// released before the republish is confirmed). Repeat it enough times against a
+// still-broken backend and the default limit discards the very message the DLQ
+// exists to preserve for a human.
+func TestTheDeadLetterQueueSurvivesRepeatedFailedReplays(t *testing.T) {
+	brokerURL(t)
+	queue := uniqueName("collab-dlq-redelivery")
+	names := namesFor(queue)
+	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+
+	_, ch := dialTest(t)
+	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
+		t.Fatalf("declare topology: %v", err)
+	}
+	if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
+		ContentType: "application/json", DeliveryMode: amqp.Persistent,
+		Headers: amqp.Table{headerAttempt: tierCount},
+		Body:    envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-replayed-often"}),
+	}); err != nil {
+		t.Fatalf("seed the DLQ: %v", err)
+	}
+	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
+		t.Fatal("the event never reached the dead-letter queue")
+	}
+
+	// Every replay finds its target missing, so every one leaves the copy unacked.
+	if _, err := ch.QueueDelete(names.main, false, false, false); err != nil {
+		t.Fatalf("delete %s: %v", names.main, err)
+	}
+	const attempts = 25
+	for i := 0; i < attempts; i++ {
+		_, replayCh := dialTest(t)
+		if _, err := Replay(context.Background(), replayCh, queue, 1); err == nil {
+			t.Fatalf("replay %d succeeded with no target queue", i)
+		}
+		_ = replayCh.Close()
+	}
+
+	requireStableTotal(t, names.dlq, 1,
+		"The dead-letter queue lost its message after repeated failed replays. Each failed replay leaves the copy unacknowledged and closes its channel — a delivery — and RabbitMQ 4.0's default quorum delivery-limit of 20 then discards the last copy of an event that was waiting for a human.")
 }
