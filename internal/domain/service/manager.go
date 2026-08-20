@@ -205,9 +205,10 @@ type JoinRequest struct {
 // Join attaches a connection to the room for the request's document
 // (materializing it on first connect) and returns the session plus the initial
 // frames the connection must send to start the y-protocols handshake (SyncStep1 +
-// the current awareness snapshot). The room evaluates per-document authZ to set
-// the joiner's collaborator mode (T014) and enforces the connection cap (FR-024);
-// a join can therefore be refused (errRoomFull) or fail closed on an authZ error.
+// the current awareness snapshot). The Manager evaluates per-document authZ ONCE,
+// before the room is materialized, to set the session's collaborator mode; the room
+// enforces the connection cap (FR-024). A join can therefore be refused
+// (ErrForbidden / errRoomFull) or fail closed on an authZ error.
 func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte, error) {
 	// AUTHORIZE FIRST — before acquire, which materializes the room: it loads the
 	// document from durable storage, opens a fan-out subscription, and takes a

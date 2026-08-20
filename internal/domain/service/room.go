@@ -126,9 +126,19 @@ type roomMember struct {
 // to the others, debounces snapshot persistence, and is released — persisting a
 // final snapshot — when the last client leaves or after an idle timeout.
 type Room struct {
-	id        model.DocumentID
-	content   model.ContentType
-	doc       *ycrdt.Doc
+	id      model.DocumentID
+	content model.ContentType
+	doc     *ycrdt.Doc
+	// shadow is a candidate document kept in lockstep with doc, used to validate an
+	// update BEFORE the live document is mutated. Nil for content types with no
+	// assets-root contract (memos), where there is nothing to validate and the
+	// second apply would be pure cost.
+	//
+	// It is fed by exactly the origins that mutate the live doc through
+	// applyUpdate — inbound client writes and cross-pod peer updates. The cold
+	// restore path validates its own candidate inside the registry's OpenFunc,
+	// before any room can serve it, so it needs no shadow.
+	shadow    *ycrdt.Doc
 	awareness *ycrdt.Awareness
 	// handle is this room's acquisition of the document from the registry. The
 	// registry owns document identity and lifetime; the room holds the document
@@ -572,6 +582,23 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		// a durable wrong-type root; persist() already keys off r.content, so only the
 		// convention was ever inconsistent.
 		applyConvention(doc, r.content)
+
+		// Validate the restored candidate BEFORE the registry publishes it. This doc
+		// is not yet reachable by any room, so failing here fails materialization
+		// with no live room — which is the only way to refuse a poisoned checkpoint
+		// at all. Nothing downstream re-checks stored state, so a document poisoned
+		// before this existed would otherwise reload forever, which is exactly the
+		// client discard-and-reseed loop.
+		//
+		// Whiteboards only: applyConvention creates the files root for whiteboards
+		// and an XmlFragment for memos, and inspecting a root MATERIALIZES it, so
+		// validating a memo here would add a files map to a document that should not
+		// have one.
+		if r.content == model.ContentTypeWhiteboard {
+			if verr := validateAssetsRoot(doc); verr != nil {
+				return nil, fmt.Errorf("stored document %s violates the assets-root contract: %w", id, verr)
+			}
+		}
 		return doc, nil
 	})
 	if err != nil {
@@ -591,6 +618,15 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	doc := handle.Doc()
 	r.doc = doc
 	r.handle = handle
+
+	if serr := r.initShadow(doc); serr != nil {
+		cancel()
+		// releaseHandle, not handle.Release: Release alone leaves the document
+		// resident in the registry, so a failure here would make it permanently
+		// un-evictable — the same leak the Hub.Subscribe failure path below avoids.
+		r.releaseHandle()
+		return nil, serr
+	}
 
 	if !opened {
 		r.measureLiveDoc(doc)
@@ -634,6 +670,11 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		// un-invalidatable, with every later open handed the same stale in-memory
 		// copy. Nothing else can clean it up: the room never entered the Manager's
 		// map, so no teardown will ever run for it.
+		//
+		// The shadow needs the same treatment for the same reason. It was built above
+		// and is this room's private document, so abandoning it here — before the run
+		// loop exists to own teardown — leaks one full copy of the board.
+		r.destroyShadow()
 		r.releaseHandle()
 		cancel()
 		return nil, err
@@ -1225,34 +1266,183 @@ func (r *Room) handlePeer(payload []byte, ephemeral bool) (mutated bool) {
 	}
 
 	wasDirty := r.dirty
-	r.applyUpdate(payload, updateOrigin{src: 0, peer: true})
+	_ = r.applyUpdate(payload, updateOrigin{src: 0, peer: true})
 	return r.dirty && !wasDirty
 }
 
+// applyResult is applyUpdate's verdict. It exists because "applied" and "the
+// budget was fine" used to be the same bool, so the candidate path had no way to
+// report that it had refused an update before the live document was touched.
+//
+// It deliberately does NOT change what a no-candidate (memo) apply reports; see the
+// live-apply branch in applyUpdate.
+type applyResult uint8
+
+const (
+	// applyOK: the update is in the live document.
+	applyOK applyResult = iota
+	// applyRejectedTooLarge: a local write would exceed MaxDocBytes. The caller
+	// disconnects the offender (FR-024).
+	applyRejectedTooLarge
+	// applyRejectedSchema: the update violates the assets-root contract. Rejected
+	// in-band; the connection stays open.
+	applyRejectedSchema
+	// applyCandidateFailed: the CANDIDATE could not decode the bytes, so the live
+	// document was never touched. Nothing landed and the room carries on. This
+	// guarantee holds only because the candidate is what failed.
+	applyCandidateFailed
+)
+
 // applyUpdate is the SINGLE guarded chokepoint every doc-mutating update routes
-// through (002 FR-005), so the MaxDocBytes budget covers EVERY entry point — local
-// client writes AND cross-pod peer updates — not just one. It returns false WITHOUT
-// applying iff a LOCAL write would exceed the cap (the caller then rejects the
-// offender pre-commit, FR-024). A PEER write cannot be rejected without diverging
-// from the pod that already accepted it, so an over-budget peer update is logged but
-// applied; correctness then relies on a uniform MaxDocBytes across pods (a documented
-// operational constraint).
-func (r *Room) applyUpdate(update []byte, origin updateOrigin) bool {
+// through (002 FR-005), so both the MaxDocBytes budget and the assets-root schema
+// cover EVERY entry point — local client writes AND cross-pod peer updates.
+//
+// Order is deliberate: budget, then schema, then live. The budget check is a cheap
+// sound skip in the common case, and rejecting on size first avoids paying a
+// shadow apply for an update that is going to be refused anyway.
+//
+// The schema is validated on the SHADOW, never on the live document. Applying
+// first and inspecting afterwards would mean the poison is already in the
+// authoritative document — and ApplyUpdate has no undo. The shadow is one update
+// ahead only between these two applies, and rejoins lockstep before returning.
+//
+// A PEER write cannot be rejected for SIZE without diverging from the pod that
+// already accepted it, so an over-budget peer update is logged and applied
+// (correctness then relies on a uniform MaxDocBytes, a documented operational
+// constraint). SCHEMA is different: poison is poison whichever pod it came from,
+// and accepting it to preserve convergence would converge every pod on an unusable
+// document.
+func (r *Room) applyUpdate(update []byte, origin updateOrigin) applyResult {
 	if r.applyWouldExceedMaxDocBytes(update) {
 		if !origin.peer {
-			return false
+			return applyRejectedTooLarge
 		}
 		r.logger.Warn("peer update would exceed MaxDocBytes; applied to avoid cross-pod divergence (check for MaxDocBytes config skew)",
 			zap.String("doc", string(r.id)))
 	}
+
+	if r.shadow != nil {
+		if err := ycrdt.ApplyUpdate(r.shadow, update, origin); err != nil {
+			// The shadow may be PARTIALLY mutated: an update truncated at its final
+			// byte applies in full and then errors (measured). Validating the next
+			// update against a contaminated mirror would compare against the wrong
+			// state, so the shadow is replaced rather than reused.
+			r.logger.Warn("candidate apply failed; rebuilding the validation shadow",
+				zap.String("doc", string(r.id)), zap.Error(err))
+			r.rebuildShadow("after a failed candidate apply")
+			return applyCandidateFailed
+		}
+		if err := validateAssetsRoot(r.shadow); err != nil {
+			r.logger.Warn("update rejected: assets-root schema",
+				zap.String("doc", string(r.id)), zap.Bool("peer", origin.peer), zap.Error(err))
+			// The shadow now holds the poison. Rebuild from the still-clean live doc.
+			r.rebuildShadow("after a schema rejection")
+			return applyRejectedSchema
+		}
+	}
+
 	if err := ycrdt.ApplyUpdate(r.doc, update, origin); err != nil {
-		// The size verdict is unchanged (this bool reports the budget, not decode
-		// validity) but a malformed update reaching the chokepoint is worth seeing:
-		// dispatchSync rejects most of these earlier, so one arriving here means a
-		// path bypassed inspection.
+		if r.shadow != nil {
+			// DEFENSIVE. The candidate accepted these exact bytes from an identical
+			// state a moment ago, and apply is deterministic, so reaching here means
+			// the mirror was not a mirror — an internal invariant failure, not anything
+			// a client did. The live document may be partially mutated and must never
+			// be persisted, so this panics: the run loop's deferred recover tears the
+			// room down WITHOUT a flush, which is exactly the required behaviour.
+			r.invariantFailed("live apply failed after the candidate accepted the same bytes", err)
+		}
+		// No candidate was involved: a memo has no assets-root contract and therefore
+		// no shadow. Its behaviour is PRESERVED EXACTLY as it was before this change —
+		// log and fall through to the same result as before.
+		//
+		// Deliberately not "corrected" here. Without a candidate nothing proves the
+		// live document was untouched; apply has no undo, the synchronous observer may
+		// already have set dirty and broadcast, and reporting not-applied would change
+		// whether a save is armed for a document that may have been partially mutated.
+		// How a partially applied malformed memo update should be handled is a real
+		// question, but it is not this one, and an assets-root change for whiteboards
+		// must not answer it by side effect.
 		r.logger.Warn("applying update failed", zap.String("doc", string(r.id)), zap.Error(err))
 	}
-	return true
+	return applyOK
+}
+
+// invariantFailed aborts the run loop when the room can no longer be trusted with
+// the document.
+//
+// It PANICS deliberately, rather than threading a second failure lifecycle through
+// every caller. The run loop already has exactly the right boundary: its deferred
+// recover logs with a stack and tears down WITHOUT a flush, precisely because "a
+// doc left mid-mutation must not be persisted over the last good snapshot". That is
+// the required behaviour, so this reuses it instead of building a parallel one for
+// a branch with no reachable producer.
+//
+// Note what it does NOT do: call Registry.Invalidate. Invalidate closes the handle
+// and then waits for the generation to drain, and the generation cannot drain until
+// this room releases its handle — which happens in teardown, on the very goroutine
+// that would be blocked inside Invalidate. That is a deterministic self-deadlock.
+// It is also unnecessary here: production has one Acquire site and one room per
+// document, so tearing down releases and evicts the sole generation.
+func (r *Room) invariantFailed(what string, cause error) {
+	panic(fmt.Sprintf("collaboration: %s for document %s: %v", what, r.id, cause))
+}
+
+// initShadow builds the validation shadow from the document the registry just
+// published, so it is in lockstep from the first update onward.
+//
+// Whiteboards only. applyConvention creates the files root for a whiteboard and an
+// XmlFragment for a memo, and INSPECTING a root materializes it — so validating a
+// memo would grow it a files map it should never have. A memo has no assets-root
+// contract, so it carries no shadow and pays nothing.
+func (r *Room) initShadow(doc *ycrdt.Doc) error {
+	if r.content != model.ContentTypeWhiteboard {
+		return nil
+	}
+	shadow, err := cloneDoc(doc, string(r.id))
+	if err != nil {
+		return fmt.Errorf("building the validation shadow for %s: %w", r.id, err)
+	}
+	r.replaceShadow(shadow)
+	return nil
+}
+
+// rebuildShadow replaces the validation shadow with a fresh copy of the live
+// document. Called only after a rejected or failed candidate apply, never on the
+// happy path — it is the expensive operation in this design.
+//
+// A failure here is fatal, and the decision is made HERE rather than by each
+// caller because no caller has a choice: leaving a stale mirror would validate
+// later updates against a state the document never had, and dropping it and
+// carrying on would apply unvalidated bytes into the authoritative document.
+// Fail closed — what an absent validator lets through is permanent.
+func (r *Room) rebuildShadow(when string) {
+	// Build the replacement BEFORE letting go of the old one: on failure the old
+	// shadow is still owned by the room, so teardown destroys it rather than leaking
+	// it. A client that can force repeated rejections would otherwise accumulate one
+	// full copy of the board per rejected update.
+	fresh, err := cloneDoc(r.doc, string(r.id))
+	if err != nil {
+		r.invariantFailed("cannot rebuild the validation shadow "+when, err)
+	}
+	r.replaceShadow(fresh)
+}
+
+// replaceShadow installs a new shadow and destroys the one it displaces.
+func (r *Room) replaceShadow(fresh *ycrdt.Doc) {
+	old := r.shadow
+	r.shadow = fresh
+	if old != nil {
+		old.Destroy()
+	}
+}
+
+// destroyShadow releases the shadow. Idempotent, so every teardown path can call
+// it without coordinating with the others.
+func (r *Room) destroyShadow() {
+	if r.shadow != nil {
+		r.shadow.Destroy()
+		r.shadow = nil
+	}
 }
 
 // applyPeerEphemeral applies a peer-pod awareness/ephemeral frame: an awareness
@@ -1316,6 +1506,24 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// (FR-024 offender-only impact); other collaborators are untouched.
 	if outcome.rejectedTooLarge {
 		r.disconnect(src, "document size limit exceeded")
+		return false
+	}
+
+	// A schema rejection refuses the WRITE, not the writer: nothing was applied,
+	// broadcast or saved, and the connection stays open. Only the sender is told —
+	// no other member ever saw the update.
+	//
+	// The sender cannot just continue after this: its rejected struct leaves a gap
+	// in its own clock sequence, so anything it writes next stays pending behind the
+	// missing one. It has to drop that generation and resync. That recovery is the
+	// client's; the server's job is to refuse the write and say so.
+	if outcome.rejectedSchema {
+		if ctrl := encodeControl(model.ControlMessage{
+			Kind:  model.ControlUpdateRejected,
+			Error: "update rejected: file locators must be references, not inline data",
+		}); ctrl != nil {
+			r.sendTo(src, ctrl)
+		}
 		return false
 	}
 
@@ -1703,6 +1911,9 @@ func (r *Room) releaseIfEmpty(saveTimer, idleTimer *time.Timer) bool {
 }
 
 func (r *Room) teardown(flush func()) {
+	// The shadow is this room's private document, not the registry's. Nothing else
+	// can free it, so it is released here — once, on the single teardown funnel.
+	r.destroyShadow()
 	if !r.lc.beginTeardown() {
 		return
 	}

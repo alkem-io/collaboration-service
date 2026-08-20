@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -82,5 +83,72 @@ func TestSendInitialShedsAPeerThatNeverDrains(t *testing.T) {
 	case <-wc.closed:
 	default:
 		t.Fatal("a peer that never drained the handshake batch must be shed, not left open")
+	}
+}
+
+// TestSendInitialRefusesAnAlreadyClosedConnection pins the fast-path guard.
+//
+// The handshake batch is sent frame by frame after the join succeeds, and the
+// connection can already be gone by then — the client disconnects during
+// materialization, or an earlier frame in the same batch tripped the shed. Every
+// later frame must refuse immediately and enqueue NOTHING: pushing onto the queue
+// of a closed connection buries frames that no writer will ever drain, and the
+// caller would keep feeding a batch that has no destination.
+func TestSendInitialRefusesAnAlreadyClosedConnection(t *testing.T) {
+	server, _ := dialPair(t)
+
+	// Repeated, because the failure it guards against is a coin toss. Without the
+	// fast-path check the send and the closed signal are BOTH ready, and Go's select
+	// picks at random — so a single pass proves nothing: half the time the wrong
+	// implementation would return errConnClosed anyway, having queued nothing.
+	for i := 0; i < 200; i++ {
+		wc := newWSConn(context.Background(), server, 4, zap.NewNop())
+		wc.close()
+
+		if err := wc.sendInitial(context.Background(), []byte{1}); !errors.Is(err, errConnClosed) {
+			t.Fatalf("iteration %d: sendInitial on a closed connection = %v, want errConnClosed", i, err)
+		}
+		if n := len(wc.send); n != 0 {
+			t.Fatalf("iteration %d: %d frame(s) were enqueued on a closed connection; nothing will ever drain them", i, n)
+		}
+	}
+}
+
+// TestSendInitialGivesUpWhenTheConnectionClosesWhileItWaits is the race the
+// fast-path guard cannot cover.
+//
+// sendInitial deliberately BLOCKS on a full queue rather than shedding, because a
+// full queue during the handshake usually just means the writer has not been
+// scheduled yet. But the connection can die while it is parked there. It must then
+// return promptly on the closed signal — not sit until the handshake deadline
+// expires, holding the per-connection goroutine and delaying teardown for a
+// connection that is already gone.
+func TestSendInitialGivesUpWhenTheConnectionClosesWhileItWaits(t *testing.T) {
+	server, _ := dialPair(t)
+	// Depth-1 queue and no writer, so the second frame must block.
+	wc := newWSConn(context.Background(), server, 1, zap.NewNop())
+	if err := wc.sendInitial(context.Background(), []byte{1}); err != nil {
+		t.Fatalf("first frame: %v", err)
+	}
+
+	// A deadline far longer than the test: if the close signal is ignored, this
+	// fails by timing out rather than by passing slowly.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	blocked := make(chan error, 1)
+	go func() { blocked <- wc.sendInitial(ctx, []byte{2}) }()
+
+	// Let it park on the full queue, then close underneath it.
+	time.Sleep(50 * time.Millisecond)
+	wc.close()
+
+	select {
+	case err := <-blocked:
+		if !errors.Is(err, errConnClosed) {
+			t.Fatalf("a blocked sendInitial returned %v after the connection closed, want errConnClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked sendInitial ignored the connection closing; it would hold the connection goroutine until the handshake deadline")
 	}
 }

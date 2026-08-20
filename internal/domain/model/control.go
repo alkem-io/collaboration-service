@@ -53,6 +53,26 @@ const (
 	// ControlRoomUserChange notifies clients that the room's participant set
 	// changed (join/leave); carries the current participant count.
 	ControlRoomUserChange ControlKind = "room-user-change"
+	// ControlUpdateRejected tells one client its update was refused and NOT applied.
+	// It is sent only to the sender: no other member saw the update, and telling
+	// them about it would leak one client's failed edit to the room.
+	//
+	// The server does not close the connection: a rejected update is a refused
+	// write, not grounds for disconnection.
+	//
+	// But the SENDER cannot simply carry on. The server is missing that client's
+	// struct at clock k, so its next incremental struct at k+1 arrives with a gap in
+	// front of it and stays pending rather than materializing. The sender must
+	// discard that local generation and resync — recreate the editor — before it can
+	// write again. That recovery is the client's, and this message is what tells it
+	// to start.
+	//
+	// NOT YET CONSUMED. The shipped client does not handle this kind and falls
+	// through its default branch, and the rejected edit stays in the local editor —
+	// so the sender's document diverges from the server's until it reloads. Making
+	// that recoverable is a client change (collab-unification); until then this
+	// carries the server's decision but nobody should claim the user is informed.
+	ControlUpdateRejected ControlKind = "update-rejected"
 	// ControlRoomClosed tells clients the room is being torn down (idle release
 	// or owner delete); the client should stop sending and may reconnect.
 	ControlRoomClosed ControlKind = "room-closed"

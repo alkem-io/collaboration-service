@@ -154,7 +154,7 @@ func TestDeadLetterBridgeSeparatesReplayCounts(t *testing.T) {
 
 	o.EventDeadLettered("document.deleted", 0)
 	o.EventDeadLettered("document.deleted", 2)
-	o.EventDeadLettered("document.access_changed", 0)
+	o.EventDeadLettered("unrecognised.pattern", 0)
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -163,7 +163,7 @@ func TestDeadLetterBridgeSeparatesReplayCounts(t *testing.T) {
 	for _, want := range []string{
 		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="0"} 1`,
 		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="2"} 1`,
-		`collaboration_lifecycle_dead_lettered_total{pattern="document.access_changed",replays="0"} 1`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="unrecognised.pattern",replays="0"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)

@@ -848,3 +848,91 @@ the mutation probe "the limit is set at the wrong width (int, not int32)" came b
 RED to the unit wiring test, and moved on — when the vacuous result against the
 broker was precisely the finding. A probe that fails to go RED where the claim says
 it should is evidence about the claim, not noise to be routed around.
+
+## T027: refusing assets-root poison at ingress
+
+A structurally valid Yjs update can put an inline `data:` URI into a whiteboard's
+`files` root. Clients accept such a document cleanly and then throw on every
+subsequent encode, so discarding and reseeding from the server reloads the same
+poison forever. It has to be refused on the way in.
+
+### What the audit measured before any code
+
+| Question | Answer |
+|---|---|
+| Can Go read the `files` root and spot a `data:` locator after apply? | yes, as a plain string |
+| Is `ApplyUpdateV2` atomic on malformed input? | almost: of every truncation offset, only `len-1` mutates — and it applies the payload IN FULL before erroring |
+| Cost of a synchronized shadow vs the rejected per-update clone | **1.01x / 1.03x** versus **57x / 427x** at 200 / 2000 elements |
+| Can a cold load already carry poison? | yes — restore validated nothing |
+
+The `len-1` result is what makes the rebuild load-bearing rather than cautious: a
+shadow apply that ERRORS may nonetheless be fully mutated, so reusing it would
+validate the next update against a state the live document never had.
+
+### The origin census, derived mechanically
+
+Every production mutation of a live `Y.Doc`, grepped and resolved to its callers:
+`applyUpdate` (the chokepoint, called by `dispatchSync` for inbound writes and
+`handlePeer` for cross-pod deliveries) and `restoreInto` (cold load, inside the
+registry's `OpenFunc`). `applyWouldExceedMaxDocBytes` applies only to a scratch doc.
+Awareness was excluded **with evidence**: both `ApplyAwarenessUpdate` calls target
+`r.awareness`, a separate CRDT, never `r.doc`.
+
+### Guarantees, all probed RED
+
+| Reverted | Caught by |
+|---|---|
+| no candidate validation (poison reaches live) | `TestPoisonFromAClientNeverReachesTheLiveDocument` + 2 |
+| validate the live doc after applying instead of the candidate | ″ |
+| shadow not rebuilt after a schema rejection | `TestTheRoomStaysUsableAfterARejection` + 2 |
+| shadow not rebuilt after a failed candidate apply | `TestAPartiallyAppliedCandidateDoesNotPoisonLaterValidation` |
+| memos given a shadow (validation would materialize a `files` root) | `TestAMemoIsNeverGivenAFilesRoot` |
+| a memo apply reported not-applied (scope creep) | `TestAMemoMalformedUpdateKeepsItsPreExistingBehaviour` |
+| cold load does not validate the restored candidate | `TestAPoisonedCheckpointFailsMaterialization` |
+| `data:` check case-sensitive / ignores leading whitespace | `TestTheAssetsRootContract` |
+| trim reverted to `strings.TrimSpace` (BOM bypass) | ″ |
+| BOM / `Space_Separator` not trimmed; U+0085 wrongly trimmed | ″ |
+| byte bound measured on the trimmed value | ″ |
+| empty or non-string locators accepted | ″ |
+| `sendInitial` loses its fast-path closed guard | `TestSendInitialRefusesAnAlreadyClosedConnection` |
+| a blocked `sendInitial` ignores the connection closing | `TestSendInitialGivesUpWhenTheConnectionClosesWhileItWaits` |
+
+### Rejected, with the reason
+
+- **A content fingerprint at the checkpoint boundary.** Feasible —
+  `EncodeStateAsUpdateV2` is byte-stable across construction paths, and the save
+  path already encodes. Rejected because no production path creates the divergence
+  it would catch: live and shadow receive identical bytes and apply is
+  deterministic (0 verdict and 0 state mismatches over a 192-case corpus), and a
+  corrupted update diverges BOTH documents identically, giving them the same wrong
+  fingerprint.
+- **A per-update state-vector comparison.** It is not content equality: of 5595
+  updates that applied cleanly after single-bit corruption, **5536 had an equal
+  state vector and different content**. The guarantee is construction — one
+  chokepoint, every origin paired — not a checksum.
+- **Candidate promotion / doc swap.** Infeasible: the registry owns document
+  identity and exposes no `Replace`. Four things bind to the specific doc object.
+  And unnecessary once the impossible branch is a teardown.
+- **A parallel fatal lifecycle** (`applyFatal`, `syncOutcome.fatal`, `Room.unfit`,
+  post-command checks). Replaced by the run loop's EXISTING panic boundary, which
+  already tears down without flushing for exactly this reason.
+- **A `nil` guard on `GetMap`.** No producer in this service: `applyConvention`
+  selects the whiteboard roots as maps before validation, and decoded roots arrive
+  generic and are upgraded. A conflicting stored root was not reproducible.
+
+### Two of my own mistakes worth recording
+
+`fatal()` called `Registry.Invalidate` from the room's own run loop. `Invalidate`
+closes the handle and then WAITS for the generation to drain — which cannot happen
+until that same goroutine releases it in teardown. A deterministic self-deadlock,
+found by review and confirmed in the vendored source, not by a test.
+
+The real-path test built its poison by encoding `room.doc` from the test goroutine,
+racing the run loop, which is the document's single writer. The author client now
+emits the poison from its own document, which is also what a browser does.
+
+### Scope, stated plainly
+
+This is a bounded locator schema. It is NOT update integrity: of 2220 silent
+divergences produced by single-bit corruption, it caught **zero**, and it is not
+meant to. It does not roll out safely ahead of the client — see the runbook.

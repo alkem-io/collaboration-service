@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -390,8 +391,14 @@ func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
 		// A full room rides the canonical room-capacity-reached code (OPEN-1) on the
 		// close reason — the join is refused so no control frame carries it.
 		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached},
-		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation, ""},
-		{"fail-closed authZ", errors.New("authz transport failure"), websocket.StatusInternalError, ""},
+		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation, "forbidden"},
+		// A document being deleted is a verdict too: reconnecting cannot help, so it
+		// must not read as a transient failure the client should retry through.
+		{"document purging", service.ErrDocumentPurging, websocket.StatusPolicyViolation, "document deleted"},
+		// Wrapped policy errors must keep their verdict. Reported as internal instead,
+		// a denied client would reconnect in a loop against a permanent refusal.
+		{"wrapped forbidden", fmt.Errorf("joining: %w", service.ErrForbidden), websocket.StatusPolicyViolation, "forbidden"},
+		{"fail-closed authZ", errors.New("authz transport failure"), websocket.StatusInternalError, "join failed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

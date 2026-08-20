@@ -212,7 +212,7 @@ func TestBudgetSkipNeverAdmitsPastCap(t *testing.T) {
 
 	rejectedAtLeastOnce := false
 	for i, d := range deltas {
-		if !room.applyUpdate(d, updateOrigin{}) {
+		if room.applyUpdate(d, updateOrigin{}) != applyOK {
 			// The budget engaged and held the line pre-commit (the doc was not mutated).
 			// That is the sound steady state — proven, so stop (continuing would re-run
 			// the O(docsize) exact check on every remaining delta for no extra coverage).

@@ -46,6 +46,45 @@ with a `1008` policy close on their next attempt. An authorization backend outag
 closes with `1011` instead, so clients keep retrying rather than treating an outage
 as a permanent denial.
 
+## The assets-root validator is NOT independently rollout-safe
+
+The service refuses whiteboard updates whose `files` locators are inline `data:`
+URIs. **Do not deploy that ahead of the client.** The currently shipped client can
+still publish an inline dataURL as an upload fallback and ignores the
+`update-rejected` control, so a validator-first rollout would refuse those updates
+and leave that user's editor with a gap in its own clock sequence — every
+subsequent write pending behind the refused one, with no message it acts on.
+
+### It is also not safe under a rolling deployment
+
+A mixed fleet DIVERGES. An old pod has no validator, so it accepts a poison update
+and publishes it over the hub; a new pod refuses that peer update and never applies
+it. The two pods then hold different documents for the same id, permanently — the
+CRDT cannot heal a struct one side never received, and whichever pod checkpoints
+last decides what is stored.
+
+Client-first does not remove this. It removes *compliant* producers, not an old
+client, a malicious one, or a session already open against an old pod while the
+rollout is in progress.
+
+**Ordinary overlapping rolling replacement is therefore not allowed for this
+change.** The service generation must be cut over as a boundary.
+
+Required order:
+
+1. `client-web` AssetAdapter drops the old collaborative dataURL fallback, and
+   `client-web` handles `update-rejected` by discarding that editor generation and
+   reloading server state. Both ship first.
+2. **No mixed validator / non-validator collaboration-service fleet.** Drain and
+   stop the old pods and cut the service generation over as a coordinated boundary
+   — or otherwise prove old pods cannot accept connections or updates before new
+   pods begin serving.
+3. New pods start and rooms rematerialize from the same durable state.
+
+This is sequencing and an operations gate, not a compatibility window: the old path
+was never shipped to production, so there is no dual-schema support to build, no
+peer special-case to add, and none should be added.
+
 ## Before deploying — preconditions, not suggestions
 
 The service **fails closed** on both of these. That is deliberate: each failure is

@@ -119,6 +119,15 @@ bytes, and the file-service store accepts V2 only because its blob is a bare Yjs
 update other systems read. Nothing infers a codec from bytes — the wrong decoder
 returns an empty state vector with no error.
 
+**The assets-root validator is not independently rollout-safe, and it is not
+rolling-deploy safe.** Whiteboard updates carrying inline `data:` file locators are
+refused. The currently shipped client can still emit them and ignores the
+`update-rejected` control, so client changes ship FIRST. Beyond that, a mixed fleet
+diverges: an old pod accepts poison and publishes it over the hub, a new pod refuses
+that peer update, and the two hold different documents for the same id permanently.
+Ordinary overlapping rolling replacement is not allowed — drain the old pods and cut
+the service generation over as a boundary. See the runbook.
+
 **Broker requirement.** The lifecycle retry topology needs **RabbitMQ >= 3.13.2**
 and the service refuses to start below it: on 3.9.13 a quorum queue accepts the TTL
 and dead-letter arguments, echoes them back, and expires nothing. CI and

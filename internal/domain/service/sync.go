@@ -24,6 +24,11 @@ type syncOutcome struct {
 	// left untouched (no mutation, no broadcast). The caller disconnects the
 	// offender.
 	rejectedTooLarge bool
+	// rejectedSchema is true when the update violated the assets-root contract.
+	// Unlike rejectedTooLarge it does NOT disconnect. The write is refused and the
+	// socket stays open, but the sender must resync before writing again: its
+	// refused struct leaves a gap in its own clock sequence.
+	rejectedSchema bool
 }
 
 // dispatchSync classifies one framed sync message (SyncStep1 / SyncStep2 /
@@ -77,8 +82,20 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 		// Enforce MaxDocBytes BEFORE committing to the live doc (FR-024): an
 		// oversized update must never mutate or broadcast the authoritative doc and
 		// then get evicted "after the fact".
-		if !r.applyUpdate(info.Body, updateOrigin{src: src}) {
+		switch r.applyUpdate(info.Body, updateOrigin{src: src}) {
+		case applyRejectedTooLarge:
 			return syncOutcome{mutating: true, applied: false, rejectedTooLarge: true}, nil
+		case applyRejectedSchema:
+			return syncOutcome{mutating: true, applied: false, rejectedSchema: true}, nil
+		case applyCandidateFailed:
+			// The CANDIDATE refused the bytes, so the live document is provably
+			// untouched: nothing to record, nothing to broadcast, no save to arm. Not a
+			// policy verdict either, so the connection stays open.
+			//
+			// Only the candidate path can make this claim. A live apply that fails with
+			// no candidate in front of it may have partially mutated, and is left on
+			// its pre-existing path in applyUpdate rather than reported here.
+			return syncOutcome{mutating: true, applied: false}, nil
 		}
 		return syncOutcome{mutating: true, applied: true}, nil
 	}
