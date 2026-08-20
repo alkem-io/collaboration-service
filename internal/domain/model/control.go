@@ -67,11 +67,13 @@ const (
 	// write again. That recovery is the client's, and this message is what tells it
 	// to start.
 	//
-	// NOT YET CONSUMED. The shipped client does not handle this kind and falls
-	// through its default branch, and the rejected edit stays in the local editor —
-	// so the sender's document diverges from the server's until it reloads. Making
-	// that recoverable is a client change (collab-unification); until then this
-	// carries the server's decision but nobody should claim the user is informed.
+	// CONSUMED by `client-web`: 8d69ef4ff handles this kind by discarding the editor
+	// generation and reloading server state, 5c6f4600f corrects its teardown. So the
+	// contract is closed on both sides — the server refuses and says so, the client
+	// resets rather than keeping an edit the document does not contain.
+	//
+	// The literal matters: the client keys off this exact kind string. Renaming it is
+	// a cross-repo change, not a local one.
 	ControlUpdateRejected ControlKind = "update-rejected"
 	// ControlRoomClosed tells clients the room is being torn down (idle release
 	// or owner delete); the client should stop sending and may reconnect.
