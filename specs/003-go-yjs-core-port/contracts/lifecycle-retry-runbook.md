@@ -69,14 +69,19 @@ honest: it passes on 3.13.2 and fails on 3.9.13.
 | Metric | Kind | Question it answers |
 |---|---|---|
 | `collaboration_lifecycle_transfers_total{queue,outcome}` | counter | is anything failing right now, and how far down the ladder |
-| `collaboration_lifecycle_queue_depth{queue}` | gauge | is there unattended work |
+| `collaboration_lifecycle_queue_ready_depth{queue}` | gauge | is there unattended work |
+| `collaboration_lifecycle_dead_lettered_total{pattern,replays}` | counter | has a person already tried to fix this |
 
 Suggested alerts:
 
 ```promql
 # Page-worthy: an event has exhausted the ladder. A deletion or revocation is
 # NOT applied and will not be retried without a person.
-collaboration_lifecycle_queue_depth{queue=~".+\\.dlq"} > 0
+collaboration_lifecycle_queue_ready_depth{queue=~".+\\.dlq"} > 0
+
+# Escalate rather than repeat: this event has already been replayed and failed
+# again, so the fix applied before the last replay did not work.
+increase(collaboration_lifecycle_dead_lettered_total{replays!="0"}[1h]) > 0
 
 # Warn: something is failing. ~35 minutes of runway before it reaches the DLQ.
 increase(collaboration_lifecycle_transfers_total{queue=~".+\\.retry\\..+"}[5m]) > 0
@@ -91,8 +96,27 @@ window in which anyone could have fixed the backend has already closed.
 
 Per-tier depth doubles as message age: an event in `.retry.30m` has already
 survived `.retry.30s` and `.retry.5m`, so it has been failing for at least five and
-a half minutes. AMQP exposes no message-age reading short of the management API, so
-the ladder's own quantization is the age signal.
+a half minutes. AMQP exposes no message-age reading at all, so the ladder's own
+quantization is the age signal.
+
+### What the depth gauge does not see
+
+It is **ready** depth, and the name says so because the distinction is real. AMQP's
+`queue.declare-ok` reports only the ready count, and a message the broker is holding
+for a *pending dead-letter hop* is neither ready nor unacknowledged. It reads as
+zero here while being very much present.
+
+That state has exactly one cause: an expired retry whose dead-letter target is
+missing. It is bounded rather than open-ended — the consumer re-declares every
+queue in the topology on each re-attach and on each depth poll, so a deleted queue
+comes back within one poll interval and the broker then releases the parked message
+on its own (see below). While such a window is being examined, read the total from
+the broker rather than from this metric:
+
+```bash
+rabbitmqctl list_queues name messages messages_ready
+#   <queue>.retry.30s   1   0     <- one message parked, invisible to ready depth
+```
 
 ## What lands where
 
@@ -117,44 +141,44 @@ The DLQ is terminal: no TTL, no dead-lettering. Messages wait for a person.
 Before replaying, **fix the cause**. A replay into a still-broken backend walks the
 whole ladder again and returns to the DLQ ~35 minutes later.
 
-Each message carries `x-collab-attempt`, the count of transfers it has been
-through. **A replay must clear it.** A message arriving on Q1 still carrying
-`x-collab-attempt: 3` goes straight to the DLQ on its first failure, which looks
-exactly like a replay that worked.
+Use the shipped command. **Do not use a shovel**, and do not use
+`rabbitmqadmin get` followed by a publish; both get this wrong in ways that are
+hard to see afterwards.
 
 ```bash
-# 1. See what is there, and why. The header tells you how far it got.
-rabbitmqadmin get queue=alkemio-collaboration-lifecycle.dlq count=50 ackmode=reject_requeue_true
+# 1. See how much is waiting.
+lifecycle-replay -url "$RABBITMQ_URL" -queue alkemio-collaboration-lifecycle -dry-run
 
 # 2. Fix the underlying failure. Confirm with
 #    increase(collaboration_lifecycle_transfers_total{queue=~".+\\.retry\\..+"}[5m])
 #    that new events are no longer entering the ladder.
 
-# 3. Move the DLQ back to the main queue.
-rabbitmqctl set_parameter shovel lifecycle-replay '{
-  "src-protocol": "amqp091", "src-uri": "amqp://", "src-queue": "alkemio-collaboration-lifecycle.dlq",
-  "dest-protocol": "amqp091", "dest-uri": "amqp://", "dest-queue": "alkemio-collaboration-lifecycle",
-  "src-delete-after": "queue-length",
-  "dest-add-forward-headers": false,
-  "dest-publish-properties": {"delivery_mode": 2}
-}'
+# 3. Put the events back on the ladder.
+lifecycle-replay -url "$RABBITMQ_URL" -queue alkemio-collaboration-lifecycle
+#   replayed 4 event(s) onto alkemio-collaboration-lifecycle
 
-# 4. Remove the shovel once the DLQ is empty.
-rabbitmqctl clear_parameter shovel lifecycle-replay
+# -limit N moves at most N, for a cautious first pass.
 ```
 
-**Verify the header on one message before shovelling the rest.** A shovel preserves
-message headers, and `dest-add-forward-headers: false` only suppresses the shovel's
-*own* headers — it does not strip `x-collab-attempt`. If your shovel carries it
-through, replay by republishing without it instead:
+It is a command rather than a documented broker recipe because the move has two
+requirements neither alternative meets:
 
-```bash
-# Per-message replay that drops the attempt header.
-rabbitmqadmin get queue=alkemio-collaboration-lifecycle.dlq count=1 ackmode=ack_requeue_false \
-  | ... extract payload ...
-rabbitmqadmin publish exchange=amq.default routing_key=alkemio-collaboration-lifecycle \
-  payload="<the envelope>" properties='{"delivery_mode":2}'
-```
+- **`x-collab-attempt` must be cleared.** A shovel preserves message headers
+  (`dest-add-forward-headers: false` suppresses only the shovel's *own* headers), so
+  a shovelled event arrives still marked `x-collab-attempt: 3` and goes straight
+  back to the dead-letter queue on its first failure — indistinguishable from a
+  replay that worked.
+- **The dead-letter copy must be released only after the republish is confirmed.**
+  `get` with ack followed by a publish does the opposite: a publish that fails after
+  the ack destroys the last copy of the event. The command publishes with
+  `mandatory`, requires a confirm with no return, and only then acks — and on any
+  failure leaves the dead-letter copy untouched.
+
+The command also increments `x-collab-replays`. Clearing the attempt count erases
+the event's history, and that counter is what puts it back: it reaches the
+`collaboration_lifecycle_dead_lettered_total{replays}` label, so an event that has
+been replayed three times and failed again is visibly different from one failing for
+the first time. That difference is the signal to escalate rather than repeat.
 
 Both handlers are **idempotent** — purging an already-purged document succeeds, and
 re-evaluating access is a recomputation — so replaying a message that was in fact
@@ -171,19 +195,37 @@ broker redelivers it. It never nacks or rejects — rejecting turns a transient
 publish failure into terminal handling, and the dead-letter hop behind a reject is
 not itself publisher-confirmed.
 
-**A deleted tier queue.** With `x-dead-letter-strategy=at-least-once`, a message
-whose dead-letter target does not exist at expiry is **retained in its source
-queue** — verified on 3.13.2, and verified against an at-most-once control that
-loses it. The message is not lost. But it does **not** resume on its own when the
-queue is recreated (measured over two minutes; it stays put). Recreate the queue
-*and* replay the source tier. Note the count: the retained message is neither ready
-nor unacknowledged, so `rabbitmqctl list_queues messages_ready` reads 0 for it —
-use the total `messages` column. The broker logs `Cannot forward any dead-letter
-messages from source quorum queue …` while this is happening.
+**A deleted queue, and the parked message behind it.** With
+`x-dead-letter-strategy=at-least-once`, a message whose dead-letter target does not
+exist at expiry is **retained in its source queue** — verified on 3.13.2 against an
+at-most-once control that loses it. The message is not lost, but it is parked:
+neither ready nor unacknowledged, so no consumer and no shovel can reach it, and
+`messages_ready` reads 0 while `messages` reads 1. The broker logs `Cannot forward
+any dead-letter messages from source quorum queue …` while this is going on.
+
+**The recovery is to declare the missing queue, and nothing else.** Once the target
+exists the broker retries the hop on its own and releases the message — measured at
+2m58s on 3.13.2, twice, on a fixed cycle of about three minutes. No replay, no
+restart, no intervention on the source queue; in fact nothing else releases it, and
+attempting to drain the source will find nothing to drain.
+
+In practice the service does this for you: it re-declares all five queues at
+startup, on every supervisor re-attach, and on every depth poll. A deleted queue is
+back within one poll interval and the parked message follows a few minutes later.
+The manual step is needed only if the queue is deleted while the service is down —
+in which case starting the service *is* the recovery action.
+
+```bash
+# If you need to do it by hand, declare with the frozen arguments.
+rabbitmqadmin declare queue name=alkemio-collaboration-lifecycle durable=true \
+  arguments='{"x-queue-type":"quorum"}'
+# Then wait ~3 minutes and confirm the source drained:
+rabbitmqctl list_queues name messages messages_ready
+```
 
 **The consumer stops processing.** It supervises its own attachment: any way the
 delivery stream ends — broker restart, channel fault, a deliberate recycle — it
 re-attaches on a bounded backoff, indefinitely, until shutdown. A consumer silently
-doing nothing should not be possible; if `collaboration_lifecycle_queue_depth` on Q1
+doing nothing should not be possible; if `collaboration_lifecycle_queue_ready_depth` on Q1
 climbs while `collaboration_lifecycle_transfers_total` stays flat and nothing is
 being applied, that is the shape to look for.

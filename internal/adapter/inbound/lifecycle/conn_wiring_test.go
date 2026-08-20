@@ -56,9 +56,18 @@ type fakeChannel struct {
 	confirmErr       error
 	publishErr       error
 
-	// confirmAck/returnMsg script the broker's response to the next publish.
+	// confirmAck/returnOnPub script the broker's response to the next publish.
 	confirmAck  bool
 	returnOnPub bool
+	// nackFromPublish, when > 0, acks the first nackFromPublish-1 publishes and
+	// nacks every one after — so a multi-publish run can fail at a chosen point
+	// without the test racing the loop it is driving.
+	nackFromPublish int
+	// answersBeforePublishReturns delivers both answers into their channels
+	// SYNCHRONOUSLY, before PublishWithContext returns — the state where the
+	// connection reader has already dispatched both frames and the caller's select
+	// sees two ready channels.
+	answersBeforePublishReturns bool
 
 	confirms chan amqp.Confirmation
 	returns  chan amqp.Return
@@ -102,18 +111,29 @@ func (f *fakeChannel) PublishWithContext(_ context.Context, exchange, key string
 	tag := uint64(len(f.published))
 	confirms, returns := f.confirms, f.returns
 	ack, ret := f.confirmAck, f.returnOnPub
+	if f.nackFromPublish > 0 && len(f.published) >= f.nackFromPublish {
+		ack = false
+	}
+	sync := f.answersBeforePublishReturns
 	f.mu.Unlock()
 
-	// The broker answers asynchronously; mirror that so the transfer path is
-	// exercised as it will run against a real channel.
-	go func() {
+	// A return always precedes its confirm — that is the frame order AMQP
+	// guarantees and amqp091-go preserves, and the transfer path's correctness
+	// depends on it.
+	answer := func() {
 		if ret && returns != nil {
 			returns <- amqp.Return{Exchange: exchange, RoutingKey: key, Body: msg.Body}
 		}
 		if confirms != nil {
 			confirms <- amqp.Confirmation{DeliveryTag: tag, Ack: ack}
 		}
-	}()
+	}
+	if sync {
+		answer()
+		return nil
+	}
+	// Otherwise the broker answers asynchronously, as it usually will.
+	go answer()
 	return nil
 }
 
@@ -165,6 +185,26 @@ func (f *fakeChannel) Consume(queue, _ string, autoAck, _, _, _ bool, _ amqp.Tab
 	return f.deliveries, nil
 }
 
+// deliver pushes a delivery onto whatever stream Consume most recently opened.
+func (f *fakeChannel) deliver(d amqp.Delivery) {
+	f.mu.Lock()
+	ch := f.deliveries
+	f.mu.Unlock()
+	if ch != nil {
+		ch <- d
+	}
+}
+
+// errTestBroker stands in for any broker-side refusal.
+var errTestBroker = errors.New("broker said no")
+
+func (f *fakeChannel) Cancel(_ string, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "cancel")
+	return nil
+}
+
 func (f *fakeChannel) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -186,15 +226,23 @@ func (f *fakeChannel) closeCount() int {
 }
 
 type fakeConn struct {
-	ch         *fakeChannel
-	channelErr error
-	version    string
+	ch      *fakeChannel
+	version string
 
 	// The supervisor closes a dead session's connection from its own goroutine
 	// while Close may be closing the same one from the caller's, exactly as a real
 	// *amqp.Connection tolerates. The counter has to be safe for that.
-	mu     sync.Mutex
-	closed int
+	mu         sync.Mutex
+	closed     int
+	channelErr error
+}
+
+// refuseChannels makes every subsequent Channel call fail, as a broker that has
+// gone away does. Guarded: the supervisor reads this from its own goroutine.
+func (f *fakeConn) refuseChannels(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.channelErr = err
 }
 
 func (f *fakeConn) ServerProperties() amqp.Table {
@@ -206,6 +254,8 @@ func (f *fakeConn) ServerProperties() amqp.Table {
 }
 
 func (f *fakeConn) Channel() (brokerChannel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.channelErr != nil {
 		return nil, f.channelErr
 	}
@@ -434,7 +484,8 @@ func TestConnectClosesWhatItOpenedOnEveryFailure(t *testing.T) {
 		{"consume", &fakeChannel{consumeErr: boom}, nil, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conn := &fakeConn{ch: tc.ch, channelErr: tc.channelErr}
+			conn := &fakeConn{ch: tc.ch}
+			conn.refuseChannels(tc.channelErr)
 			withFakeBroker(t, conn, nil)
 
 			if _, err := Connect(Config{URL: "amqp://stub", Queue: "q"}, &fakeManager{}, zap.NewNop()); err == nil {
@@ -766,6 +817,8 @@ func TestAttemptHeaderRoutingIsTotalOverWhateverArrives(t *testing.T) {
 		{"negative", int32(-7), "lifecycle-q.retry.30s", 1},
 		{"published as a wider int", int64(2), "lifecycle-q.retry.30m", 3},
 		{"published as a byte", uint8(1), "lifecycle-q.retry.5m", 2},
+		{"published as a short", int16(2), "lifecycle-q.retry.30m", 3},
+		{"published as a plain int", int(1), "lifecycle-q.retry.5m", 2},
 		{"not a number at all", "two", "lifecycle-q.retry.30s", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -865,9 +918,15 @@ func TestTheConsumerReAttachesAfterTheDeliveryStreamEnds(t *testing.T) {
 
 // recordingObserver captures the operational signals the consumer emits.
 type recordingObserver struct {
-	mu        sync.Mutex
-	transfers []transferSignal
-	depths    map[string]int
+	mu          sync.Mutex
+	transfers   []transferSignal
+	depths      map[string]int
+	deadLetters []deadLetterSignal
+}
+
+type deadLetterSignal struct {
+	pattern string
+	replays int32
 }
 
 type transferSignal struct {
@@ -885,10 +944,22 @@ func (o *recordingObserver) EventTransferred(queue string, confirmed bool) {
 	o.transfers = append(o.transfers, transferSignal{queue, confirmed})
 }
 
-func (o *recordingObserver) QueueDepth(queue string, messages int) {
+func (o *recordingObserver) QueueReadyDepth(queue string, ready int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.depths[queue] = messages
+	o.depths[queue] = ready
+}
+
+func (o *recordingObserver) EventDeadLettered(pattern string, replays int32) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.deadLetters = append(o.deadLetters, deadLetterSignal{pattern, replays})
+}
+
+func (o *recordingObserver) deadLetterSnapshot() []deadLetterSignal {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]deadLetterSignal(nil), o.deadLetters...)
 }
 
 func (o *recordingObserver) snapshot() ([]transferSignal, map[string]int) {
@@ -1060,5 +1131,319 @@ func TestDepthPollingCanBeDisabled(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if _, depths := obs.snapshot(); len(depths) != 0 {
 		t.Fatalf("polling was disabled but reported %v", depths)
+	}
+}
+
+// TestAnAckNeverOutvotesAReturnThatIsAlreadyWaiting closes the race between the
+// broker's two answers.
+//
+// transfer selects on the return channel and the confirm channel. Both may be
+// ready at once: a mandatory publish to a missing queue produces basic.return
+// followed by basic.ack, and by the time transfer reaches its select the
+// connection reader may have dispatched both. Go's select picks at RANDOM between
+// two ready cases — protocol ordering buys nothing there — so roughly half the
+// time the confirm wins and an unroutable publish reports success. The event is
+// then acked and gone: transferred nowhere, deleted from the only queue holding
+// it. That is the single worst outcome the whole ladder exists to prevent, and it
+// would be intermittent.
+//
+// The fake delivers both answers synchronously, before the publish call returns,
+// which is exactly that state. Repeated, because a single pass could win the
+// coin toss: without the drain this fails within a handful of iterations.
+func TestAnAckNeverOutvotesAReturnThatIsAlreadyWaiting(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+
+	for i := 0; i < 200; i++ {
+		acker := &fakeAcker{}
+		ch := &fakeChannel{}
+		c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+		ch.mu.Lock()
+		// The broker ACKED the publish and RETURNED it as unroutable.
+		ch.confirmAck = true
+		ch.returnOnPub = true
+		ch.answersBeforePublishReturns = true
+		ch.mu.Unlock()
+
+		c.processOne(amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1})
+
+		if acks, _ := acker.snapshot(); acks != 0 {
+			t.Fatalf("iteration %d: the delivery was ACKED after an unroutable publish that the broker also confirmed. The event was removed from the only queue holding it and republished nowhere", i)
+		}
+	}
+}
+
+// TestTheDeadLetterSignalCarriesThePriorReplayCount asserts the DLQ signal reports
+// how many times a person has already replayed the event.
+//
+// The attempt count cannot say this. A replay CLEARS it — deliberately, so the
+// event gets the whole ladder again rather than returning to the DLQ on its first
+// failure — which means every dead-lettering after a replay reports the same
+// "attempt 3" as the first one did. Without the replay count, an event someone has
+// now sent round the ladder three times into a backend that is still broken looks
+// exactly like an event failing for the first time, and the operator repeats a fix
+// that has already been shown not to work.
+func TestTheDeadLetterSignalCarriesThePriorReplayCount(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers amqp.Table
+		want    int32
+	}{
+		{"never replayed", amqp.Table{headerAttempt: tierCount}, 0},
+		{"replayed once", amqp.Table{headerAttempt: tierCount, headerReplays: int32(1)}, 1},
+		{"replayed many times", amqp.Table{headerAttempt: tierCount, headerReplays: int64(4)}, 4},
+		{"count is garbage", amqp.Table{headerAttempt: tierCount, headerReplays: "lots"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := newRecordingObserver()
+			ch := &fakeChannel{confirmAck: true}
+			c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+			c.obs = obs
+
+			c.processOne(amqp.Delivery{
+				Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"}),
+				Headers:      tc.headers,
+				Acknowledger: &fakeAcker{}, DeliveryTag: 1,
+			})
+
+			got := obs.deadLetterSnapshot()
+			if len(got) != 1 {
+				t.Fatalf("reported %d dead-letterings, want 1: %v", len(got), got)
+			}
+			if got[0].replays != tc.want {
+				t.Fatalf("replays = %d, want %d", got[0].replays, tc.want)
+			}
+			if got[0].pattern != PatternDocumentDeleted {
+				t.Fatalf("pattern = %q, want %q", got[0].pattern, PatternDocumentDeleted)
+			}
+		})
+	}
+}
+
+// TestOnlyTheDeadLetterQueueRaisesTheDeadLetterSignal asserts a hop onto the retry
+// ladder is not reported as a dead-lettering. The DLQ signal is the escalation
+// one — it means an event will not be retried again without a person — so raising
+// it for an ordinary retry would make it worthless.
+func TestOnlyTheDeadLetterQueueRaisesTheDeadLetterSignal(t *testing.T) {
+	obs := newRecordingObserver()
+	ch := &fakeChannel{confirmAck: true}
+	c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+	c.obs = obs
+
+	// No attempt header: this is the first failure, so it goes to the 30s tier.
+	c.processOne(amqp.Delivery{
+		Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"}),
+		Acknowledger: &fakeAcker{}, DeliveryTag: 1,
+	})
+
+	if got := obs.deadLetterSnapshot(); len(got) != 0 {
+		t.Fatalf("a hop onto the retry ladder was reported as a dead-lettering: %v", got)
+	}
+}
+
+// TestRecycleStandsDownWhenTheConsumerCloses asserts a pending recycle does not
+// outlive shutdown. recycle waits out a backoff before closing the channel; if
+// Close happened during that window and recycle went ahead anyway, it would close
+// a channel the shutdown path had already released.
+func TestRecycleStandsDownWhenTheConsumerCloses(t *testing.T) {
+	ch := &fakeChannel{}
+	c := consumerForTest(t, &fakeManager{}, ch)
+	c.recycleBackoff = time.Hour // long enough that only Close can end the wait
+
+	done := make(chan struct{})
+	go func() { c.recycle(); close(done) }()
+
+	_ = c.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recycle outlived Close; it is still waiting to close a channel shutdown has already released")
+	}
+}
+
+// TestTheSupervisorKeepsTryingWhileTheBrokerRefuses asserts a failed re-attach is
+// retried rather than abandoned. A broker that is down for a minute during a
+// rollout must not permanently stop lifecycle processing — that is the same
+// silent-death failure the supervisor exists to prevent, just moved one step later.
+func TestTheSupervisorKeepsTryingWhileTheBrokerRefuses(t *testing.T) {
+	ch := &fakeChannel{confirmAck: true}
+	conn := &fakeConn{ch: ch}
+	dials := withFakeBroker(t, conn, nil)
+
+	c, err := Connect(Config{URL: "amqp://stub", Queue: "q", RecycleBackoff: time.Millisecond}, &fakeManager{}, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The broker starts refusing channels, then the delivery stream ends.
+	conn.refuseChannels(errTestBroker)
+	_ = ch.Close()
+
+	// Several attempts, all failing.
+	waitFor(t, "the supervisor to retry a refusing broker", func() bool { return dials.Load() >= 4 })
+
+	// It recovers when the broker does.
+	conn.refuseChannels(nil)
+	waitFor(t, "a fresh delivery stream once the broker recovers", func() bool {
+		ch.mu.Lock()
+		defer ch.mu.Unlock()
+		return ch.deliveries != nil
+	})
+}
+
+// TestADepthPollFailureDoesNotKillTheConsumer asserts a broken poll is reported
+// and dropped, not fatal. The poll is observability; a consumer that stopped
+// applying deletions because it could not read a queue count would be trading the
+// thing that matters for the thing that watches it.
+func TestADepthPollFailureDoesNotKillTheConsumer(t *testing.T) {
+	ch := &fakeChannel{confirmAck: true}
+	conn := &fakeConn{ch: ch}
+	withFakeBroker(t, conn, nil)
+	mgr := &fakeManager{}
+	obs := newRecordingObserver()
+
+	c, err := Connect(Config{
+		URL: "amqp://stub", Queue: "q",
+		DepthPollInterval: time.Millisecond, Observer: obs,
+	}, mgr, zap.NewNop())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Every re-declare now fails, so every poll fails.
+	ch.mu.Lock()
+	ch.declareErr = errTestBroker
+	ch.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+
+	// The consumer still applies events.
+	ch.deliver(amqp.Delivery{
+		Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-alive"}),
+		Acknowledger: &fakeAcker{}, DeliveryTag: 1,
+	})
+	waitFor(t, "the consumer to keep applying events through a failing depth poll", func() bool {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.purged) == 1
+	})
+}
+
+// TestATransferGivesUpRatherThanWaitingForever asserts every way the broker can
+// go quiet ends the wait as a FAILURE.
+//
+// Each of these leaves the delivery unacknowledged and recycles the channel, which
+// is the safe outcome: the event stays broker-owned and comes back. Treating any
+// of them as success would ack an event that was published nowhere; treating any
+// as an indefinite wait would freeze the single-threaded consume loop and stop
+// every later event behind it.
+func TestATransferGivesUpRatherThanWaitingForever(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*Consumer, *fakeChannel)
+	}{
+		{"the broker never answers", func(c *Consumer, ch *fakeChannel) {
+			ch.mu.Lock()
+			ch.confirms, ch.returns = nil, nil // published, but nothing comes back
+			ch.mu.Unlock()
+			c.confirmTimeout = 30 * time.Millisecond
+		}},
+		{"the confirm channel closes", func(c *Consumer, ch *fakeChannel) {
+			c.mu.Lock()
+			confirms := c.confirms
+			c.mu.Unlock()
+			ch.mu.Lock()
+			ch.confirms = nil
+			ch.mu.Unlock()
+			close(confirms)
+		}},
+		{"the return channel closes", func(c *Consumer, ch *fakeChannel) {
+			c.mu.Lock()
+			returns := c.returns
+			c.mu.Unlock()
+			ch.mu.Lock()
+			ch.returns = nil
+			ch.mu.Unlock()
+			close(returns)
+		}},
+		{"the publish itself fails", func(_ *Consumer, ch *fakeChannel) {
+			ch.mu.Lock()
+			ch.publishErr = errTestBroker
+			ch.mu.Unlock()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acker := &fakeAcker{}
+			ch := &fakeChannel{}
+			c := consumerForTest(t, &fakeManager{purgeErr: errTestBroker}, ch)
+			tc.setup(c, ch)
+
+			c.processOne(amqp.Delivery{
+				Body:         eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"}),
+				Acknowledger: acker, DeliveryTag: 1,
+			})
+
+			acks, nacks := acker.snapshot()
+			if acks != 0 {
+				t.Fatalf("acks=%d: an unconfirmed transfer must not ack — the event would be gone", acks)
+			}
+			if nacks != 0 {
+				t.Fatalf("nacks=%d: the delivery must be left alone, not rejected", nacks)
+			}
+		})
+	}
+}
+
+// TestATransferHonoursACancelledContext asserts the per-delivery deadline reaches
+// the wait. Without it a stuck transfer would outlive the handler timeout that is
+// supposed to bound it.
+func TestATransferHonoursACancelledContext(t *testing.T) {
+	ch := &fakeChannel{}
+	ch.mu.Lock()
+	ch.confirms, ch.returns = nil, nil
+	ch.mu.Unlock()
+	c := consumerForTest(t, &fakeManager{}, ch)
+	c.confirmTimeout = time.Hour // only the context can end this
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := c.transfer(ctx, "lifecycle-q.retry.30s", amqp.Delivery{Body: []byte("{}")}, 1)
+	if err == nil {
+		t.Fatal("transfer reported success on a cancelled context")
+	}
+	if !errors.Is(err, errTransferFailed) {
+		t.Fatalf("transfer error = %v, want it to wrap errTransferFailed so the caller leaves the delivery alone", err)
+	}
+}
+
+// TestRecycleIsSafeOnAConsumerWithNoChannel asserts recycle tolerates a Consumer
+// that has no live attachment — the state between a failed re-attach and the next
+// one. Panicking there would take down the supervisor that is trying to recover.
+func TestRecycleIsSafeOnAConsumerWithNoChannel(_ *testing.T) {
+	c := &Consumer{
+		logger: zap.NewNop(), obs: NopObserver{},
+		recycleBackoff: time.Millisecond,
+		closed:         make(chan struct{}),
+	}
+	c.recycle() // no channel installed
+	_ = c.Close()
+}
+
+// TestTimeoutResolutionDefaults pins the resolvers for the two broker timeouts.
+// Zero must mean "the default", not "no timeout at all": a zero confirm timeout
+// would make every transfer give up instantly, and a zero recycle backoff would
+// spin the supervisor.
+func TestTimeoutResolutionDefaults(t *testing.T) {
+	if got := resolveConfirmTimeout(0); got != DefaultConfirmTimeout {
+		t.Errorf("resolveConfirmTimeout(0) = %v, want %v", got, DefaultConfirmTimeout)
+	}
+	if got := resolveConfirmTimeout(3 * time.Second); got != 3*time.Second {
+		t.Errorf("resolveConfirmTimeout(3s) = %v, want it honoured", got)
+	}
+	if got := resolveRecycleBackoff(0); got != DefaultRecycleBackoff {
+		t.Errorf("resolveRecycleBackoff(0) = %v, want %v", got, DefaultRecycleBackoff)
+	}
+	if got := resolveRecycleBackoff(2 * time.Second); got != 2*time.Second {
+		t.Errorf("resolveRecycleBackoff(2s) = %v, want it honoured", got)
 	}
 }

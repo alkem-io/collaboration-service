@@ -360,10 +360,178 @@ interval, and the control's 2-second TTL had to grow to 30 seconds — with a 2s
 and 5s statistics, "the control message was here before it expired" is not an
 observable state, so the control was proving nothing.
 
-### A measured limit, recorded rather than papered over
+### A measured limit — and a correction to it
 
-at-least-once **retains** an expired message whose target is missing. It does **not**
-resume the hop when the target is later created — measured over two minutes; the
-message stays put. Retention is the guarantee; recovery is an operator action. This
-is documented in the runbook rather than worked around, and it is why the topology
-declares all five queues up front.
+at-least-once **retains** an expired message whose target is missing.
+
+I first reported that it does **not** resume when the target is later created,
+"measured over two minutes". That was wrong: the observation window was too short.
+The broker retries the parked hop on a cycle of about three minutes and releases the
+message on its own. Measured at **2m58s**, twice, on 3.13.2 — once on a tmpfs
+container and once on a persistent volume. The two-minute probe stopped roughly
+fifty seconds early and I reported the absence of an event as its impossibility.
+
+So the recovery action is simply "declare the missing queue", and nothing else is
+needed or effective in the meantime. That is documented AND demonstrated end to end
+by `TestConnectReleasesAnEventParkedForAMissingTarget`, which parks an event for a Q1
+that does not exist, starts the consumer, and watches the event be applied.
+
+In production the service performs the recovery itself: it re-declares all five
+queues at startup, on every supervisor re-attach, and on every depth poll
+(`TestTheDepthPollRecreatesADeletedQueue`), so a deleted queue is back within one
+poll interval and the parked message follows.
+
+## Review round two — four blockers from the peer review
+
+### 1. The confirm/return race (HIGH)
+
+`transfer` selected on the return channel and the confirm channel. Both can be ready
+at once — a mandatory publish to a missing queue produces `basic.return` then
+`basic.ack`, and by the time the select runs the connection reader may have
+dispatched both — and **Go picks at random between two ready cases**. Roughly half
+the time the confirm won and an unroutable publish reported success, after which the
+event was acked: transferred nowhere, deleted from the only queue holding it. The
+worst outcome the ladder exists to prevent, and intermittent.
+
+The fix is a non-blocking drain of the return channel after an ack, and it is
+*sufficient* rather than merely helpful: amqp091-go dispatches every frame from one
+connection-reader goroutine, and both a return and a confirm are delivered by a
+synchronous send from inside it (`Channel.dispatch` → `ch.returns` /
+`confirms.confirm`), in frame order. AMQP puts `basic.return` before `basic.ack` for
+the same publish, and both channels are buffered so the dispatcher never blocks
+part-way. A return for this publish is therefore already buffered when its
+confirmation becomes readable. Verified by reading the vendored source, not assumed.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the return drain after an ack is removed | `TestAnAckNeverOutvotesAReturnThatIsAlreadyWaiting` |
+| the drain reads the return but accepts success anyway | ″ |
+| the same drain in the replay path | `TestAReplayAckNeverOutvotesAReturnThatIsAlreadyWaiting` |
+
+Both tests run 200 iterations against a fake that delivers both answers *before*
+the publish call returns. A real broker cannot be made to lose this race on demand,
+and one iteration could win the coin toss.
+
+### 2. The depth metric claimed a total it cannot see (HIGH)
+
+`collaboration_lifecycle_queue_depth` was documented as "current message count" and
+"unattended work", but its source is `queue.declare-ok`, which reports only the
+READY count — and this repo's own integration test proves a message parked for a
+pending dead-letter hop is neither ready nor unacknowledged. In precisely the state
+worth alerting on, the metric published zero.
+
+Renamed to `collaboration_lifecycle_queue_ready_depth`, with the exclusion stated in
+the metric help, the port doc, and the runbook, and the broker-side reading named
+for the total. The claim that per-tier depth "stands in for age" was kept but its
+justification corrected: AMQP has no age reading at all, not "none without the
+management API".
+
+The blind spot is also bounded, which is now stated rather than hoped: the consumer
+re-declares the whole topology on every re-attach and every poll, so the only cause
+of a parked message — a missing dead-letter target — is repaired within one poll
+interval.
+
+### 3. The documented recovery was not executable (BLOCKING)
+
+"Recreate the queue and replay the source tier" could not work: a parked message is
+unreachable by any consumer or shovel, so there is nothing to replay. Candidates
+were tested against real 3.13.2 rather than reasoned about — see the correction
+above. Declaring the target is the whole action, and the service already performs it.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the depth poll does not re-declare (a deleted queue stays missing) | `TestTheDepthPollRecreatesADeletedQueue` |
+| — (end-to-end demonstration, no mutation) | `TestConnectReleasesAnEventParkedForAMissingTarget` |
+
+One candidate was **discarded as invalid rather than reported**: restarting the
+broker appeared to lose everything, but that container used a tmpfs for
+`/var/lib/rabbitmq`, so the restart wiped the data directory. The experiment measured
+the test rig, not the broker. Re-run on a persistent volume.
+
+### 4. The replay procedure was unsafe (BLOCKING)
+
+The runbook's primary path was a shovel, followed by a warning that the shovel
+preserves `x-collab-attempt` and therefore does not work. Removed. Replaced by
+`cmd/lifecycle-replay`, which clears the attempt count, increments a replay count,
+publishes `mandatory` with a confirm, and acks the dead-letter copy **only after**
+the republish is confirmed — the opposite order from `get`-then-publish, which
+destroys the last copy whenever the publish fails.
+
+`x-collab-replays` is reinstated, but with a real producer and a real consumer this
+time: written by the replay command, read by the consumer when an event reaches the
+DLQ, and exported as the `replays` label on
+`collaboration_lifecycle_dead_lettered_total`. That label is the escalation signal —
+after a replay the attempt count is deliberately zero again, so nothing else
+separates "this just failed" from "the fix applied before the last replay did not
+work".
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| replay does not clear the attempt count | `TestReplayReturnsDeadLetteredEventsToTheLadder` |
+| replay does not increment the replay count | `TestASecondReplayIsDistinguishableFromTheFirst` |
+| replay drops the replay header entirely | both |
+| replay acks the dead-letter copy before the republish is confirmed | both |
+| replay leaves its consumer attached to the DLQ | `TestASecondReplayIsDistinguishableFromTheFirst` |
+| replay publishes without `mandatory` | `TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue`, `TestAReplayClearsTheAttemptCountAndCountsItself` |
+| replay ignores a broker return | `TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue` |
+| the replay counter wraps / passes through negatives | `TestTheReplayCounterSurvivesWhateverArrives` |
+| the dead-letter signal is never raised | `TestTheDeadLetterSignalCarriesThePriorReplayCount` |
+| the dead-letter signal drops the replay count | ″ |
+| a retry-ladder hop also raises the dead-letter signal | `TestOnlyTheDeadLetterQueueRaisesTheDeadLetterSignal` |
+| the Prometheus bridge collapses the `replays` label | `TestDeadLetterBridgeSeparatesReplayCounts` |
+
+`Replay` leaving its consumer attached was **found by a test, not by review**: the
+three-round replay test failed at round 2 because the lingering consumer swallowed
+the next dead-letter message the instant it arrived — held unacknowledged on a
+channel nobody was reading, invisible to the ready depth and unreachable by a second
+replay. A bounded operation has to release the queue when it finishes.
+
+### Comment sweep
+
+`consume`'s doc still described the retired two-attempt mechanism ("acks/nacks per
+the outcome … requeued once, then dropped"), `patternOf` still spoke of a "dropped
+event", the handler-timeout note still said "nack/requeue", and
+`TestHandleNacksRequeueOnPurgeFailure` was named for it. Nothing nacks or rejects any
+more. All four corrected.
+
+### Coverage: a pre-existing gate failure, measured rather than assumed
+
+The combined coverage gate (≥95%) does **not** pass, and did not pass before this
+work either. Measured both sides against the same broker:
+
+| Tree | Combined coverage (scoped) |
+|---|---|
+| PR head before this work (`3176012`) | **94.8%** |
+| after the lifecycle work, before its failure-path tests | 93.6% |
+| after them | **94.8%** |
+
+So the lifecycle work is gate-neutral: it dipped the number and the failure-path
+tests brought it back. The 0.2% shortfall is pre-existing and spread across
+subsystems this branch does not touch — `postgres.Migrate` (59%), `app.buildMetadata`
+(66%), `room.measureLiveDoc` (60%), `manager.acquire` (74%), and a long tail in
+`ws`, `oidc`, `fileservice`, and `metapointer`. It is reported rather than closed:
+padding it from a lifecycle PR would mean writing tests for unrelated code to move a
+number, and lowering the threshold would be worse.
+
+The tests added to reach 94.8% are failure paths, not padding — every one has a
+story about what breaks without it: a transfer that waits forever on a silent
+broker, a replay that starts without publisher confirms, a recycle that outlives
+shutdown, a supervisor that gives up on a broker that is merely restarting, a depth
+poll whose failure takes the consumer with it.
+
+`cmd/lifecycle-replay` is excluded from the gate's scope on the same grounds as
+`cmd/server` — flag parsing and dialling in front of `lifecycle.Replay`, which is
+itself inside the bar and covered against a real broker. `NopObserver` moved to
+`observer_nop.go` and is excluded exactly as `NopMetrics` already was: empty method
+bodies that cannot fail.
+
+### An unrelated CI flake, fixed
+
+The integration job on PR #10 was also failing on
+`TestAwarenessAndDocumentUpdatesStayOnSeparateChannels` (redis hub) — at 3.01s,
+against a 3-second `waitFor` deadline. It passes 28/28 locally including under
+`-race`, so the failure was the budget, not the behaviour: the test waits on a
+goroutine hop through miniredis pub/sub, which takes microseconds on an idle machine
+and much longer on a loaded runner. A tight deadline there detects nothing — the
+adapter has no latency requirement — it only fails the build when the runner is
+busy. Raised to 30s with that reasoning recorded at the call site.

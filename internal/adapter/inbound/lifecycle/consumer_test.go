@@ -172,10 +172,12 @@ func TestHandleVerdictsSeparateSuccessFromUnactionable(t *testing.T) {
 	}
 }
 
-// TestHandleNacksRequeueOnPurgeFailure asserts a transient purge failure returns
-// retryLater so the delete event is redelivered (not at-most-once dropped) — the
-// cascade is a correctness requirement (no orphan documents).
-func TestHandleNacksRequeueOnPurgeFailure(t *testing.T) {
+// TestATransientPurgeFailureIsRetriedNotDropped asserts a transient purge failure
+// returns retryLater, so the event goes down the retry ladder rather than being
+// acked away. The cascade is a correctness requirement — document.deleted is the
+// only path that purges a document, so dropping one orphans content the owner
+// believes is gone.
+func TestATransientPurgeFailureIsRetriedNotDropped(t *testing.T) {
 	mgr := &fakeManager{purgeErr: errors.New("backend down")}
 	c := newConsumer(mgr)
 	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != retryLater {

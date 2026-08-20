@@ -69,3 +69,43 @@ func TestVersionFloorRejectsBelowTheBaselineOnEveryComponent(t *testing.T) {
 		}
 	}
 }
+
+// TestBrokerVersionParsingHandlesWhatBrokersActuallyReport asserts the parser is
+// total over the shapes a real server_properties version string takes, and that
+// anything it cannot read is an ERROR rather than a zero version.
+//
+// A zero version would compare as below the floor and refuse to start, which
+// happens to be safe — but it would report "broker is RabbitMQ 0.0.0", which sends
+// whoever reads the log looking for a broker problem that does not exist.
+func TestBrokerVersionParsingHandlesWhatBrokersActuallyReport(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want brokerVersion
+	}{
+		{"3.13.2", brokerVersion{3, 13, 2}},
+		{"4.0.0", brokerVersion{4, 0, 0}},
+		{"3.13.2-management", brokerVersion{3, 13, 2}},
+		{"3.13.2~rc.1", brokerVersion{3, 13, 2}},
+		{"3.13.2+build7", brokerVersion{3, 13, 2}},
+		{"3.13", brokerVersion{3, 13, 0}},
+		{"4", brokerVersion{4, 0, 0}},
+		{"3.13.", brokerVersion{3, 13, 0}},
+		// More components than we track: the extra is ignored, not an error.
+		{"3.13.2.5", brokerVersion{3, 13, 2}},
+	} {
+		got, err := parseBrokerVersion(tc.raw)
+		if err != nil {
+			t.Errorf("parseBrokerVersion(%q) errored: %v", tc.raw, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseBrokerVersion(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+
+	for _, raw := range []string{"", "rabbit", "-3.13.2", "..", "."} {
+		if got, err := parseBrokerVersion(raw); err == nil {
+			t.Errorf("parseBrokerVersion(%q) = %v with no error; an unreadable version must be reported as such, not as 0.0.0", raw, got)
+		}
+	}
+}

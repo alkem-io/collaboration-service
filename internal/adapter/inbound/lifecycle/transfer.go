@@ -59,7 +59,10 @@ func (c *Consumer) transfer(ctx context.Context, target string, d amqp.Delivery,
 	}
 
 	// A return arrives BEFORE the confirm for the same publish, so waiting for the
-	// confirm first and checking returns afterwards would race. Select on both.
+	// confirm first and then checking returns would race. Select on both — but a
+	// select between two READY channels picks at random, and by the time this runs
+	// the broker may have delivered both. Winning the confirm case therefore proves
+	// nothing on its own; see the drain below.
 	deadline := time.NewTimer(c.confirmTimeout)
 	defer deadline.Stop()
 	for {
@@ -76,6 +79,28 @@ func (c *Consumer) transfer(ctx context.Context, target string, d amqp.Delivery,
 			}
 			if !conf.Ack {
 				return fmt.Errorf("%w: broker nacked the publish to %s", errTransferFailed, target)
+			}
+			// An ack is success only once the return channel is known to be empty.
+			//
+			// This drain is sufficient, not merely likely to help. amqp091-go
+			// dispatches every frame from one connection-reader goroutine, and both
+			// a basic.return and a basic.ack are delivered by a synchronous send from
+			// inside that goroutine (Channel.dispatch → ch.returns / confirms.confirm),
+			// in frame order. AMQP puts basic.return before basic.ack for the same
+			// mandatory publish. So if a return exists for THIS publish it is already
+			// buffered by the time its confirmation is readable — the non-blocking
+			// read cannot miss one that is still in flight.
+			//
+			// It relies on there being exactly one publish outstanding, which the
+			// serial consume loop guarantees, and on both channels being buffered so
+			// the dispatcher never blocks part-way through.
+			select {
+			case ret, ok := <-returns:
+				if !ok {
+					return fmt.Errorf("%w: return channel closed", errTransferFailed)
+				}
+				return fmt.Errorf("%w: %s was unroutable (queue missing?), broker returned it and the confirm arrived first", errTransferFailed, ret.RoutingKey)
+			default:
 			}
 			// Ack with no return: the exchange accepted it AND it routed.
 			return nil

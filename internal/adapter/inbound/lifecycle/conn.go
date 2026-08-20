@@ -27,7 +27,7 @@ const DefaultPrefetch = 1
 // — a wedged Purge/ReEvaluate backend call — would head-of-line-block
 // every subsequent lifecycle event. A per-delivery deadline keeps a stuck handler
 // from freezing the consumer: a handler that observes the context (PreRegister,
-// ReEvaluate) is abandoned (nack/requeue) at the deadline. A Purge that hands the
+// ReEvaluate) is abandoned at the deadline and treated as a failure. A Purge that hands the
 // delete to a live room's run loop is instead bounded by that room's own
 // BackendTimeout per queued command — still bounded, never indefinite.
 const DefaultHandlerTimeout = 30 * time.Second
@@ -89,6 +89,7 @@ type brokerChannel interface {
 	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
 	Qos(prefetchCount, prefetchSize int, global bool) error
 	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
+	Cancel(consumer string, noWait bool) error
 	// Confirm puts the channel in publisher-confirm mode. Every transfer out of the
 	// main queue is an explicit publish whose broker acknowledgement decides whether
 	// the original may be acked, so this MUST succeed before any transfer.
@@ -265,7 +266,13 @@ func resolveDepthPollInterval(d time.Duration) time.Duration {
 	return d
 }
 
-// pollDepths publishes each queue's message count until the consumer is closed.
+// pollDepths publishes each queue's READY message count until the consumer is
+// closed. See lifecycle.Observer for what "ready" excludes.
+//
+// The re-declare is load-bearing beyond the count: it recreates any queue in the
+// topology that has gone missing. A deleted queue therefore comes back within one
+// poll interval without anyone intervening, which is also what releases a message
+// the broker has parked for a dead-letter hop into it.
 //
 // The depth comes from re-declaring the queue rather than from a passive declare
 // or the management API. An equivalent re-declaration is a no-op that returns the
@@ -296,7 +303,8 @@ func (c *Consumer) pollDepths(every time.Duration) {
 					zap.String("queue", q.name), zap.Error(err))
 				break
 			}
-			c.obs.QueueDepth(q.name, info.Messages)
+			// amqp.Queue.Messages is the READY count, not the total.
+			c.obs.QueueReadyDepth(q.name, info.Messages)
 		}
 	}
 }
@@ -407,11 +415,13 @@ func resolvePrefetch(n int) int {
 	return n
 }
 
-// consume routes each delivery to handle and acks/nacks per the outcome, until
-// the channel closes. A successful (or idempotent / unactionable) event is acked;
-// a genuine processing failure is nacked with a bounded requeue — requeued once,
-// then dropped (nack without requeue) on the redelivery so a permanently failing
-// "poison" message cannot loop forever.
+// consume routes each delivery through processOne until the delivery stream ends,
+// which is how every attachment dies and where the supervisor takes over.
+//
+// Nothing here is ever nacked or rejected. A successful event is acked; anything
+// else is republished — down the retry ladder, or to the DLQ — and acked only once
+// the broker has confirmed the republish. A transfer that is not confirmed leaves
+// the delivery untouched, so it stays broker-owned and is redelivered.
 func (c *Consumer) consume(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
 		c.processOne(d)
@@ -461,10 +471,16 @@ func (c *Consumer) processOne(d amqp.Delivery) {
 				zap.String("target", target), zap.Error(aerr))
 		}
 		if target == c.names.dlq {
+			// replays distinguishes "this failed for the first time" from "a person
+			// has already sent this round the ladder N times and it failed again",
+			// which the attempt count cannot say: a replay clears it by design.
+			replays := replaysOf(d.Headers)
 			c.logger.Error("lifecycle event moved to the dead-letter queue; it will not be retried again without an operator replay",
 				zap.String("queue", target),
 				zap.String("pattern", patternOf(d.Body)),
-				zap.Int32("attempt", attempt))
+				zap.Int32("attempt", attempt),
+				zap.Int32("replays", replays))
+			c.obs.EventDeadLettered(patternOf(d.Body), replays)
 		}
 		return
 	}
@@ -512,9 +528,9 @@ func (c *Consumer) handleDelivery(body []byte) ackAction {
 	return c.handle(ctx, body)
 }
 
-// patternOf extracts an event's pattern for logging, so a dropped event can be
-// identified without reading the raw body. Best effort: an unparseable envelope
-// is why we are here in the first place.
+// patternOf extracts an event's pattern for logging, so a transferred event can be
+// identified without reading the raw body. Best effort: an unparseable envelope is
+// one of the reasons we are here in the first place.
 func patternOf(body []byte) string {
 	var env envelope
 	if err := json.Unmarshal(body, &env); err != nil {

@@ -16,11 +16,16 @@
 # business-logic scope.
 #
 # Scope (constitution §XII "Meaningful Tests Only" — never pad, never test code
-# that cannot fail): the gate excludes the process entrypoint (cmd/server: main /
-# run / HTTP-server lifecycle — exercised by the running service, not unit-
-# testable without launching a process) and the zap logger constructor. Pure
-# observability no-op sinks (NopMetrics) are likewise out of scope. Everything
-# else — every domain rule and adapter — must clear the bar.
+# that cannot fail): the gate excludes the process entrypoints under cmd/ (flag
+# parsing, dialling, and the HTTP-server lifecycle — exercised by running the
+# binary, not unit-testable without launching a process) and the zap logger
+# constructor. Pure observability no-op sinks (NopMetrics) are likewise out of
+# scope — including lifecycle.NopObserver, kept in observer_nop.go for exactly
+# this reason. Everything else — every domain rule and adapter — must clear the bar.
+#
+# The exclusion covers the entrypoint only, never the logic behind it. cmd/
+# lifecycle-replay is a flag parser in front of lifecycle.Replay, and Replay
+# itself is inside the bar and covered against a real broker.
 #
 # Usage:
 #   .scripts/coverage-gate.sh [threshold]
@@ -65,7 +70,7 @@ cp "$COVDIR/merged.cov" "$ROOT/coverage-merged.out"
 # process entrypoint (cmd/server), the zap logger constructor, and the pure no-op
 # Metrics sink (NopMetrics, kept in metrics_nop.go) whose empty bodies cannot
 # fail. Everything else — every domain rule and adapter — must clear the bar.
-EXCLUDE_RE='/cmd/server/|/internal/config/logger\.go:|/internal/domain/service/metrics_nop\.go:'
+EXCLUDE_RE='/cmd/[^/]+/|/internal/config/logger\.go:|/internal/domain/service/metrics_nop\.go:|/internal/adapter/inbound/lifecycle/observer_nop\.go:'
 grep -vE "$EXCLUDE_RE" "$COVDIR/merged.cov" > "$COVDIR/scoped.cov"
 
 echo "==> per-package coverage (scoped)"

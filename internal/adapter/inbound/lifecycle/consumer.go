@@ -147,9 +147,10 @@ func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackA
 	}
 	if err := c.mgr.Purge(ctx, model.DocumentID(ev.ID)); err != nil {
 		// The purge is idempotent (a not-found delete is success), so a returned
-		// error is a transient backend failure worth retrying — nack/requeue rather
-		// than ack-and-drop, or the document is orphaned.
-		c.logger.Warn("document delete cascade failed; requeueing", zap.String("doc", ev.ID), zap.Error(err))
+		// error is a transient backend failure worth retrying — down the ladder
+		// rather than ack-and-drop, or the document is orphaned.
+		c.logger.Warn("document delete cascade failed; moving the event down the retry ladder",
+			zap.String("doc", ev.ID), zap.Error(err))
 		return retryLater
 	}
 	return ackSuccess

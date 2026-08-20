@@ -115,8 +115,8 @@ func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
 	o.EventTransferred("lifecycle-q.retry.30s", true)
 	o.EventTransferred("lifecycle-q.dlq", true)
 	o.EventTransferred("lifecycle-q.retry.5m", false)
-	o.QueueDepth("lifecycle-q.dlq", 7)
-	o.QueueDepth("lifecycle-q.retry.30m", 2)
+	o.QueueReadyDepth("lifecycle-q.dlq", 7)
+	o.QueueReadyDepth("lifecycle-q.retry.30m", 2)
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -126,8 +126,8 @@ func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
 		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.retry.30s"} 1`,
 		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.dlq"} 1`,
 		`collaboration_lifecycle_transfers_total{outcome="unconfirmed",queue="lifecycle-q.retry.5m"} 1`,
-		`collaboration_lifecycle_queue_depth{queue="lifecycle-q.dlq"} 7`,
-		`collaboration_lifecycle_queue_depth{queue="lifecycle-q.retry.30m"} 2`,
+		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.dlq"} 7`,
+		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.retry.30m"} 2`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)
@@ -137,10 +137,36 @@ func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
 	// Depth is a LEVEL, not a running total: a later poll replaces the reading.
 	// If it accumulated, a queue that drained would still read as backed up and
 	// the DLQ alert would never clear.
-	o.QueueDepth("lifecycle-q.dlq", 3)
+	o.QueueReadyDepth("lifecycle-q.dlq", 3)
 	rr = httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if body := rr.Body.String(); !strings.Contains(body, `collaboration_lifecycle_queue_depth{queue="lifecycle-q.dlq"} 3`) {
+	if body := rr.Body.String(); !strings.Contains(body, `collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.dlq"} 3`) {
 		t.Error("a second depth reading did not replace the first; depth must be a level, or a drained queue still reads as backed up")
+	}
+}
+
+// TestDeadLetterBridgeSeparatesReplayCounts asserts the replay count reaches
+// Prometheus as a distinct label value, which is the whole point: an event a
+// person has already replayed is a different alert from one that just failed.
+func TestDeadLetterBridgeSeparatesReplayCounts(t *testing.T) {
+	InitMetrics()
+	o := PrometheusLifecycleObserver{}
+
+	o.EventDeadLettered("document.deleted", 0)
+	o.EventDeadLettered("document.deleted", 2)
+	o.EventDeadLettered("document.access_changed", 0)
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="0"} 1`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="2"} 1`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="document.access_changed",replays="0"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
 	}
 }

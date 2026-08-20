@@ -46,9 +46,16 @@ func twoPods(t *testing.T) (*Hub, *Hub) {
 	return a, b
 }
 
+// waitFor polls cond until it holds. The budget is generous on purpose: what is
+// being waited on is a goroutine hop through miniredis pub/sub, which takes
+// microseconds when the machine is idle and can take far longer on a loaded CI
+// runner scheduling dozens of test goroutines. A tight budget here does not detect
+// a slow hub — nothing in this adapter has a latency requirement — it just fails
+// the build when the runner is busy, which is exactly how the earlier 3-second
+// deadline behaved.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
