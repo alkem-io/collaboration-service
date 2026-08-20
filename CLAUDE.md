@@ -112,6 +112,18 @@ bytes, and the file-service store accepts V2 only because its blob is a bare Yjs
 update other systems read. Nothing infers a codec from bytes — the wrong decoder
 returns an empty state vector with no error.
 
+**Deployment is blocked**, and not on this repo. The lifecycle retry topology needs
+**RabbitMQ >= 3.13.2** and the service refuses to start below it; dev-orchestration
+runs 3.9.13, where a quorum queue accepts the TTL and dead-letter arguments, echoes
+them back, and expires nothing. Every environment also needs its existing queue
+state checked first — queue arguments are immutable after declaration, so a queue
+that already exists with different ones cannot be reconfigured, only deleted and
+recreated. Preconditions and the check are in
+[`specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md`](./specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md).
+Do not lower the floor to make a local environment work: it does not buy
+compatibility, it buys a service that looks healthy while silently dropping
+deletions and revocations.
+
 ## Full Constitution
 
 See `.specify/memory/constitution.md` for the complete set of principles and

@@ -11,6 +11,54 @@ Neither is recoverable by any other route, so the consumer never drops an event 
 could not apply. It moves the event down a delay ladder instead, and finally to a
 queue where a person can see it.
 
+## Before deploying — preconditions, not suggestions
+
+The service **fails closed** on both of these. That is deliberate: each failure is
+silent and unrecoverable if it is allowed through, so it is a startup refusal
+instead.
+
+**1. Every target broker runs RabbitMQ >= 3.13.2.** Not just production —
+dev-orchestration too, which at the time of writing runs `rabbitmq:3.9.13-management`
+and therefore cannot run this service at all. On 3.9.13 a quorum queue *accepts*
+`x-message-ttl` and `x-dead-letter-strategy`, reports both back on inspection, and
+never expires anything. Every retry piles up in its tier, is redelivered never, and
+produces no error anywhere.
+
+**Do not weaken the floor to make a local environment work.** Lowering it does not
+buy compatibility, it buys a service that looks healthy while silently dropping
+deletions and revocations. Upgrade the broker.
+
+**2. No pre-existing queue conflicts with the frozen arguments.** RabbitMQ queue
+arguments are **immutable after declaration**: a queue that already exists with
+different arguments cannot be reconfigured, and re-declaring it fails
+`PRECONDITION_FAILED`. There is no in-place migration — the only fix is to delete
+and recreate the queue, which discards whatever it holds.
+
+So before deploying to an environment, check what is already there:
+
+```bash
+rabbitmqctl list_queues name type arguments | grep -iE 'collab|lifecycle'
+```
+
+Every queue this service will declare must either **not exist** or already match
+exactly:
+
+| Queue | Required |
+|---|---|
+| `<queue>` (Q1) | `quorum`, args exactly `{"x-queue-type":"quorum"}` |
+| `<queue>.retry.{30s,5m,30m}` | `quorum` + the TTL/dead-letter/overflow args below |
+| `<queue>.dlq` | `quorum`, args exactly `{"x-queue-type":"quorum"}` |
+
+A `classic` queue under any of those names is a hard conflict. The pre-Yjs services
+own **differently named** classic queues — on dev-orchestration today,
+`collaboration-document-service` and `alkemio-whiteboard-collaboration`, both
+`classic` with no arguments — so the default `alkemio-collaboration-lifecycle` does
+not collide with them. It would collide if `LIFECYCLE_QUEUE` were pointed at an old
+name to "reuse" it. Don't.
+
+Q1 is additionally declared by `server`, so its arguments have to match on **both**
+sides; see the frozen contract below.
+
 ## Topology
 
 Everything routes through the **default exchange**, where the routing key *is* the
