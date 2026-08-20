@@ -107,4 +107,4 @@ double-counted exactly when it was already reporting an incident.
 
 `go build` · `go vet` · `go vet -tags integration` · `go vet -tags e2e` ·
 `golangci-lint run` **0 issues** · `go test -race ./...` **18 packages green** ·
-e2e lane green · coverage gate **95.1%** (threshold 95.0%).
+e2e lane green · coverage gate **95.2%** (threshold 95.0%).

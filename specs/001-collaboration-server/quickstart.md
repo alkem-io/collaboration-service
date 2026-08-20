@@ -136,7 +136,7 @@ export RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
 go test -tags integration -race ./...
 
 # The ≥95% combined coverage gate (unit + integration + e2e, merged), as CI runs it:
-./.scripts/coverage-gate.sh 95.0      # currently 95.8%
+./.scripts/coverage-gate.sh 95.0      # 95.8% as of the 001 release; see 003 for the current figure
 ```
 
 CI wires this in `.github/workflows/ci-integration.yml` (postgres/rabbitmq
