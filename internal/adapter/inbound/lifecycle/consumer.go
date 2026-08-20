@@ -14,8 +14,10 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -25,8 +27,6 @@ import (
 const (
 	// PatternDocumentDeleted is the owner-delete cascade trigger.
 	PatternDocumentDeleted = "document.deleted"
-	// PatternDocumentCreated optionally pre-registers a document's metadata.
-	PatternDocumentCreated = "document.created"
 	// PatternDocumentAccessChanged re-evaluates per-document authorization.
 	PatternDocumentAccessChanged = "document.access_changed"
 )
@@ -34,14 +34,6 @@ const (
 // DeletedEvent is the document.deleted payload: the document to purge.
 type DeletedEvent struct {
 	ID string `json:"id"`
-}
-
-// CreatedEvent is the optional document.created payload: the document to
-// pre-register, with its content type and lifecycle owner.
-type CreatedEvent struct {
-	ID          string `json:"id"`
-	ContentType string `json:"contentType"`
-	OwnerRef    string `json:"ownerRef"`
 }
 
 // AccessChangedEvent is the optional document.access_changed payload: the
@@ -70,6 +62,30 @@ type Consumer struct {
 	// from Config.HandlerTimeout, defaulting to DefaultHandlerTimeout) so one stuck
 	// event cannot head-of-line-block the single-threaded consume loop.
 	handlerTimeout time.Duration
+
+	// names holds every queue in the topology, derived from the configured main
+	// queue so the parts cannot drift apart.
+	names queueNames
+
+	// confirms and returns carry the broker's two answers to a transfer publish.
+	// Both are read in transfer(); with Qos(1) and a serial consume loop there is
+	// exactly one publish outstanding, so correlation is positional.
+	confirms chan amqp.Confirmation
+	returns  chan amqp.Return
+
+	// confirmTimeout bounds the wait for those answers. A broker that neither
+	// confirms nor returns must not hold the consume loop open indefinitely; the
+	// delivery stays unacked and is redelivered after the recycle.
+	confirmTimeout time.Duration
+
+	// recycleBackoff delays the channel close after an unconfirmable transfer, so
+	// redelivery is retried at a bounded rate rather than spinning.
+	recycleBackoff time.Duration
+
+	// closed is shut when Close runs, so a pending recycle does not outlive the
+	// consumer or close a channel the shutdown path is already closing.
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 // ackAction tells consume how to acknowledge a delivery after handle processed it.
@@ -79,90 +95,65 @@ const (
 	// ackSuccess acks the delivery: it was processed, idempotently a no-op, or is
 	// unactionable (unparseable / unrelated pattern) so requeuing it is pointless.
 	ackSuccess ackAction = iota
-	// nackRequeue nacks the delivery for a bounded requeue: a genuine processing
-	// failure that may succeed on retry (a transient backend error). consume
-	// requeues once, then drops the message to avoid a poison loop.
-	nackRequeue
+	// retryLater is a genuine processing failure that may succeed later — a
+	// transient backend error. The event is transferred to the next delay tier and
+	// redelivered when its TTL expires.
+	retryLater
+	// ackTerminal is an envelope this service can never act on: unparseable, or a
+	// pattern outside the contract. It is transferred to the DLQ rather than
+	// dropped, so a shape mismatch between producer and consumer shows up as queue
+	// depth instead of vanishing.
+	ackTerminal
 )
 
 // handle decodes one event body and routes it to the Manager, returning how the
-// delivery should be acknowledged. An unparseable body or an unrelated pattern is
-// acked (it shares the bus with metadata-store RPC replies and other traffic — there is
-// nothing to retry). A genuine cascade/pre-register failure returns nackRequeue so
-// the event is redelivered (bounded by consume) rather than silently lost — the
-// cascade is a correctness requirement, idempotent on redelivery.
+// delivery should be acknowledged.
+//
+// The queue is DEDICATED to lifecycle events, so an unparseable body or a pattern
+// outside the contract is not incidental traffic — it is a producer/consumer
+// mismatch. Those are terminal: recorded in the dead-letter queue rather than
+// acked away, so the mismatch is visible as queue depth instead of vanishing.
+//
+// A genuine cascade failure returns retryLater and is redelivered on the retry
+// schedule. The cascade is a correctness requirement and is idempotent, so a
+// duplicate delivery is survivable where a lost one is not.
 func (c *Consumer) handle(ctx context.Context, body []byte) ackAction {
 	var env envelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return ackSuccess // not a lifecycle envelope we can act on.
+		return ackTerminal // not a lifecycle envelope: record it, do not swallow it.
 	}
 	switch env.Pattern {
 	case PatternDocumentDeleted:
 		return c.handleDeleted(ctx, env.Data)
-	case PatternDocumentCreated:
-		return c.handleCreated(ctx, env.Data)
 	case PatternDocumentAccessChanged:
-		c.handleAccessChanged(ctx, env.Data)
-		return ackSuccess
+		return c.handleAccessChanged(ctx, env.Data)
 	default:
-		// Not a lifecycle event — ack (nothing to retry).
-		return ackSuccess
+		return ackTerminal // outside the contract: record it.
 	}
 }
 
 func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackAction {
 	var ev DeletedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return ackSuccess // malformed payload: nothing to retry.
+		return ackTerminal // malformed payload: record it rather than swallow it.
 	}
 	if err := c.mgr.Purge(ctx, model.DocumentID(ev.ID)); err != nil {
 		// The purge is idempotent (a not-found delete is success), so a returned
 		// error is a transient backend failure worth retrying — nack/requeue rather
 		// than ack-and-drop, or the document is orphaned.
 		c.logger.Warn("document delete cascade failed; requeueing", zap.String("doc", ev.ID), zap.Error(err))
-		return nackRequeue
+		return retryLater
 	}
 	return ackSuccess
 }
 
-func (c *Consumer) handleCreated(ctx context.Context, data json.RawMessage) ackAction {
-	var ev CreatedEvent
-	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return ackSuccess // malformed payload: nothing to retry.
-	}
-	meta := model.Metadata{
-		ID:          model.DocumentID(ev.ID),
-		ContentType: normalizeContentType(ev.ContentType, c.logger, ev.ID),
-		OwnerRef:    ev.OwnerRef,
-	}
-	if err := c.mgr.PreRegister(ctx, meta); err != nil {
-		c.logger.Warn("document create pre-register failed; requeueing", zap.String("doc", ev.ID), zap.Error(err))
-		return nackRequeue
-	}
-	return ackSuccess
-}
-
-// normalizeContentType maps a bus-supplied content-type string to a known domain
-// ContentType, defaulting an empty or unrecognized value to memo (rather than
-// persisting an invalid type that would later break convention application). An
-// unexpected value is logged so producer drift is observable.
-func normalizeContentType(raw string, logger *zap.Logger, docID string) model.ContentType {
-	switch model.ContentType(raw) {
-	case model.ContentTypeMemo, model.ContentTypeWhiteboard:
-		return model.ContentType(raw)
-	case "":
-		return model.ContentTypeMemo
-	default:
-		logger.Warn("document.created carried an unknown contentType; defaulting to memo",
-			zap.String("doc", docID), zap.String("contentType", raw))
-		return model.ContentTypeMemo
-	}
-}
-
-func (c *Consumer) handleAccessChanged(ctx context.Context, data json.RawMessage) {
+func (c *Consumer) handleAccessChanged(ctx context.Context, data json.RawMessage) ackAction {
 	var ev AccessChangedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return
+		return ackTerminal // malformed payload: record it rather than swallow it.
 	}
+	// ReEvaluate cannot fail: it downgrades what it can reach and leaves the rest
+	// to the next join. There is no transient outcome to retry.
 	c.mgr.ReEvaluate(ctx, model.DocumentID(ev.ID))
+	return ackSuccess
 }

@@ -102,3 +102,125 @@ cover the surrounding property (that a failing durable purge surfaces rather tha
 reporting success), and the removal is annotated at the call site naming them.
 
 No other `002` invariant was deleted.
+
+---
+
+# Lifecycle retry/DLQ topology (Q1–Q5)
+
+35 mutation probes over the new lifecycle consumer: each guarantee was reverted in
+the production source, the package suite was run, RED was observed, and the source
+was restored. Every probe named below went RED. The harness re-runs the suite after
+restoring and asserts GREEN, so a probe that leaves the tree dirty is detectable.
+
+## Topology declaration
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| retry tier declared without `x-queue-type: quorum` | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` |
+| Q1 declared non-durable | ″ |
+| retry tiers declared non-durable | ″ |
+| Q1 given an extra argument (inequivalent to the producer's declaration) | ″ |
+| `x-dead-letter-strategy: at-least-once` dropped | `TestRetryTiersCarryTheirScheduleAndTheDLQIsTerminal` |
+| `x-overflow: reject-publish` dropped | ″ |
+| `x-message-ttl` narrowed from `int32` to `int` (type drift) | ″ |
+| tier dead-letters to the wrong routing key | ″ |
+| DLQ given a TTL (no longer terminal) | ″ |
+| `tierCount` drifts from `len(retryTiers)` | `TestTierCountMatchesTheSchedule` |
+
+## Connect ordering
+
+The ordering claims are asserted against a recorded call log, not merely against
+"both happened". Each of these reverts moved a verb after `Consume` or removed it:
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| `Qos` never applied (prefetch unlimited) | `TestConnectBoundsPrefetchAndDeclaresBeforeConsuming` |
+| `Qos` applied after `Consume` | ″ |
+| topology declared after `Consume` | ″ |
+| publisher confirms never enabled | ″ |
+| a zero configured prefetch reaches `Qos` as 0 | ″ + `TestResolvePrefetchDefaults` |
+
+`DefaultPrefetch`'s exact value is **not** asserted. The earlier assertion compared
+`ch.prefetch` against `DefaultPrefetch` itself, which is self-referential and stayed
+green when the constant changed — it was a change-detector, not an invariant. The
+invariant is that a positive prefetch is applied at all (0 means *unlimited* in
+AMQP); the configured branch is covered separately by
+`TestConnectHonoursConfiguredPrefetch`.
+
+## Confirmed transfer
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| publish loses `mandatory=true` | `TestFailureTransfersToTheNextTierBeforeAcking` |
+| a broker RETURN is ignored (unroutable counts as success) | `TestTransferFailureLeavesTheEventBrokerOwned` |
+| a broker NACK counts as success | ″ |
+| an unconfirmed transfer acks the original anyway | ″ |
+| the attempt header is not incremented | `TestFailureTransfersToTheNextTierBeforeAcking` |
+| an exhausted schedule wraps to tier 0 instead of the DLQ | `TestExhaustedScheduleGoesToTheDeadLetterQueue` |
+| a terminal verdict is routed into the retry ladder | `TestUnactionableEnvelopeGoesToTheDeadLetterQueue` |
+| a successful handler transfers instead of just acking | `TestSuccessfulHandlerAcksWithoutTransferring` |
+
+## Attempt-header totality
+
+`x-collab-attempt` crosses a wire, so the routing decision must be defined for
+every value that can arrive — not just the ones this consumer writes.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| header narrowed to `int32` without clamping (`1<<32` wraps to 0 → back to tier 0) | `TestAttemptHeaderRoutingIsTotalOverWhateverArrives` |
+| negative attempt not floored | ″ |
+| wider (`int64`) header types ignored | ″ |
+| byte-width (`uint8`) header types ignored | ″ |
+
+The negative-value case is the one worth spelling out. Routing alone did **not**
+defend the floor: `nextTarget` already maps any `attempt <= 0` to tier 0, so
+deleting the floor left the suite green. The observable defect is in the *outgoing*
+header — the transfer writes `attempt+1`, so `-7` becomes `-6`, still "before the
+ladder", and the event cycles the first tier forever without ever reaching the DLQ.
+The test therefore asserts the header it publishes as well as the queue it targets:
+**every transfer must strictly advance toward the DLQ.**
+
+## Broker version floor
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the version floor is not enforced | `TestVersionFloorRejectsABrokerThatSilentlyIgnoresTheTopology`, `TestVersionFloorRejectsBelowTheBaselineOnEveryComponent` |
+| a missing broker version is tolerated (fails open) | `TestVersionFloorFailsClosedOnAnUnreadableVersion` |
+| an unreadable broker version is tolerated | ″ |
+
+The first attempt at the missing-version probe was **invalid, not passing**: it
+disabled the missing-version branch but left `raw` empty, so `parseBrokerVersion("")`
+failed and the *unreadable* branch produced an error anyway. The guarantee was never
+unprotected; the probe simply did not revert it. Re-run with the branch returning
+`nil`, it went RED.
+
+## Handler verdicts
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| unparseable body acked as success | `TestUnactionableEnvelopeGoesToTheDeadLetterQueue`, `TestHandleVerdictsSeparateSuccessFromUnactionable` |
+| unknown pattern acked as success | `TestHandleVerdictsSeparateSuccessFromUnactionable` |
+| malformed `document.access_changed` acked as success | `TestMalformedAndEmptyEventsAreTerminal` |
+| a purge failure acked instead of retried | `TestFailureTransfersToTheNextTierBeforeAcking`, `TestTransferFailureLeavesTheEventBrokerOwned`, `TestExhaustedScheduleGoesToTheDeadLetterQueue` |
+
+`handleAccessChanged` was changed as a result of this pass. It previously swallowed
+a malformed payload and returned nothing, so `handle` acked it as a success while
+`handleDeleted` sent the identical failure to the DLQ. The asymmetry was not a
+design choice — an unparseable `access_changed` is exactly as unactionable, and
+acking it meant a lost revocation left no trace anywhere.
+
+## Deleted rather than tested
+
+- `headerReplays` (`x-collab-replays`). No producer and no consumer: nothing writes
+  it and nothing reads it. It existed to support a replay procedure that is
+  documentation, not code. Deleted rather than kept as a named-but-inert constant.
+- `PatternDocumentCreated`, `CreatedEvent`, `handleCreated`, `normalizeContentType`,
+  and `Manager.PreRegister` *on the lifecycle adapter's port*. `PreRegister` itself
+  survives on `service.Manager` — it has a live second caller in the HTTP adapter —
+  but the bus no longer carries a create event, so the lifecycle adapter's copy of
+  the method was a port with no caller.
+- `fakeAcker.requeued`. Production has no `Nack` and no `Reject` at all: a failed
+  transfer leaves the delivery unacknowledged and recycles the channel. Tracking a
+  requeue flag recorded a value no code path can produce. The `nacks` counter stays,
+  asserted at zero — "must never reject" is a live invariant, since rejecting turns a
+  transient publish failure into terminal handling behind an unconfirmed DLX hop.

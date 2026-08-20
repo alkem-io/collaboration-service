@@ -91,58 +91,6 @@ func TestDocumentDeletedIdempotentOnError(t *testing.T) {
 	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-2"}))
 }
 
-// TestDocumentCreatedPreRegisters asserts document.created pre-registers metadata
-// with the carried content type + owner ref (optional create path, T015).
-func TestDocumentCreatedPreRegisters(t *testing.T) {
-	mgr := &fakeManager{}
-	c := newConsumer(mgr)
-
-	c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{
-		ID: "doc-3", ContentType: "whiteboard", OwnerRef: "callout-9",
-	}))
-
-	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-	if len(mgr.registered) != 1 {
-		t.Fatalf("registered count = %d, want 1", len(mgr.registered))
-	}
-	got := mgr.registered[0]
-	if got.ID != "doc-3" || got.ContentType != model.ContentTypeWhiteboard || got.OwnerRef != "callout-9" {
-		t.Fatalf("pre-registered metadata mismatch: %+v", got)
-	}
-}
-
-// TestDocumentCreatedToleratesPreRegisterError asserts a pre-register failure is
-// logged and swallowed (a create event must not crash the consumer).
-func TestDocumentCreatedToleratesPreRegisterError(t *testing.T) {
-	mgr := &fakeManager{registerErr: errors.New("index down")}
-	c := newConsumer(mgr)
-	c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-x", ContentType: "memo"}))
-}
-
-// TestDocumentCreatedNormalizesContentType asserts an unknown/empty content type
-// on a create event is defaulted to memo rather than persisted verbatim (which
-// would write invalid metadata that breaks convention application).
-func TestDocumentCreatedNormalizesContentType(t *testing.T) {
-	for _, tc := range []struct {
-		raw  string
-		want model.ContentType
-	}{
-		{"", model.ContentTypeMemo},
-		{"bogus", model.ContentTypeMemo},
-		{"whiteboard", model.ContentTypeWhiteboard},
-	} {
-		mgr := &fakeManager{}
-		c := newConsumer(mgr)
-		c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-n", ContentType: tc.raw}))
-		mgr.mu.Lock()
-		if len(mgr.registered) != 1 || mgr.registered[0].ContentType != tc.want {
-			t.Errorf("contentType %q normalized to %v, want %v", tc.raw, mgr.registered, tc.want)
-		}
-		mgr.mu.Unlock()
-	}
-}
-
 // TestDocumentAccessChangedReEvaluates asserts document.access_changed triggers a
 // re-evaluation for the document (T014/T015).
 func TestDocumentAccessChangedReEvaluates(t *testing.T) {
@@ -170,19 +118,26 @@ func TestUnknownPatternIgnored(t *testing.T) {
 	}
 }
 
-// TestMalformedAndEmptyEventsIgnored asserts an event with a malformed or
-// empty-id payload is ignored rather than driving a cascade with a blank id.
-func TestMalformedAndEmptyEventsIgnored(t *testing.T) {
+// TestMalformedAndEmptyEventsAreTerminal asserts an event with a malformed or
+// empty-id payload drives no cascade and is judged terminal: no amount of
+// redelivery makes an unparseable body or a blank id actionable, so it leaves
+// the retry schedule for the dead-letter queue instead of cycling forever.
+func TestMalformedAndEmptyEventsAreTerminal(t *testing.T) {
 	mgr := &fakeManager{}
 	c := newConsumer(mgr)
 
-	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}))
-	c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: ""}))
-	c.handle(context.Background(), eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: ""}))
-	// Non-object data for each pattern → unmarshal error, ignored.
-	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, "not-an-object"))
-	c.handle(context.Background(), eventBody(t, PatternDocumentCreated, 42))
-	c.handle(context.Background(), eventBody(t, PatternDocumentAccessChanged, []int{1, 2}))
+	bodies := [][]byte{
+		eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}),
+		eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: ""}),
+		// Non-object data for each pattern → unmarshal error.
+		eventBody(t, PatternDocumentDeleted, "not-an-object"),
+		eventBody(t, PatternDocumentAccessChanged, []int{1, 2}),
+	}
+	for i, body := range bodies {
+		if got := c.handle(context.Background(), body); got != ackTerminal {
+			t.Errorf("body %d: handle = %v, want ackTerminal", i, got)
+		}
+	}
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
@@ -192,59 +147,38 @@ func TestMalformedAndEmptyEventsIgnored(t *testing.T) {
 	}
 }
 
-// TestHandleAcksOnSuccess asserts a successfully processed event returns
-// ackSuccess so consume acks it (manual-ack: ack only after the work succeeds).
-func TestHandleAcksOnSuccess(t *testing.T) {
+// TestHandleVerdictsSeparateSuccessFromUnactionable asserts the two non-retry
+// verdicts stay distinct: work that completed acks and stops, while an envelope
+// no redelivery can help is terminal so consume routes it to the DLQ. Collapsing
+// them would silently discard events nobody ever sees.
+func TestHandleVerdictsSeparateSuccessFromUnactionable(t *testing.T) {
 	mgr := &fakeManager{}
 	c := newConsumer(mgr)
 
-	cases := []struct {
+	for _, tc := range []struct {
 		name string
 		body []byte
+		want ackAction
 	}{
-		{"deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"})},
-		{"created", eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "c", ContentType: "memo"})},
-		{"access_changed", eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: "a"})},
-		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"})},
-		{"not-json", []byte("not json")},
-		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""})},
-	}
-	for _, tc := range cases {
-		if got := c.handle(context.Background(), tc.body); got != ackSuccess {
-			t.Errorf("%s: handle = %v, want ackSuccess", tc.name, got)
+		{"deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"}), ackSuccess},
+		{"access_changed", eventBody(t, PatternDocumentAccessChanged, AccessChangedEvent{ID: "a"}), ackSuccess},
+		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"}), ackTerminal},
+		{"not-json", []byte("not json"), ackTerminal},
+		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}), ackTerminal},
+	} {
+		if got := c.handle(context.Background(), tc.body); got != tc.want {
+			t.Errorf("%s: handle = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
 
 // TestHandleNacksRequeueOnPurgeFailure asserts a transient purge failure returns
-// nackRequeue so the delete event is redelivered (not at-most-once dropped) — the
+// retryLater so the delete event is redelivered (not at-most-once dropped) — the
 // cascade is a correctness requirement (no orphan documents).
 func TestHandleNacksRequeueOnPurgeFailure(t *testing.T) {
 	mgr := &fakeManager{purgeErr: errors.New("backend down")}
 	c := newConsumer(mgr)
-	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != nackRequeue {
-		t.Fatalf("handle on purge failure = %v, want nackRequeue", got)
-	}
-}
-
-// TestHandleNacksRequeueOnPreRegisterFailure asserts a pre-register failure on a
-// create event also returns nackRequeue for a bounded retry.
-func TestHandleNacksRequeueOnPreRegisterFailure(t *testing.T) {
-	mgr := &fakeManager{registerErr: errors.New("index down")}
-	c := newConsumer(mgr)
-	if got := c.handle(context.Background(), eventBody(t, PatternDocumentCreated, CreatedEvent{ID: "doc-fail", ContentType: "memo"})); got != nackRequeue {
-		t.Fatalf("handle on pre-register failure = %v, want nackRequeue", got)
-	}
-}
-
-// TestShouldRequeueIsBounded asserts the bounded-requeue rule: a first-attempt
-// failure is requeued; a redelivery is dropped (no requeue) so a poison message
-// cannot loop forever.
-func TestShouldRequeueIsBounded(t *testing.T) {
-	if !shouldRequeue(false) {
-		t.Error("first attempt (Redelivered=false) must requeue")
-	}
-	if shouldRequeue(true) {
-		t.Error("redelivery (Redelivered=true) must NOT requeue (drop to avoid a poison loop)")
+	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != retryLater {
+		t.Fatalf("handle on purge failure = %v, want retryLater", got)
 	}
 }

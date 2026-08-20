@@ -38,7 +38,7 @@ func (b *blockingManager) PreRegister(_ context.Context, _ model.Metadata) error
 // (conn.go handleDelivery). The consumer drains deliveries serially on a single
 // goroutine, so a handler that blocks forever head-of-line-blocks every later
 // lifecycle event. handleDelivery wraps handle in a WithTimeout(handlerTimeout)
-// context, so a wedged Purge is cancelled and returns (surfacing as nackRequeue)
+// context, so a wedged Purge is cancelled and returns (surfacing as retryLater)
 // rather than freezing the consumer.
 //
 // Non-vacuity: revert handleDelivery's body to `return c.handle(context.Background(),
@@ -61,8 +61,8 @@ func TestHandleDeliveryBoundsAStuckHandler(t *testing.T) {
 		elapsed := time.Since(start)
 		// The deadline must be what released the handler, and it must surface as a
 		// requeue (a cancelled cascade is a transient failure worth redelivering).
-		if action != nackRequeue {
-			t.Fatalf("handleDelivery on a timed-out handler = %v, want nackRequeue", action)
+		if action != retryLater {
+			t.Fatalf("handleDelivery on a timed-out handler = %v, want retryLater", action)
 		}
 		mgr.mu.Lock()
 		released, ctxErr := mgr.released, mgr.ctxErr

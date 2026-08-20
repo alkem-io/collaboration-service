@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -14,6 +15,19 @@ import (
 // fakeChannel records what Connect asked the broker to do and can fail any one
 // step, so each failure branch — every one of which must close what it has
 // already opened — is reachable without a live broker.
+type declaredQueue struct {
+	name    string
+	durable bool
+	args    amqp.Table
+}
+
+type publishedMsg struct {
+	exchange  string
+	key       string
+	mandatory bool
+	msg       amqp.Publishing
+}
+
 type fakeChannel struct {
 	mu sync.Mutex
 
@@ -24,15 +38,102 @@ type fakeChannel struct {
 	autoAck      bool
 	closed       int
 
+	declarations []declaredQueue
+	published    []publishedMsg
+	confirmMode  bool
+	// calls records setup verbs in order, so ordering claims are asserted rather
+	// than merely asserted-to-have-happened.
+	calls []string
+
 	declareErr error
 	qosErr     error
 	consumeErr error
+	confirmErr error
+	publishErr error
+
+	// confirmAck/returnMsg script the broker's response to the next publish.
+	confirmAck  bool
+	returnOnPub bool
+
+	confirms chan amqp.Confirmation
+	returns  chan amqp.Return
 
 	deliveries chan amqp.Delivery
 }
 
-func (f *fakeChannel) QueueDeclare(name string, durable, _, _, _ bool, _ amqp.Table) (amqp.Queue, error) {
+func (f *fakeChannel) Confirm(bool) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.confirmErr != nil {
+		return f.confirmErr
+	}
+	f.confirmMode = true
+	f.calls = append(f.calls, "confirm")
+	return nil
+}
+
+func (f *fakeChannel) NotifyPublish(c chan amqp.Confirmation) chan amqp.Confirmation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.confirms = c
+	return c
+}
+
+func (f *fakeChannel) NotifyReturn(c chan amqp.Return) chan amqp.Return {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.returns = c
+	return c
+}
+
+func (f *fakeChannel) PublishWithContext(_ context.Context, exchange, key string, mandatory, _ bool, msg amqp.Publishing) error {
+	f.mu.Lock()
+	if f.publishErr != nil {
+		err := f.publishErr
+		f.mu.Unlock()
+		return err
+	}
+	f.published = append(f.published, publishedMsg{exchange: exchange, key: key, mandatory: mandatory, msg: msg})
+	tag := uint64(len(f.published))
+	confirms, returns := f.confirms, f.returns
+	ack, ret := f.confirmAck, f.returnOnPub
+	f.mu.Unlock()
+
+	// The broker answers asynchronously; mirror that so the transfer path is
+	// exercised as it will run against a real channel.
+	go func() {
+		if ret && returns != nil {
+			returns <- amqp.Return{Exchange: exchange, RoutingKey: key, Body: msg.Body}
+		}
+		if confirms != nil {
+			confirms <- amqp.Confirmation{DeliveryTag: tag, Ack: ack}
+		}
+	}()
+	return nil
+}
+
+func (f *fakeChannel) publishes() []publishedMsg {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]publishedMsg(nil), f.published...)
+}
+
+func (f *fakeChannel) callLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeChannel) declaredQueues() []declaredQueue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]declaredQueue(nil), f.declarations...)
+}
+
+func (f *fakeChannel) QueueDeclare(name string, durable, _, _, _ bool, args amqp.Table) (amqp.Queue, error) {
+	f.mu.Lock()
+	f.declarations = append(f.declarations, declaredQueue{name: name, durable: durable, args: args})
+	f.calls = append(f.calls, "declare:"+name)
 	defer f.mu.Unlock()
 	f.declared, f.durable = name, durable
 	return amqp.Queue{Name: name}, f.declareErr
@@ -42,6 +143,7 @@ func (f *fakeChannel) Qos(prefetchCount, _ int, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prefetch = prefetchCount
+	f.calls = append(f.calls, "qos")
 	return f.qosErr
 }
 
@@ -49,6 +151,7 @@ func (f *fakeChannel) Consume(queue, _ string, autoAck, _, _, _ bool, _ amqp.Tab
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.consumeQueue, f.autoAck = queue, autoAck
+	f.calls = append(f.calls, "consume")
 	if f.consumeErr != nil {
 		return nil, f.consumeErr
 	}
@@ -73,6 +176,15 @@ type fakeConn struct {
 	ch         *fakeChannel
 	channelErr error
 	closed     int
+	version    string
+}
+
+func (f *fakeConn) ServerProperties() amqp.Table {
+	v := f.version
+	if v == "" {
+		v = MinBrokerVersion.String()
+	}
+	return amqp.Table{"version": v}
 }
 
 func (f *fakeConn) Channel() (brokerChannel, error) {
@@ -97,37 +209,154 @@ func withFakeBroker(t *testing.T, conn *fakeConn, dialErr error) {
 	t.Cleanup(func() { dialBroker = prev })
 }
 
-// TestConnectDeclaresDurablyAndBoundsPrefetchBeforeConsuming pins the wiring
-// order and the three settings that are correctness requirements rather than
-// preferences.
-//
-// The queue must be DURABLE (a lifecycle event surviving a broker restart is the
-// whole point of the cascade), autoAck must be FALSE (auto-ack is at-most-once,
-// and a document.deleted lost between delivery and purge leaves an orphan), and
-// Qos must be set BEFORE Consume — a prefetch applied afterwards does not bound
-// the first deliveries, so the broker streams its whole backlog into memory the
-// instant the consumer attaches.
-func TestConnectDeclaresDurablyAndBoundsPrefetchBeforeConsuming(t *testing.T) {
+// connectForTopologyTest connects against a fake broker and returns the channel
+// it wired, so the topology assertions below each start from a real Connect.
+func connectForTopologyTest(t *testing.T, queue string) *fakeChannel {
+	t.Helper()
 	ch := &fakeChannel{}
 	withFakeBroker(t, &fakeConn{ch: ch}, nil)
-
-	c, err := Connect(Config{URL: "amqp://stub", Queue: "lifecycle-q"}, &fakeManager{}, zap.NewNop())
+	c, err := Connect(Config{URL: "amqp://stub", Queue: queue}, &fakeManager{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	return ch
+}
 
-	if ch.declared != "lifecycle-q" || !ch.durable {
-		t.Fatalf("queue = %q durable=%v; the lifecycle queue must be declared durable or events are lost on a broker restart", ch.declared, ch.durable)
+func declaredByName(t *testing.T, ch *fakeChannel) map[string]declaredQueue {
+	t.Helper()
+	byName := map[string]declaredQueue{}
+	for _, d := range ch.declaredQueues() {
+		byName[d.name] = d
 	}
-	if ch.prefetch != DefaultPrefetch {
-		t.Fatalf("prefetch = %d, want the default %d; an unset prefetch is UNLIMITED in AMQP, which is the unbounded backlog this guards against", ch.prefetch, DefaultPrefetch)
+	return byName
+}
+
+// TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues pins the queue set and
+// the two properties that are correctness requirements rather than preferences:
+// durability (a broker restart must not vaporise a pending document.deleted, which
+// would leave an orphan) and quorum type (classic dead-lettering is at-most-once,
+// so a retry hop could silently vanish).
+//
+// Q1's arguments are additionally frozen as EXACTLY {x-queue-type: quorum}: it is
+// the one queue the producer also declares, and any extra argument makes the two
+// declarations inequivalent, which the broker refuses with PRECONDITION_FAILED.
+func TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues(t *testing.T) {
+	byName := declaredByName(t, connectForTopologyTest(t, "lifecycle-q"))
+
+	for _, want := range []string{
+		"lifecycle-q",
+		"lifecycle-q.retry.30s", "lifecycle-q.retry.5m", "lifecycle-q.retry.30m",
+		"lifecycle-q.dlq",
+	} {
+		d, ok := byName[want]
+		if !ok {
+			t.Fatalf("queue %q was never declared; the topology must exist before any transfer targets it", want)
+		}
+		if !d.durable {
+			t.Fatalf("queue %q is not durable; events would be lost on a broker restart", want)
+		}
+		if d.args["x-queue-type"] != "quorum" {
+			t.Fatalf("queue %q is not a quorum queue (args=%v); classic dead-lettering is at-most-once", want, d.args)
+		}
+	}
+	if got := byName["lifecycle-q"].args; len(got) != 1 {
+		t.Fatalf("Q1 args = %v, want EXACTLY {x-queue-type: quorum} — it is the one queue the producer also declares, and any extra argument is an inequivalent redeclaration", got)
+	}
+}
+
+// TestRetryTiersCarryTheirScheduleAndTheDLQIsTerminal pins the arguments that make
+// the delay ladder work. Each tier expires back to the main queue after its TTL;
+// at-least-once dead-lettering is required because the quorum default is
+// at-most-once (an expired retry could be dropped), and at-least-once is in turn
+// only accepted with x-overflow=reject-publish.
+func TestRetryTiersCarryTheirScheduleAndTheDLQIsTerminal(t *testing.T) {
+	byName := declaredByName(t, connectForTopologyTest(t, "lifecycle-q"))
+
+	for _, tier := range []struct {
+		name string
+		ttl  int32
+	}{
+		{"lifecycle-q.retry.30s", 30_000},
+		{"lifecycle-q.retry.5m", 300_000},
+		{"lifecycle-q.retry.30m", 1_800_000},
+	} {
+		a := byName[tier.name].args
+		if a["x-message-ttl"] != tier.ttl {
+			t.Errorf("%s x-message-ttl = %v (%T), want int32 %d — argument TYPE participates in declaration equivalence", tier.name, a["x-message-ttl"], a["x-message-ttl"], tier.ttl)
+		}
+		if a["x-dead-letter-routing-key"] != "lifecycle-q" {
+			t.Errorf("%s must dead-letter back to the main queue, got %v", tier.name, a["x-dead-letter-routing-key"])
+		}
+		if a["x-dead-letter-strategy"] != "at-least-once" {
+			t.Errorf("%s must use at-least-once dead-lettering; the default is at-most-once and would silently drop retries", tier.name)
+		}
+		if a["x-overflow"] != "reject-publish" {
+			t.Errorf("%s must set x-overflow=reject-publish; at-least-once is refused with drop-head", tier.name)
+		}
+	}
+	if a := byName["lifecycle-q.dlq"].args; a["x-message-ttl"] != nil || a["x-dead-letter-exchange"] != nil {
+		t.Errorf("the DLQ must be terminal (no TTL, no dead-lettering), got %v", a)
+	}
+}
+
+// TestConnectBoundsPrefetchAndDeclaresBeforeConsuming pins the ORDER of the setup
+// verbs, not merely that they happened. Qos applied after Consume does not bound
+// the first deliveries, so the broker streams its whole backlog into memory the
+// instant the consumer attaches; and consuming before the retry queues exist means
+// the first failing event has nowhere to transfer to.
+func TestConnectBoundsPrefetchAndDeclaresBeforeConsuming(t *testing.T) {
+	ch := connectForTopologyTest(t, "lifecycle-q")
+
+	log := ch.callLog()
+	consumeAt := -1
+	for i, call := range log {
+		if call == "consume" {
+			consumeAt = i
+		}
+	}
+	if consumeAt < 0 {
+		t.Fatalf("Consume was never called; call log = %v", log)
+	}
+	for _, must := range []string{
+		"declare:lifecycle-q",
+		"declare:lifecycle-q.retry.30s", "declare:lifecycle-q.retry.5m", "declare:lifecycle-q.retry.30m",
+		"declare:lifecycle-q.dlq",
+		"qos", "confirm",
+	} {
+		at := -1
+		for i, call := range log {
+			if call == must {
+				at = i
+				break
+			}
+		}
+		if at < 0 || at > consumeAt {
+			t.Errorf("%q happened at %d, Consume at %d — it must precede Consume; call log = %v", must, at, consumeAt, log)
+		}
+	}
+
+	// The invariant is that a prefetch is APPLIED at all — 0 means unlimited in
+	// AMQP, so the broker streams its whole backlog into memory the instant the
+	// consumer attaches. The exact default is an operational choice, covered by
+	// TestConnectHonoursConfiguredPrefetch on the configured branch.
+	if ch.prefetch <= 0 {
+		t.Errorf("prefetch = %d; a zero/negative prefetch is UNLIMITED in AMQP, which is the unbounded backlog this guards against", ch.prefetch)
 	}
 	if ch.autoAck {
-		t.Fatal("Consume used autoAck; a lifecycle event must be acked only after its purge succeeds, or a crash silently drops it and leaves an orphan document")
+		t.Error("Consume used autoAck; a lifecycle event must be acked only after its purge succeeds, or a crash silently drops it and leaves an orphan document")
 	}
 	if ch.consumeQueue != "lifecycle-q" {
-		t.Fatalf("consuming %q, want the declared lifecycle queue", ch.consumeQueue)
+		t.Errorf("consuming %q, want the declared lifecycle queue", ch.consumeQueue)
+	}
+}
+
+// TestTierCountMatchesTheSchedule pins tierCount to the actual ladder. tierCount
+// exists so attempt bookkeeping needs no unchecked int→int32 narrowing; if the two
+// drift, an event would be sent to the DLQ a tier early or index past the ladder.
+func TestTierCountMatchesTheSchedule(t *testing.T) {
+	if int(tierCount) != len(retryTiers) {
+		t.Fatalf("tierCount = %d but the schedule has %d tiers", tierCount, len(retryTiers))
 	}
 }
 
@@ -250,12 +479,11 @@ func TestCloseTearsDownChannelAndConnection(t *testing.T) {
 // interface precisely so handlers can be tested this way — the one seam
 // amqp091-go does provide.
 type fakeAcker struct {
-	mu       sync.Mutex
-	acks     int
-	nacks    int
-	requeued []bool
-	ackErr   error
-	nackErr  error
+	mu      sync.Mutex
+	acks    int
+	nacks   int
+	ackErr  error
+	nackErr error
 }
 
 func (f *fakeAcker) Ack(_ uint64, _ bool) error {
@@ -265,83 +493,238 @@ func (f *fakeAcker) Ack(_ uint64, _ bool) error {
 	return f.ackErr
 }
 
-func (f *fakeAcker) Nack(_ uint64, _ bool, requeue bool) error {
+func (f *fakeAcker) Nack(_ uint64, _ bool, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nacks++
-	f.requeued = append(f.requeued, requeue)
 	return f.nackErr
 }
 
 func (f *fakeAcker) Reject(_ uint64, _ bool) error { return nil }
 
-func (f *fakeAcker) snapshot() (int, int, []bool) {
+func (f *fakeAcker) snapshot() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.acks, f.nacks, append([]bool(nil), f.requeued...)
+	return f.acks, f.nacks
 }
 
-// TestConsumeAcksSuccessAndBoundsRequeueOnFailure covers the delivery loop,
-// including the poison-message rule.
+// consumerForTest builds a Consumer wired to a fake channel with the real
+// topology names, so transfer behaviour is exercised rather than stubbed.
+func consumerForTest(t *testing.T, mgr Manager, ch *fakeChannel) *Consumer {
+	t.Helper()
+	ch.confirmAck = true
+	c := &Consumer{
+		mgr: mgr, logger: zap.NewNop(), ch: ch,
+		handlerTimeout: time.Second,
+		names:          namesFor("lifecycle-q"),
+		confirms:       ch.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		returns:        ch.NotifyReturn(make(chan amqp.Return, 1)),
+		confirmTimeout: 2 * time.Second,
+		recycleBackoff: time.Millisecond,
+		closed:         make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// TestSuccessfulHandlerAcksWithoutTransferring: a handled event is acked and
+// nothing is republished. Publishing on the success path would duplicate every
+// event through the retry tiers.
+func TestSuccessfulHandlerAcksWithoutTransferring(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+	acker := &fakeAcker{}
+	ch := &fakeChannel{}
+	c := consumerForTest(t, &fakeManager{}, ch)
+
+	c.processOne(amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1})
+
+	acks, nacks := acker.snapshot()
+	if acks != 1 || nacks != 0 {
+		t.Fatalf("acks=%d nacks=%d, want exactly one ack", acks, nacks)
+	}
+	if pubs := ch.publishes(); len(pubs) != 0 {
+		t.Fatalf("a successful handler published %d message(s); success must not enter the retry path", len(pubs))
+	}
+}
+
+// TestFailureTransfersToTheNextTierBeforeAcking is the ordering guarantee: the
+// original is acked ONLY after the successor is confirmed onto another queue.
 //
-// The rule is the point: a permanently failing event is requeued ONCE and then
-// dropped. Requeue-always is the obvious implementation and it is a livelock —
-// the broker redelivers the same failing event forever, and because the consumer
-// is single-threaded and serial, that one message starves every later lifecycle
-// event indefinitely. A deleted document would simply never be purged.
-func TestConsumeAcksSuccessAndBoundsRequeueOnFailure(t *testing.T) {
-	// Built with the package's own envelope helper rather than hand-rolled JSON:
-	// a body that does not parse routes to the unknown-event path and is ACKED, so
-	// a hand-written envelope with one wrong field name would make the nack cases
-	// below silently untestable.
-	deleted := eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-1"})
+// Asserting the end state alone is not enough — a consumer that acked first and
+// published afterwards would look identical once both have happened, and would
+// lose the event on a crash in between. The fake records both, and the ack is
+// checked to have happened after a publish exists.
+func TestFailureTransfersToTheNextTierBeforeAcking(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+	acker := &fakeAcker{}
+	ch := &fakeChannel{}
+	c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
 
-	t.Run("success acks", func(t *testing.T) {
-		acker := &fakeAcker{}
-		c := &Consumer{mgr: &fakeManager{}, logger: zap.NewNop(), handlerTimeout: time.Second}
-		ch := make(chan amqp.Delivery, 1)
-		ch <- amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1}
-		close(ch)
-		c.consume(ch)
+	c.processOne(amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1})
 
-		acks, nacks, _ := acker.snapshot()
-		if acks != 1 || nacks != 0 {
-			t.Fatalf("acks=%d nacks=%d, want a single ack after a successful cascade", acks, nacks)
-		}
+	pubs := ch.publishes()
+	if len(pubs) != 1 {
+		t.Fatalf("published %d message(s), want exactly 1 transfer to the first retry tier", len(pubs))
+	}
+	p := pubs[0]
+	if p.key != "lifecycle-q.retry.30s" {
+		t.Fatalf("transferred to %q, want the 30s tier on a first failure", p.key)
+	}
+	if p.exchange != "" {
+		t.Fatalf("published to exchange %q, want the default exchange (routing key IS the queue name)", p.exchange)
+	}
+	if !p.mandatory {
+		t.Fatal("the transfer was not mandatory; a confirm proves the exchange accepted the message, NOT that anything was routed — without mandatory, publishing to a missing queue is a silent discard that still confirms")
+	}
+	if p.msg.DeliveryMode != amqp.Persistent {
+		t.Fatalf("delivery mode = %d, want persistent; a non-persistent retry is lost on a broker restart", p.msg.DeliveryMode)
+	}
+	if string(p.msg.Body) != string(deleted) {
+		t.Fatal("the transferred body differs from the original; the envelope must be forwarded byte-for-byte")
+	}
+	if got := p.msg.Headers[headerAttempt]; got != int32(1) {
+		t.Fatalf("attempt header = %v (%T), want int32(1)", got, got)
+	}
+	if acks, _ := acker.snapshot(); acks != 1 {
+		t.Fatalf("acks=%d, want the original acked after its successor was confirmed", acks)
+	}
+}
+
+// TestTransferFailureLeavesTheEventBrokerOwned is the durability rule: if the
+// successor is not confirmed, the original is neither acked nor rejected, so the
+// broker still owns it and will redeliver.
+//
+// Rejecting instead would convert a transient publishing failure into terminal
+// handling, and the dead-letter republish behind a reject is not itself
+// publisher-confirmed — "it will reach the DLQ" would be an assumption.
+func TestTransferFailureLeavesTheEventBrokerOwned(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+
+	for _, tc := range []struct {
+		name string
+		set  func(*fakeChannel)
+	}{
+		{"publish error", func(f *fakeChannel) { f.publishErr = errors.New("channel dead") }},
+		{"broker nacks the publish", func(f *fakeChannel) { f.confirmAck = false }},
+		{"broker returns it as unroutable", func(f *fakeChannel) { f.returnOnPub = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acker := &fakeAcker{}
+			ch := &fakeChannel{}
+			c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+			tc.set(ch)
+
+			c.processOne(amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1})
+
+			acks, nacks := acker.snapshot()
+			if acks != 0 {
+				t.Fatalf("acks=%d: an unconfirmed transfer must NOT ack — the successor does not exist, so acking loses the event", acks)
+			}
+			if nacks != 0 {
+				t.Fatalf("nacks=%d: the delivery must not be rejected either; rejection makes a transient failure terminal and its dead-letter hop is unconfirmed", nacks)
+			}
+		})
+	}
+}
+
+// TestExhaustedScheduleGoesToTheDeadLetterQueue: once the tiers are used up the
+// event is transferred to the DLQ, not retried forever and not dropped.
+func TestExhaustedScheduleGoesToTheDeadLetterQueue(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+	acker := &fakeAcker{}
+	ch := &fakeChannel{}
+	c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+
+	// attempt == number of tiers: the schedule is exhausted.
+	c.processOne(amqp.Delivery{
+		Body: deleted, Acknowledger: acker, DeliveryTag: 1,
+		Headers: amqp.Table{headerAttempt: tierCount},
 	})
 
-	t.Run("first failure requeues, redelivery drops", func(t *testing.T) {
-		acker := &fakeAcker{}
-		c := &Consumer{mgr: &fakeManager{purgeErr: errors.New("backend down")}, logger: zap.NewNop(), handlerTimeout: time.Second}
-		ch := make(chan amqp.Delivery, 2)
-		ch <- amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1, Redelivered: false}
-		ch <- amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 2, Redelivered: true}
-		close(ch)
-		c.consume(ch)
+	pubs := ch.publishes()
+	if len(pubs) != 1 || pubs[0].key != "lifecycle-q.dlq" {
+		t.Fatalf("published %+v, want a single transfer to the DLQ once the retry schedule is exhausted", pubs)
+	}
+	if acks, _ := acker.snapshot(); acks != 1 {
+		t.Fatalf("acks=%d, want the original acked after the DLQ transfer was confirmed", acks)
+	}
+}
 
-		acks, nacks, requeued := acker.snapshot()
-		if acks != 0 || nacks != 2 {
-			t.Fatalf("acks=%d nacks=%d, want two nacks and no ack", acks, nacks)
-		}
-		if len(requeued) != 2 || !requeued[0] || requeued[1] {
-			t.Fatalf("requeue decisions = %v, want [true false]: a failing event is requeued once and then DROPPED, or it redelivers forever and starves every later event on this single-threaded consumer", requeued)
-		}
-	})
+// TestUnactionableEnvelopeGoesToTheDeadLetterQueue: an envelope this service can
+// never act on is recorded, not swallowed. Under the old behaviour it was acked
+// and vanished, so a producer/consumer shape mismatch was invisible; now it shows
+// up as DLQ depth.
+func TestUnactionableEnvelopeGoesToTheDeadLetterQueue(t *testing.T) {
+	acker := &fakeAcker{}
+	ch := &fakeChannel{}
+	c := consumerForTest(t, &fakeManager{}, ch)
 
-	t.Run("ack and nack errors are survived", func(t *testing.T) {
-		// A broker that rejects the acknowledgement must not stop the loop: the
-		// remaining deliveries still have to be drained.
-		acker := &fakeAcker{ackErr: errors.New("ack rejected"), nackErr: errors.New("nack rejected")}
-		c := &Consumer{mgr: &fakeManager{}, logger: zap.NewNop(), handlerTimeout: time.Second}
-		ch := make(chan amqp.Delivery, 2)
-		ch <- amqp.Delivery{Body: deleted, Acknowledger: acker, DeliveryTag: 1}
-		ch <- amqp.Delivery{Body: []byte("not json"), Acknowledger: acker, DeliveryTag: 2}
-		close(ch)
-		c.consume(ch) // must return rather than hang or panic
+	c.processOne(amqp.Delivery{Body: []byte("not json"), Acknowledger: acker, DeliveryTag: 1})
 
-		acks, _, _ := acker.snapshot()
-		if acks == 0 {
-			t.Fatal("the loop stopped before acking; a rejected acknowledgement must not halt delivery draining")
-		}
-	})
+	pubs := ch.publishes()
+	if len(pubs) != 1 || pubs[0].key != "lifecycle-q.dlq" {
+		t.Fatalf("published %+v, want the unparseable envelope transferred to the DLQ rather than acked away", pubs)
+	}
+	if acks, _ := acker.snapshot(); acks != 1 {
+		t.Fatalf("acks=%d, want the original acked after the DLQ transfer", acks)
+	}
+}
+
+// TestAttemptHeaderRoutingIsTotalOverWhateverArrives asserts the tier decision is
+// defined for every value that can turn up in x-collab-attempt, not just the ones
+// this consumer writes.
+//
+// The header crosses a wire. AMQP numeric headers arrive in whatever width the
+// publisher used, and an operator replaying out of the DLQ sets it by hand. A raw
+// int32() narrowing of a large int64 WRAPS — 1<<32 becomes 0 — which routes an
+// event that has already exhausted the schedule back to the first retry tier, and
+// it then cycles the ladder forever instead of resting in the DLQ. A negative value
+// would index before the start of the ladder — and, worse, would keep doing so:
+// the outgoing header is the incoming one plus 1, so -7 becomes -6, which is still
+// "before the ladder", and the event cycles the first tier forever without ever
+// reaching the DLQ. The outgoing header is asserted alongside the target for that
+// reason: every transfer must strictly advance toward the DLQ.
+func TestAttemptHeaderRoutingIsTotalOverWhateverArrives(t *testing.T) {
+	deleted := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+
+	for _, tc := range []struct {
+		name    string
+		header  any
+		want    string
+		wantHdr int32
+	}{
+		{"absent", nil, "lifecycle-q.retry.30s", 1},
+		{"first attempt", int32(0), "lifecycle-q.retry.30s", 1},
+		{"mid-ladder", int32(1), "lifecycle-q.retry.5m", 2},
+		{"exhausted", tierCount, "lifecycle-q.dlq", tierCount + 1},
+		{"wraps to zero when narrowed", int64(1) << 32, "lifecycle-q.dlq", tierCount + 1},
+		{"far past the ladder", int64(1) << 40, "lifecycle-q.dlq", tierCount + 1},
+		{"negative", int32(-7), "lifecycle-q.retry.30s", 1},
+		{"published as a wider int", int64(2), "lifecycle-q.retry.30m", 3},
+		{"published as a byte", uint8(1), "lifecycle-q.retry.5m", 2},
+		{"not a number at all", "two", "lifecycle-q.retry.30s", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := &fakeChannel{confirmAck: true}
+			c := consumerForTest(t, &fakeManager{purgeErr: errors.New("backend down")}, ch)
+
+			d := amqp.Delivery{Body: deleted, Acknowledger: &fakeAcker{}, DeliveryTag: 1}
+			if tc.header != nil {
+				d.Headers = amqp.Table{headerAttempt: tc.header}
+			}
+			c.processOne(d)
+
+			pubs := ch.publishes()
+			if len(pubs) != 1 {
+				t.Fatalf("published %d message(s), want exactly one transfer", len(pubs))
+			}
+			if pubs[0].key != tc.want {
+				t.Fatalf("attempt header %v (%T) routed to %q, want %q", tc.header, tc.header, pubs[0].key, tc.want)
+			}
+			if got := pubs[0].msg.Headers[headerAttempt]; got != tc.wantHdr {
+				t.Fatalf("attempt header %v (%T) transferred on as %v (%T), want int32 %d — a transfer that does not advance the count cycles the ladder forever",
+					tc.header, tc.header, got, got, tc.wantHdr)
+			}
+		})
+	}
 }

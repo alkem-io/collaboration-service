@@ -86,7 +86,6 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = consumer.Close() })
 
-	publishEvent(t, url, queue, PatternDocumentCreated, CreatedEvent{ID: docID, ContentType: "memo"})
 	publishEvent(t, url, queue, PatternDocumentDeleted, DeletedEvent{ID: docID})
 
 	if !eventually(func() bool { return mgr.has(&mgr.created, docID) }) {

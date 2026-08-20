@@ -19,12 +19,12 @@ import (
 // into memory the instant the consumer attaches, defeating backpressure (a burst
 // of lifecycle events would all be in flight at once). A small prefetch lets the
 // broker hold the queue and feed events only as the consumer acks them.
-const DefaultPrefetch = 16
+const DefaultPrefetch = 1
 
 // DefaultHandlerTimeout bounds the processing of a single lifecycle delivery when
 // Config.HandlerTimeout is unset. The consumer is single-threaded (one goroutine
 // draining the delivery channel serially), so a handler that blocks indefinitely
-// — a wedged Purge/PreRegister/ReEvaluate backend call — would head-of-line-block
+// — a wedged Purge/ReEvaluate backend call — would head-of-line-block
 // every subsequent lifecycle event. A per-delivery deadline keeps a stuck handler
 // from freezing the consumer: a handler that observes the context (PreRegister,
 // ReEvaluate) is abandoned (nack/requeue) at the deadline. A Purge that hands the
@@ -46,6 +46,12 @@ type Config struct {
 	// cannot freeze the single-threaded consumer. Zero falls back to
 	// DefaultHandlerTimeout.
 	HandlerTimeout time.Duration
+	// ConfirmTimeout bounds the wait for a broker confirm/return on a transfer
+	// publish. Zero uses DefaultConfirmTimeout.
+	ConfirmTimeout time.Duration
+	// RecycleBackoff delays the channel close after an unconfirmable transfer.
+	// Zero uses DefaultRecycleBackoff.
+	RecycleBackoff time.Duration
 	// Prefetch caps the unacked deliveries the broker pushes at once (channel QoS),
 	// providing backpressure for the manual-ack, single-threaded consumer. Zero
 	// falls back to DefaultPrefetch.
@@ -60,8 +66,6 @@ type Manager interface {
 	Purge(ctx context.Context, id model.DocumentID) error
 	// ReEvaluate re-runs per-document authZ for a live room's members.
 	ReEvaluate(ctx context.Context, id model.DocumentID)
-	// PreRegister writes an initial metadata row ahead of first connect.
-	PreRegister(ctx context.Context, meta model.Metadata) error
 }
 
 // brokerChannel and brokerConn are the narrow slices of amqp091-go this consumer
@@ -80,11 +84,24 @@ type brokerChannel interface {
 	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
 	Qos(prefetchCount, prefetchSize int, global bool) error
 	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
+	// Confirm puts the channel in publisher-confirm mode. Every transfer out of the
+	// main queue is an explicit publish whose broker acknowledgement decides whether
+	// the original may be acked, so this MUST succeed before any transfer.
+	Confirm(noWait bool) error
+	// NotifyPublish and NotifyReturn are the two halves of "did it land". A confirm
+	// says the exchange accepted the message; a return says nothing was routed to it.
+	// Success requires the ack AND the absence of a return.
+	NotifyPublish(chan amqp.Confirmation) chan amqp.Confirmation
+	NotifyReturn(chan amqp.Return) chan amqp.Return
+	PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error
 	Close() error
 }
 
 type brokerConn interface {
 	Channel() (brokerChannel, error)
+	// ServerProperties carries the broker's reported version, which gates whether
+	// the declared topology actually functions — see requireVersionFloor.
+	ServerProperties() amqp.Table
 	Close() error
 }
 
@@ -92,6 +109,9 @@ type brokerConn interface {
 // amqp.Connection.Channel returns the CONCRETE *amqp.Channel, so the real type
 // cannot satisfy an interface whose Channel returns an interface.
 type amqpConn struct{ *amqp.Connection }
+
+// ServerProperties exposes the broker's advertised properties (server version).
+func (c amqpConn) ServerProperties() amqp.Table { return c.Properties }
 
 // Channel opens an AMQP channel and returns it as the narrow brokerChannel.
 func (c amqpConn) Channel() (brokerChannel, error) {
@@ -126,15 +146,30 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial rabbitmq: %w", err)
 	}
+	// The version floor is checked after connecting and BEFORE declaring anything.
+	// Below it the declarations still succeed and the retry tiers silently never
+	// expire, so refusing here is the only point at which the failure is visible.
+	if err := requireVersionFloor(conn.ServerProperties()); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("lifecycle consumer: %w", err)
+	}
 	ch, err := conn.Channel()
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("open channel: %w", err)
 	}
-	if _, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil); err != nil {
+	names := namesFor(cfg.Queue)
+	if err := declareTopology(ch, names); err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
-		return nil, fmt.Errorf("declare lifecycle queue: %w", err)
+		return nil, fmt.Errorf("declare lifecycle topology: %w", err)
+	}
+	// Publisher confirms must be enabled before any transfer: the ack/reject
+	// decision for every delivery depends on the broker's answer to a publish.
+	if err := ch.Confirm(false); err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("enable publisher confirms: %w", err)
 	}
 	// Bound the unacked-delivery window BEFORE consuming (channel QoS). With manual
 	// ack and a single-threaded consume loop, an unset prefetch lets the broker
@@ -158,9 +193,43 @@ func Connect(cfg Config, mgr Manager, logger *zap.Logger) (*Consumer, error) {
 		return nil, fmt.Errorf("consume lifecycle queue: %w", err)
 	}
 
-	c := &Consumer{mgr: mgr, logger: logger, conn: conn, ch: ch, handlerTimeout: resolveHandlerTimeout(cfg.HandlerTimeout)}
+	c := &Consumer{
+		mgr:            mgr,
+		logger:         logger,
+		conn:           conn,
+		ch:             ch,
+		handlerTimeout: resolveHandlerTimeout(cfg.HandlerTimeout),
+		names:          names,
+		confirms:       ch.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		returns:        ch.NotifyReturn(make(chan amqp.Return, 1)),
+		confirmTimeout: resolveConfirmTimeout(cfg.ConfirmTimeout),
+		recycleBackoff: resolveRecycleBackoff(cfg.RecycleBackoff),
+		closed:         make(chan struct{}),
+	}
 	go c.consume(deliveries)
 	return c, nil
+}
+
+// DefaultConfirmTimeout bounds the wait for a broker confirm/return on a transfer.
+// It is short: the publish is to a queue on the same broker the delivery came
+// from, so silence means something is wrong rather than slow.
+const DefaultConfirmTimeout = 10 * time.Second
+
+// DefaultRecycleBackoff paces channel recycles after an unconfirmable transfer.
+const DefaultRecycleBackoff = 5 * time.Second
+
+func resolveRecycleBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultRecycleBackoff
+	}
+	return d
+}
+
+func resolveConfirmTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultConfirmTimeout
+	}
+	return d
 }
 
 // resolveHandlerTimeout maps a configured per-delivery timeout to its effective
@@ -192,41 +261,89 @@ func resolvePrefetch(n int) int {
 // "poison" message cannot loop forever.
 func (c *Consumer) consume(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
-		switch c.handleDelivery(d.Body) {
-		case ackSuccess:
-			if err := d.Ack(false); err != nil {
-				c.logger.Warn("lifecycle ack failed", zap.Error(err))
-			}
-		case nackRequeue:
-			requeue := shouldRequeue(d.Redelivered)
-			if !requeue {
-				// ERROR, not Warn, and it names the event. Dropping a lifecycle event
-				// is not a routine retry outcome: a discarded document.deleted leaves
-				// the owner's content durable and joinable after they deleted it, and
-				// nothing downstream will ever notice — this log line is the ONLY
-				// record that it happened.
-				//
-				// The bound itself is a known limitation, not a design: two attempts is
-				// whatever a transient backend outage happens to outlast. Correct
-				// handling needs a dead-letter queue or a retry schedule, which is a
-				// broker-topology change shared with `server`. Until then this must at
-				// least be alertable.
-				c.logger.Error("DROPPING a lifecycle event after its redelivery also failed; if this was document.deleted, the owner's content is still stored and still joinable",
-					zap.String("pattern", patternOf(d.Body)),
-					zap.String("body", string(d.Body)))
-			}
-			if err := d.Nack(false, requeue); err != nil {
-				c.logger.Warn("lifecycle nack failed", zap.Error(err))
-			}
+		c.processOne(d)
+	}
+}
+
+// processOne runs one delivery to a terminal state: acked after its work is done,
+// acked after its successor has been CONFIRMED onto another queue, or left
+// untouched so the broker redelivers it.
+//
+// The delivery is never rejected. Rejecting would hand it to Q1's dead-letter
+// route, which is an unconfirmed internal republish — "it will reach the DLQ"
+// would be an assumption, and a transient publishing failure would become
+// terminal handling.
+func (c *Consumer) processOne(d amqp.Delivery) {
+	action := c.handleDelivery(d.Body)
+
+	if action == ackSuccess {
+		if err := d.Ack(false); err != nil {
+			c.logger.Warn("lifecycle ack failed", zap.Error(err))
 		}
+		return
+	}
+
+	// Terminal and retryable failures differ only in WHERE the event is sent; both
+	// are an explicit confirmed publish followed by acking the original, so an
+	// unactionable envelope is recorded in the DLQ rather than silently swallowed.
+	attempt := attemptOf(d.Headers)
+	var target string
+	if action == ackTerminal {
+		target = c.names.dlq
+	} else {
+		target = c.nextTarget(attempt)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.confirmTimeout)
+	err := c.transfer(ctx, target, d, attempt+1)
+	cancel()
+
+	if err == nil {
+		if aerr := d.Ack(false); aerr != nil {
+			// The successor is durable; a failed ack only means this event is
+			// redelivered and transferred again. Handlers are idempotent, so a
+			// duplicate is survivable — losing the original would not be.
+			c.logger.Warn("lifecycle ack after transfer failed; the event will be redelivered and retried",
+				zap.String("target", target), zap.Error(aerr))
+		}
+		if target == c.names.dlq {
+			c.logger.Error("lifecycle event moved to the dead-letter queue; it will not be retried again without an operator replay",
+				zap.String("queue", target),
+				zap.String("pattern", patternOf(d.Body)),
+				zap.Int32("attempt", attempt))
+		}
+		return
+	}
+
+	// The transfer did NOT happen. Leave the delivery unacknowledged so it stays
+	// broker-owned, then recycle the channel after a bounded backoff so Rabbit
+	// redelivers it. Not an immediate requeue: on a serial consumer that spins.
+	c.logger.Error("lifecycle transfer was not confirmed; the event remains broker-owned and will be redelivered",
+		zap.String("target", target),
+		zap.String("pattern", patternOf(d.Body)),
+		zap.Error(err))
+	c.recycle()
+}
+
+// recycle closes the channel after a bounded delay. Every unacked delivery on it
+// returns to the queue and is redelivered to the next channel, which is how an
+// unconfirmable transfer retries without spinning.
+func (c *Consumer) recycle() {
+	select {
+	case <-time.After(c.recycleBackoff):
+	case <-c.closed:
+		return
+	}
+	if err := c.ch.Close(); err != nil {
+		c.logger.Warn("closing the lifecycle channel after a failed transfer", zap.Error(err))
 	}
 }
 
 // handleDelivery processes one delivery body under a per-delivery timeout context
 // (handlerTimeout). The consumer drains deliveries serially on a single goroutine,
-// so a handler that blocks forever — a wedged Purge/PreRegister backend call —
+// so a handler that blocks forever — a wedged Purge backend call —
 // would head-of-line-block every later event. Bounding the context guarantees the
-// stuck handler returns (its backend call is cancelled), surfacing as nackRequeue
+// stuck handler returns (its backend call is cancelled), surfacing as retryLater
 // so the consumer makes progress instead of freezing.
 func (c *Consumer) handleDelivery(body []byte) ackAction {
 	ctx, cancel := context.WithTimeout(context.Background(), c.handlerTimeout)
@@ -245,16 +362,16 @@ func patternOf(body []byte) string {
 	return env.Pattern
 }
 
-// shouldRequeue implements the bounded-requeue rule for a failed lifecycle event:
-// requeue only on the first attempt; on a redelivery, drop (no requeue) so a
-// permanently failing "poison" message cannot loop forever. The purge/pre-register
-// is idempotent, so re-processing on the single requeue is safe.
-func shouldRequeue(redelivered bool) bool {
-	return !redelivered
-}
-
 // Close tears down the channel and connection.
 func (c *Consumer) Close() error {
+	// Release any pending recycle first, so a backoff timer cannot close a channel
+	// after shutdown has already closed it. Nil-safe: a Consumer built directly in
+	// a test has no recycle channel and must still close cleanly.
+	c.closeOnce.Do(func() {
+		if c.closed != nil {
+			close(c.closed)
+		}
+	})
 	if c.ch != nil {
 		_ = c.ch.Close()
 	}
