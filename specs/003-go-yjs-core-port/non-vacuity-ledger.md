@@ -936,3 +936,36 @@ emits the poison from its own document, which is also what a browser does.
 This is a bounded locator schema. It is NOT update integrity: of 2220 silent
 divergences produced by single-bit corruption, it caught **zero**, and it is not
 meant to. It does not roll out safely ahead of the client — see the runbook.
+
+## Observation, deliberately not acted on: the peer-awareness relay is asymmetric
+
+Recorded because it was found while proving something else, and because the reason
+for leaving it alone is more useful than the finding.
+
+The CLIENT awareness path drops a frame whose decode fails, and says why: an
+awareness apply fails on the BYTES, not on the state, so a frame that fails on one
+pod fails identically for every recipient — relaying it makes one client's bad frame
+cost every other client and every other pod a failed decode, inverting the
+offender-only property (FR-009c). The PEER path does not do this. Its apply error is
+logged and the broadcast sits outside the error branch, so a peer awareness frame
+this pod's own decoder rejected is still relayed to every local browser.
+
+**No production change was made, because there is no producer.** All four
+`publishToPeers` callsites were checked:
+
+| site | what it publishes | validated first? |
+|---|---|---|
+| `evictAwareness` | a server-constructed removal frame | n/a — the server built it |
+| client awareness | the client's frame | YES — published only after `ApplyAwarenessUpdate` succeeds |
+| client ephemeral | the client's frame, verbatim | no — but never decoded by any server, opaque by design |
+| `onDocUpdate` | the observer's encoding | n/a — server-encoded |
+
+So no pod puts an awareness frame on the hub that it has not already decoded
+successfully, and the broker does not mutate frames. The unconditional peer relay
+has no concrete malformed producer under the current stack, and awareness is
+ephemeral and non-document regardless.
+
+Revisit only if a real producer appears — a peer that can publish awareness without
+validating it first, or a non-Alkemio publisher on the hub. Until then this is a
+consistency wart with no reachable failure, which is exactly the kind of thing that
+should be written down rather than fixed.
