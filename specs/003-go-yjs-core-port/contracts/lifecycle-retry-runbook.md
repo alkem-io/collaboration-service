@@ -76,11 +76,15 @@ Required order:
    fallback and handle `update-rejected` by discarding that editor generation and
    reloading server state.
 
-   **Both are implemented** — `efd44a2a1` + `72686d930` for the fallback removal,
-   `8d69ef4ff` + `5c6f4600f` for the `update-rejected` handling. So this step is a
-   verification, not a wait: confirm the generation actually serving users contains
-   them. A merged commit is not a deployed client, and this gate is about what is
-   RUNNING when the validator starts refusing updates.
+   **All of it is implemented** — `efd44a2a1` + `72686d930` for the fallback
+   removal, `8d69ef4ff` + `5c6f4600f` for the `update-rejected` handling, and
+   `620c41d2a` for the close-code routing that decides whether a close is normal,
+   transient or terminal. That last one matters here: a client that mis-routes a
+   close reacts to a refusal the wrong way, so it belongs in what you verify.
+
+   So this step is a verification, not a wait: confirm the generation actually
+   serving users contains them. A merged commit is not a deployed client, and this
+   gate is about what is RUNNING when the validator starts refusing updates.
 2. **No mixed validator / non-validator collaboration-service fleet.** Drain and
    stop the old pods and cut the service generation over as a coordinated boundary
    — or otherwise prove old pods cannot accept connections or updates before new
