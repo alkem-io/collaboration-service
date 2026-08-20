@@ -7,6 +7,8 @@ import (
 	"time"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
 // failingConn is a service.Conn whose Send always fails — modelling a client whose
@@ -18,6 +20,10 @@ type failingConn struct {
 	mu    sync.Mutex
 	calls int
 }
+
+// CloseAfterDrain implements service.Conn. This double models a connection whose
+// writes always fail, so an end intent is simply discarded.
+func (f *failingConn) CloseAfterDrain(_ model.SessionEnd) {}
 
 const failingConnSafetyValve = 5000
 

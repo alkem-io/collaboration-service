@@ -969,3 +969,131 @@ Revisit only if a real producer appears — a peer that can publish awareness wi
 validating it first, or a non-Alkemio publisher on the hub. Until then this is a
 consistency wart with no reachable failure, which is exactly the kind of thing that
 should be written down rather than fixed.
+
+---
+
+## Typed session ends, close-after-drain, and the existence gate
+
+Six guarantees were added at once (a typed `session-end` control, the close that
+follows it, and an admission gate for documents that do not exist). Each was
+proved by reverting it and watching the test that claims it go RED.
+
+| guarantee reverted | test | result |
+|---|---|---|
+| teardown queues the close BEFORE the control | `TestMembersAreToldBeforeTheyAreClosed` | RED |
+| teardown stops sending the control at all | `TestEveryTeardownPathEndsTheSocket` | RED |
+| `Send` may enqueue behind a queued close | `TestSendAfterCloseIntentIsRefused` | RED |
+| `Join`'s existence gate removed | `TestUnknownDocumentIsRefusedWithoutMaterializing` | RED |
+| unknown document gets its own close status | `TestUnknownDocumentClosesExactlyLikeForbidden` | RED |
+| authzeval not-found stops being a clean denial | `TestEvaluateUnknownDocumentIsACleanDenial` | RED |
+
+### One of these was VACUOUS on the first attempt, and the fix is the point
+
+`TestMembersAreToldBeforeTheyAreClosed` originally sampled the client's frame
+COUNT before shutdown and asserted the close was recorded after more frames had
+arrived. Reverting the ordering left it GREEN.
+
+The reason is that a frame count is not the property. Any other traffic in
+flight — an awareness snapshot, a room-user-change — pushes the count up whether
+or not the reason was among those frames, so "more frames than before" is
+satisfied by a close that explained nothing. The assertion now captures, at the
+moment the close is queued, whether a `session-end` CONTROL had already been
+delivered. That is the property itself rather than a proxy for it, and reverting
+the order now fails.
+
+Recorded because the near-miss generalises: an ordering test that measures
+volume instead of content passes for the wrong reason, and it passes quietly.
+
+### What the probes could not reach
+
+The panic-recovery teardown (`run`'s deferred recover) is not driven by a test —
+forcing a panic on the run loop needs an injection seam that would exist only for
+the test. It is covered by CONSTRUCTION instead: `teardown` takes the session end
+as a required argument, so a path that reaches it without naming one does not
+compile. That is why the argument is mandatory rather than optional, and it is a
+weaker claim than a RED, stated here as such.
+
+---
+
+## The terminal boundary: an atomic flag is not an ordering guarantee
+
+`b4b87dc` claimed that nothing could be enqueued behind a close intent "by
+construction", on the strength of an `atomic.Bool`. The claim was FALSE, and the
+review that caught it read the source rather than the report.
+
+`Send` checked `ending.Load()` and then enqueued. Two steps, separable:
+
+1. `Send` reads `ending == false`.
+2. `Send` is descheduled before its channel send.
+3. `CloseAfterDrain` sets `ending` and enqueues the close intent.
+4. `Send` resumes and enqueues its frame BEHIND the intent.
+
+An atomic makes each step indivisible; it does nothing about the gap between
+them. `sendInitial` was worse — it never consulted the flag at all, so a teardown
+racing the handler's post-join batch could admit the intent while the batch was
+parked waiting for queue space. The writer stops at the intent, so nothing drains
+again, and the handshake sat there for the full `handshakeSendTimeout` before
+shedding a connection whose session had already ended.
+
+**Blast radius, stated precisely:** the wire was never wrong. The writer returns
+at the intent, so a frame queued behind it is never written and no client ever
+saw traffic after its session-end. What was wrong is that `Send` returned nil for
+a frame that would never be delivered, and that the port documented a guarantee
+the code did not provide.
+
+The fix is one lock covering the terminal state AND the enqueue, so the check and
+the act are a single step. Every holder does only non-blocking work, so the room
+loop is never stalled; `sendInitial` waits for space OUTSIDE the lock and
+re-checks admission on each retry.
+
+| guarantee reverted | test | result |
+|---|---|---|
+| `offer` reads the flag outside the lock (the shipped shape) | `TestOfferInFlightAcrossTheBoundaryIsRefused` | RED |
+| `sendInitial` ignores the boundary | `TestSendInitialRefusesOnceTheSessionIsEnding` | RED |
+| `admitEnd` stops closing the boundary | `TestSendAfterCloseIntentIsRefused` | RED |
+| `close()` takes the admission lock | `TestShedAfterAQueuedIntentEndsTheConnection` | **VACUOUS — removed** |
+
+### Two of these tests were wrong first, and both failures were mine
+
+**The first `sendInitial` test passed for the wrong reason.** It filled a depth-1
+queue, so `CloseAfterDrain` could not enqueue the intent and fell back to an
+immediate hard close — and the wait then returned because `closed` was closed,
+not because the boundary was honoured. Reverting the boundary check left it
+green. It now uses a depth-2 queue so the intent is QUEUED and the connection
+stays open, and asserts both of those preconditions before testing anything, so
+it cannot silently degrade into the easy case again.
+
+**The first linearization test did not discriminate the defect.** It asserted
+only the post-condition (an offer issued before the boundary moved is refused),
+which the broken implementation satisfies most of the time; eight probe runs
+never caught it. The discriminating property is structural: while the admission
+lock is HELD, no offer may make progress. An implementation that reads the
+terminal state outside the lock sails straight past that, which is exactly the
+shipped shape — and now fails deterministically, with no sleeps and no
+production hook.
+
+The generalisation, and the reason both are written down: a concurrency test that
+asserts only the post-condition tends to pass, because the benign interleaving is
+the common one. It has to assert the property that makes the bad interleaving
+impossible.
+
+### `close()` did not need the lock, so it does not have it
+
+Taking the admission lock in `close()` looked symmetric and was probed to see
+whether it was load-bearing. It is not: `closed` is a channel, so the check is
+already race-free, and the worst a stale answer costs is an item admitted into a
+queue nothing will drain — never written, never seen. No test could tell the
+difference, so it was removed rather than kept for tidiness. `ending` is a plain
+field whose ordering against the enqueue IS the property, which is why that one
+stays under the lock.
+
+### The shed/graceful overlap is deliberately unresolved
+
+Once an intent is queued the writer normally performs the graceful close, but
+`close()` — the slow-consumer shed, and the handler's own deferred teardown — can
+still arrive first, and the writer then observes `closed` and exits without the
+handshake. That is INTENDED: the shed exists for a connection already going away,
+and a close handshake there would block on a peer that is not reading. So the
+pinned outcome is not which close code the peer observes — that race is left open
+on purpose — but that the connection ends exactly once and nothing further is
+admitted (`TestShedAfterAQueuedIntentEndsTheConnection`).

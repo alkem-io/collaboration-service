@@ -25,6 +25,13 @@ func TestConcurrentPurgesOfOneDocumentShareTheTombstone(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
 	const doc model.DocumentID = "double-purge"
 
+	// The document EXISTS, so the only thing that can refuse a join here is the
+	// tombstone — which is what this test is about. Without this the join would be
+	// refused for not existing and the assertion would pass vacuously.
+	if err := mgr.PreRegister(context.Background(), model.Metadata{ID: doc, ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+
 	// Two overlapping cascades: raise twice, lower once, and the document must
 	// still be refused.
 	mgr.beginPurge(doc)
@@ -34,8 +41,8 @@ func TestConcurrentPurgesOfOneDocumentShareTheTombstone(t *testing.T) {
 	a := newFakeClient(t)
 	if _, _, err := mgr.Join(context.Background(), JoinRequest{
 		ID: doc, Content: model.ContentTypeMemo, Identity: a.identity, Conn: a,
-	}); err == nil {
-		t.Fatal("a Join was admitted while a second cascade was still running; the first cascade to finish must not lift the tombstone for the other")
+	}); !errors.Is(err, ErrDocumentPurging) {
+		t.Fatalf("Join during the second cascade = %v, want ErrDocumentPurging; the first cascade to finish must not lift the tombstone for the other", err)
 	}
 
 	// The second cascade finishes and the document becomes joinable again.
@@ -108,7 +115,7 @@ func TestAcquireReturnsTheLiveRoomToASecondCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	t.Cleanup(first.finish)
+	t.Cleanup(releaseRoom(first))
 
 	second, err := mgr.acquire(context.Background(), "shared", model.ContentTypeMemo)
 	if err != nil {

@@ -302,3 +302,6 @@ func (m *countingMetrics) DocumentUndurable(int, time.Duration) {}
 func (m *countingMetrics) DocumentDurabilityRestored()          {}
 func (m *countingMetrics) DocumentEscalated(time.Duration)      {}
 func (m *countingMetrics) GenerationInvalidated()               {}
+
+// CloseAfterDrain implements service.Conn.
+func (c *erroringConn) CloseAfterDrain(_ model.SessionEnd) {}

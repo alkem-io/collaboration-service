@@ -83,12 +83,40 @@ zero-dependency run costs one explicit line per selector:
 
 - `PORT` (default 4006)
 - `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is rejected at startup)
-- `METADATA_STORE` — `rabbitmq` | `postgres`
+- `METADATA_STORE` — `inmemory` (default; non-durable, tests/local) | `rabbitmq` | `postgres`
 - `CHECKPOINT_STORE` — **required**; `inline` (non-durable, tests/local) | `file-service` (durable)
 - `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
   `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
   client-controllable `Authorization` default is rejected at startup.
 - `AUTHZ_MODE` — `authzeval` | `open` (derived from `AUTH_MODE` when unset)
+
+**A document must EXIST before it can be joined.** After authorization succeeds and
+BEFORE the room is materialized, `Join` requires a metadata row; an unknown id is
+refused without loading a checkpoint, opening a room, or writing an index row. The
+metadata store is the existence record and is durable wherever one is configured —
+in the Alkemio topology `collaboration-fetch` resolves against the memo/whiteboard
+rows in `server`'s own database, so the gate survives a restart and needs no
+tombstone of its own. This is what stops a deleted document from being resurrected
+by a reconnect once the owner-delete tombstone (which spans only the cascade) lifts.
+
+The refusal is deliberately **indistinguishable from a denial** — same close status,
+same reason — so the service cannot be used to enumerate which document ids exist.
+Only the server's own logs separate `ErrDocumentUnknown` from `ErrForbidden`.
+
+The practical consequence: **create, then collaborate.** Production already works
+this way (the entity long predates any socket). Standalone and tests must register
+the document first, via `POST /collab/{documentId}` or `Manager.PreRegister`.
+
+**Session ends are typed (`session-end`), never free text.** Every path that ends a
+connection names a `code`, a `scope` (`member` | `document`) and a `disposition`
+(`transient` | `manual` | `terminal`), and the control is delivered BEFORE the socket
+closes — both travel one per-connection FIFO, so the client cannot see the close
+without the reason. Codes: `update-rate-exceeded` (member, transient),
+`document-size-limit-exceeded` (member, manual — the offending edit must be dropped,
+or reconnecting re-trips it), `document-deleted` (document, terminal),
+`edits-not-saved` (document, terminal — the three no-flush teardowns: escalation,
+generation invalidation, panic), `server-shutdown` (document, transient). The client
+branches on these literals, so changing one is a cross-repo change.
 
 **Authorization is per WebSocket session.** READ and UPDATE are evaluated once, at
 connection open and BEFORE the room is materialized, and the resulting capability

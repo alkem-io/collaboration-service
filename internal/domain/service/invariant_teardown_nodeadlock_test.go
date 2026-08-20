@@ -84,7 +84,7 @@ func TestInvTeardownNoDeadlock(t *testing.T) {
 	time.Sleep(20 * time.Millisecond) // let the parked write settle into its select
 
 	done := make(chan struct{})
-	go func() { room.teardown(nil); close(done) }()
+	go func() { room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):

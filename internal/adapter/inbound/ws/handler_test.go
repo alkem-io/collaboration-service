@@ -19,7 +19,6 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
@@ -169,7 +168,7 @@ func newTestServer(t *testing.T, auth interface {
 }) (*httptest.Server, string) {
 	t.Helper()
 	deps := service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authopen.New(),
@@ -217,7 +216,7 @@ func newTestServerWithManager(t *testing.T, mgr *service.Manager) string {
 // the handler's joinCloseStatus path).
 func TestRefusedJoinClosesSocket(t *testing.T) {
 	deps := service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authopen.New(),

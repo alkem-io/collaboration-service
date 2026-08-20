@@ -151,7 +151,7 @@ func TestMaxConnsPerRoomCap(t *testing.T) {
 }
 
 // TestUpdateRateLimitDisconnects asserts a connection that breaches the per-conn
-// update rate is disconnected with a room-closed control, and other collaborators
+// update rate is disconnected with a session-end control, and other collaborators
 // keep working (FR-024, SC-009).
 func TestUpdateRateLimitDisconnects(t *testing.T) {
 	cfg := fastConfig()
@@ -175,7 +175,7 @@ func TestUpdateRateLimitDisconnects(t *testing.T) {
 
 	waitFor(t, "rate-limited client disconnected", func() bool {
 		for _, m := range controlMessages(a) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "update rate exceeded" {
+			if m.Kind == model.ControlSessionEnd && m.Code == model.CodeUpdateRateExceeded {
 				return true
 			}
 		}
@@ -209,7 +209,7 @@ func TestMaxDocSizeDisconnects(t *testing.T) {
 
 	waitFor(t, "oversized doc disconnects", func() bool {
 		for _, m := range controlMessages(a) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "document size limit exceeded" {
+			if m.Kind == model.ControlSessionEnd && m.Code == model.CodeDocumentSizeLimitExceeded {
 				return true
 			}
 		}
@@ -249,7 +249,7 @@ func TestMaxDocSizeRejectsBeforeCommit(t *testing.T) {
 	// A is disconnected for the breach.
 	waitFor(t, "oversized sender disconnected", func() bool {
 		for _, m := range controlMessages(a) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "document size limit exceeded" {
+			if m.Kind == model.ControlSessionEnd && m.Code == model.CodeDocumentSizeLimitExceeded {
 				return true
 			}
 		}
@@ -289,8 +289,8 @@ func TestMaxDocSizeDisabledAllowsAnySize(t *testing.T) {
 
 	// No disconnect: the size limit is off.
 	for _, m := range controlMessages(a) {
-		if m.Kind == model.ControlRoomClosed {
-			t.Fatalf("unexpected disconnect with MaxDocBytes disabled: %q", m.Error)
+		if m.Kind == model.ControlSessionEnd {
+			t.Fatalf("unexpected disconnect with MaxDocBytes disabled: %q", m.Code)
 		}
 	}
 }

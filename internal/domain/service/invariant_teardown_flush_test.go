@@ -282,5 +282,5 @@ func TestFailedFinalFlushDoesNotDestroyTheUnsavedEdits(t *testing.T) {
 	if !contains(xmlText(scratch), "must not vanish") {
 		t.Fatalf("the recovered flush persisted a document without the edit: %q", xmlText(scratch))
 	}
-	room.finish()
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 }

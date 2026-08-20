@@ -219,8 +219,8 @@ func TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 	close(store.loadRelease)
 	select {
 	case err := <-joinErr:
-		if !errors.Is(err, errShuttingDown) {
-			t.Fatalf("join during shutdown returned %v, want errShuttingDown", err)
+		if !errors.Is(err, ErrShuttingDown) {
+			t.Fatalf("join during shutdown returned %v, want ErrShuttingDown", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the join never completed")

@@ -91,6 +91,10 @@ func TestJSInteropTwoJSClients(t *testing.T) {
 	base := testApp(t, standaloneConfig())
 
 	const docID = "e2e-js-interop"
+	// The JS harness opens its own socket, so the Go dial path never runs for
+	// this document — create it here or the server refuses an id it has never
+	// heard of.
+	ensureDocument(t, base, docID, "memo")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -158,6 +162,10 @@ func TestJSInteropJSEditorGoObserver(t *testing.T) {
 	base := testApp(t, standaloneConfig())
 
 	const docID = "e2e-js-go-interop"
+	// The JS harness opens its own socket, so the Go dial path never runs for
+	// this document — create it here or the server refuses an id it has never
+	// heard of.
+	ensureDocument(t, base, docID, "memo")
 
 	// Go observer connects first and stays connected.
 	goObs := dial(t, base, docID, "memo")
@@ -202,6 +210,10 @@ func TestJSInteropGoEditorJSObserver(t *testing.T) {
 	base := testApp(t, standaloneConfig())
 
 	const docID = "e2e-go-to-js-interop"
+	// The JS harness opens its own socket, so the Go dial path never runs for
+	// this document — create it here or the server refuses an id it has never
+	// heard of.
+	ensureDocument(t, base, docID, "memo")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

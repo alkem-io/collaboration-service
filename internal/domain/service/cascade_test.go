@@ -20,7 +20,7 @@ import (
 var errInjectedBlobDelete = errors.New("blob delete failed")
 
 // TestPurgeDisconnectsAndPurgesLiveRoom asserts the owner-delete cascade on a
-// live room: connected clients get room-closed, the room is released, and the
+// live room: connected clients get session-end/document-deleted, the room is released, and the
 // metadata row + snapshot blob are purged (FR-023, SC-010, T015).
 func TestPurgeDisconnectsAndPurgesLiveRoom(t *testing.T) {
 	mgr, deps := testManager(t, RoomConfig{
@@ -44,10 +44,10 @@ func TestPurgeDisconnectsAndPurgesLiveRoom(t *testing.T) {
 		t.Fatalf("purge: %v", err)
 	}
 
-	// The room is released and the connected client got a room-closed control.
+	// The room is released and the connected client got a session-end control.
 	waitFor(t, "room released on purge", func() bool { return mgr.RoomCount() == 0 })
-	if !hasControlKind(a, model.ControlRoomClosed) {
-		t.Fatal("connected client did not receive room-closed on purge")
+	if !hasControlCode(a, model.CodeDocumentDeleted) {
+		t.Fatal("connected client did not receive session-end/document-deleted on purge")
 	}
 
 	// Metadata + blob are gone (no orphan).

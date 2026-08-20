@@ -79,6 +79,9 @@ func authzevalConfig(authURL string) *config.Config {
 // unregistered doc, or one with no policy id, fails closed in authzeval mode.
 func preRegister(t *testing.T, httpBase, documentID, contentType string) {
 	t.Helper()
+	// Claim the document so the dial path does not re-create it without the
+	// authorization policy id this registration carries.
+	e2eCreated.Store(httpBase+"|"+documentID, struct{}{})
 	body, _ := json.Marshal(map[string]string{
 		"contentType":           contentType,
 		"authorizationPolicyId": "policy-" + documentID,

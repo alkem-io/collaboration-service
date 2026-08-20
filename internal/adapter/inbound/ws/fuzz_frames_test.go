@@ -13,7 +13,6 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
@@ -22,7 +21,7 @@ import (
 func fuzzServer(t *testing.T) (string, *service.Manager) {
 	t.Helper()
 	mgr := service.NewManager(service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authopen.New(),

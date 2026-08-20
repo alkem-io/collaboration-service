@@ -20,8 +20,12 @@ import (
 type failingMetaSave struct{ port.MetadataStore }
 
 func (failingMetaSave) Save(context.Context, model.Metadata) error { return errors.New("index down") }
-func (failingMetaSave) Load(context.Context, model.DocumentID) (model.Metadata, error) {
-	return model.Metadata{}, model.ErrNotFound
+
+// Load succeeds: the document EXISTS and only its writes fail. Returning
+// ErrNotFound here would instead mean "no such document", which Join now refuses
+// outright — a different failure than the one under test.
+func (failingMetaSave) Load(_ context.Context, id model.DocumentID) (model.Metadata, error) {
+	return model.Metadata{ID: id, ContentType: model.ContentTypeMemo}, nil
 }
 
 // TestSaveErrorOnMetadataFailure asserts a metadata Save failure (after a
@@ -38,7 +42,7 @@ func TestSaveErrorOnMetadataFailure(t *testing.T) {
 	mgr := NewManager(deps, fastConfig(), metrics, nil)
 
 	a := newFakeClient(t)
-	a.join(mgr, "meta-fail", model.ContentTypeMemo)
+	a.joinExisting(mgr, "meta-fail", model.ContentTypeMemo)
 	a.observeUpdates()
 	a.insertText("x ")
 

@@ -23,9 +23,12 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +121,51 @@ func dial(t *testing.T, base, documentID, contentType string) *wsClient {
 	return dialWithToken(t, base, documentID, contentType, "")
 }
 
+// e2eCreated remembers which (pod, document) pairs have been created, so two
+// clients dialling the same document do not register it twice — a second create
+// is an upsert that bumps the stored version, which the persistence round-trip
+// tests read.
+var e2eCreated sync.Map
+
+// ensureDocument creates the document over the standalone REST API before the
+// first client connects to it.
+//
+// A document must EXIST before it can be joined — the service refuses an id its
+// metadata store has never heard of, which is what stops a deleted document from
+// being resurrected by a reconnect. In Alkemio the memo/whiteboard row is that
+// record and is created long before any socket opens; standalone, this REST call
+// is the equivalent, so the e2e flow now mirrors the real one: create, then
+// collaborate.
+//
+// It is keyed per POD as well as per document because each standalone pod owns
+// its own in-memory index: registering on one says nothing about the other, and
+// the two-pod tests dial both.
+func ensureDocument(t *testing.T, wsBase, documentID, contentType string) {
+	t.Helper()
+	httpBase := "http" + strings.TrimPrefix(wsBase, "ws")
+	if _, loaded := e2eCreated.LoadOrStore(httpBase+"|"+documentID, struct{}{}); loaded {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"contentType": contentType})
+	if err != nil {
+		t.Fatalf("marshal create body: %v", err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		httpBase+"/collab/"+documentID, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create %s: %v", documentID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create %s: status = %d, want 201", documentID, resp.StatusCode)
+	}
+}
+
 // dialWithToken is dial with an Authorization handshake token, so authzeval-mode
 // tests can connect as a specific actor (the token is the gateway-authenticated
 // actor id). An empty token sends no Authorization header.
@@ -136,6 +184,7 @@ func dialWithToken(t *testing.T, base, documentID, contentType, token string) *w
 // oidc-mode header dials build on it.
 func dialWithDialOptions(t *testing.T, base, documentID, contentType string, opts *websocket.DialOptions) *wsClient {
 	t.Helper()
+	ensureDocument(t, base, documentID, contentType)
 	ctx, cancel := context.WithCancel(context.Background())
 	url := base + "/collab/" + documentID + "?type=" + contentType
 	conn, resp, err := websocket.Dial(ctx, url, opts)

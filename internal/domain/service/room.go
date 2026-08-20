@@ -36,6 +36,22 @@ type Conn interface {
 	// block the room: implementations buffer and drop/close on overflow. The
 	// returned error signals the room to drop the connection.
 	Send(frame []byte) error
+	// CloseAfterDrain ends the connection once every frame ALREADY queued for it
+	// has been written, mapping the session end to whatever the transport uses to
+	// say so. The ordering is the point: the room queues the session-end control
+	// and then this, so the client cannot see the close before the reason for it.
+	//
+	// It MUST NOT block the room loop — the room calls it while holding the
+	// single-writer goroutine, and one unreachable client must not stall every
+	// other member's teardown. An implementation that cannot queue the intent
+	// closes immediately instead; a client that is not draining has already lost
+	// the frames a graceful close would have preserved.
+	//
+	// Once it is admitted, Send MUST fail. Not "should generally": the terminal
+	// check and the enqueue have to be ONE step in the implementation, or a close
+	// admitted between a sender's check and its enqueue puts that frame behind the
+	// close — reported to the sender as delivered, and never written.
+	CloseAfterDrain(end model.SessionEnd)
 }
 
 // updateOrigin tags a Y.Doc transaction with the connection that caused it so
@@ -78,7 +94,7 @@ const (
 	cmdPersist
 	cmdClose
 	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
-	// (room-closed), purge metadata + blob, and release the room (T015).
+	// (session-end/document-deleted), purge metadata + blob, and release the room (T015).
 	cmdPurge
 )
 
@@ -610,8 +626,8 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 			// materialization error also makes the answer independent of WHERE in
 			// materialization the shutdown lands — before this change, a Join wedged
 			// on the metadata read reported "registry closed" while one wedged a step
-			// later reported errShuttingDown, for the same event.
-			return nil, errShuttingDown
+			// later reported ErrShuttingDown, for the same event.
+			return nil, ErrShuttingDown
 		}
 		return nil, fmt.Errorf("acquiring document: %w", err)
 	}
@@ -823,7 +839,10 @@ func (r *Room) run() {
 		if rec := recover(); rec != nil {
 			r.logger.Error("room run loop panicked; tearing down without persist",
 				zap.Any("panic", rec), zap.Stack("stack"))
-			r.teardown(nil)
+			// Unsaved edits are being abandoned here exactly as in escalation, so
+			// members are told the same thing: their work since the last flush is
+			// gone (FR-011a groups the no-flush teardowns for this reason).
+			r.teardown(model.NewSessionEnd(model.CodeEditsNotSaved), nil)
 		}
 	}()
 
@@ -958,7 +977,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		r.persistNow()
 
 	case cmdPurge:
-		r.teardown(func() {
+		r.teardown(model.NewSessionEnd(model.CodeDocumentDeleted), func() {
 			err := r.purgeNow()
 			if cmd.done2 != nil {
 				cmd.done2 <- err
@@ -967,9 +986,8 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		return false
 
 	case cmdClose:
-		r.teardown(func() {
+		r.teardown(model.NewSessionEnd(model.CodeServerShutdown), func() {
 			r.persistNow()
-			r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed})
 		})
 		return false
 	}
@@ -1159,7 +1177,7 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 	// unparseable frames (each costing a parse attempt and a WARN log) without ever
 	// tripping the limit (FR-024).
 	if !r.allowRate(src) {
-		r.disconnect(src, "update rate exceeded")
+		r.disconnect(src, model.CodeUpdateRateExceeded)
 		return false
 	}
 
@@ -1505,7 +1523,7 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// never mutated or broadcast the live doc. Disconnect only the offender
 	// (FR-024 offender-only impact); other collaborators are untouched.
 	if outcome.rejectedTooLarge {
-		r.disconnect(src, "document size limit exceeded")
+		r.disconnect(src, model.CodeDocumentSizeLimitExceeded)
 		return false
 	}
 
@@ -1867,7 +1885,9 @@ func (r *Room) teardownInvalidated() {
 	r.logger.Warn("document generation invalidated; tearing down without persist",
 		zap.String("doc", string(r.id)))
 	r.metrics.GenerationInvalidated()
-	r.teardown(nil)
+	// Same client-visible outcome as escalation: this generation is abandoned
+	// without being persisted, so edits since the last flush are lost.
+	r.teardown(model.NewSessionEnd(model.CodeEditsNotSaved), nil)
 }
 
 // releaseIfEmpty releases an idle room that has no members left, reporting
@@ -1906,11 +1926,26 @@ func (r *Room) releaseIfEmpty(saveTimer, idleTimer *time.Timer) bool {
 		return false
 	}
 
-	r.teardown(nil)
+	// No members by construction (checked at the top), so the code is unobservable
+	// here. It is still the honest one: the room is being released and the
+	// document is intact and flushed, which is precisely "come back later".
+	r.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 	return true
 }
 
-func (r *Room) teardown(flush func()) {
+// teardown ends the room, telling every member WHY and then closing its socket.
+//
+// The session end is a required argument, not an option, because a teardown that
+// forgets it is exactly the bug this funnel exists to prevent: before typed ends,
+// four of the nine teardown paths said nothing at all and simply abandoned the
+// sockets, leaving clients attached to a room that no longer existed with their
+// frames silently discarded. Requiring the argument makes a silent path
+// impossible to write.
+//
+// Emission is HERE and nowhere else, for the same reason — a caller that
+// broadcast its own control before calling teardown could drift from the code it
+// passed. Callers name a code; the funnel announces it and closes behind it.
+func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// The shadow is this room's private document, not the registry's. Nothing else
 	// can free it, so it is released here — once, on the single teardown funnel.
 	r.destroyShadow()
@@ -1927,7 +1962,18 @@ func (r *Room) teardown(flush func()) {
 	// count. dropMember (the only other ConnClosed caller) deletes from r.members
 	// before it counts, so any already-closed member is absent here: no double
 	// count. Runs on the run-loop goroutine (single-writer), so the walk is safe.
-	for id := range r.members {
+	//
+	// Each member is TOLD before it is closed: the control goes onto the same
+	// per-connection queue the close intent then joins, so ordering is a property
+	// of the queue rather than of timing. Send's error is ignored deliberately —
+	// a client that has already gone away still needs dropping, and there is no
+	// one left to report the failure to.
+	endFrame := encodeControl(end.Control())
+	for id, m := range r.members {
+		if endFrame != nil {
+			_ = m.conn.Send(endFrame)
+		}
+		m.conn.CloseAfterDrain(end)
 		delete(r.members, id)
 		r.metrics.ConnClosed()
 	}
@@ -1993,10 +2039,6 @@ func (r *Room) evictFromRegistry() {
 	r.logger.Warn("evicting the document from the registry failed; it stays resident",
 		zap.String("doc", string(r.id)), zap.Error(err))
 }
-
-// finish releases the room with no extra flush (the caller already persisted/purged).
-// teardown owns the ordering; this is the entry used by the idle path and tests.
-func (r *Room) finish() { r.teardown(nil) }
 
 // encodeControl marshals a control message into a framed type-3 wire message.
 func encodeControl(msg model.ControlMessage) []byte {

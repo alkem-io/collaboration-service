@@ -193,5 +193,25 @@ func hasControlKind(c *fakeClient, kind model.ControlKind) bool {
 	return false
 }
 
+// releaseRoom returns a cleanup that tears a room down through the production
+// funnel. It exists because teardown REQUIRES a session end — the argument that
+// makes a silent teardown impossible to write — so tests name one too rather
+// than reaching for a special no-reason entry point that production does not
+// have.
+func releaseRoom(r *Room) func() {
+	return func() { r.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil) }
+}
+
+// hasControlCode reports whether the client received a session-end control
+// carrying the given code.
+func hasControlCode(c *fakeClient, code model.SessionEndCode) bool {
+	for _, m := range c.controlMessages() {
+		if m.Kind == model.ControlSessionEnd && m.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 // contains is a readable alias for strings.Contains used throughout the tests.
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }

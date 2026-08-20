@@ -36,6 +36,11 @@ func TestInvShutdownAbortNoGaugeUnderflow(t *testing.T) {
 
 	// A Join whose materialization wedges in the gated Metadata.Load (m.closed not yet set).
 	joinErr := make(chan error, 1)
+	// Join now requires the document to exist; register it so the test exercises
+	// the behaviour it is actually about.
+	if err := m.PreRegister(context.Background(), model.Metadata{ID: "doc-abort", ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
 	go func() {
 		_, _, err := m.Join(context.Background(), JoinRequest{ID: "doc-abort", Content: model.ContentTypeMemo, Conn: newFakeClient(t)})
 		joinErr <- err
@@ -50,8 +55,8 @@ func TestInvShutdownAbortNoGaugeUnderflow(t *testing.T) {
 	close(gate.release)
 	select {
 	case err := <-joinErr:
-		if !errors.Is(err, errShuttingDown) {
-			t.Fatalf("Join during shutdown should return errShuttingDown, got: %v", err)
+		if !errors.Is(err, ErrShuttingDown) {
+			t.Fatalf("Join during shutdown should return ErrShuttingDown, got: %v", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Join did not return after the shutdown abort")

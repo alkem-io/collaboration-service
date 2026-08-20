@@ -13,7 +13,6 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
@@ -90,7 +89,7 @@ func (viewerAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.Documen
 // sendInitial is the fix; this test pins the outcome that matters to a joiner.
 func TestHandshakeBatchIsNotShedOnASmallSendBuffer(t *testing.T) {
 	deps := service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      viewerAuthZ{},
@@ -141,7 +140,7 @@ func TestHandshakeBatchIsNotShedOnASmallSendBuffer(t *testing.T) {
 // returned cleanly and the connection was left.
 func TestReadLoopLogsAbnormalClose(t *testing.T) {
 	deps := service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authopen.New(),

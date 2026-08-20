@@ -49,6 +49,11 @@ func TestJoinDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 
 	c := newFakeClient(t)
 	joinErr := make(chan error, 1)
+	// Join now requires the document to exist; register it so the test exercises
+	// the behaviour it is actually about.
+	if err := m.PreRegister(context.Background(), model.Metadata{ID: id, ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
 	go func() {
 		_, _, err := m.Join(context.Background(), JoinRequest{ID: id, Content: model.ContentTypeMemo, Identity: c.identity, Conn: c})
 		joinErr <- err
@@ -61,7 +66,7 @@ func TestJoinDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	// Tear the room down with its cmdJoin still unprocessed (mirrors a concurrent
 	// cmdClose / idle release): closes room.done and drops it from the registry.
 	// Without the fix, Join is parked on <-res forever.
-	room.finish()
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	select {
 	case err := <-joinErr:
@@ -86,7 +91,7 @@ func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	go func() { purgeErr <- m.Purge(context.Background(), id) }()
 
 	waitFor(t, "cmdPurge buffered in the wedged room", func() bool { return len(room.commands) == 1 })
-	room.finish()
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	select {
 	case err := <-purgeErr:

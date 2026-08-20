@@ -101,15 +101,10 @@ func (r *Room) escalateUndurable(undurable time.Duration, err error) {
 		zap.Duration("undurable_for", undurable),
 		zap.Error(err))
 	r.metrics.DocumentEscalated(undurable)
-	r.broadcastControl(model.ControlMessage{
-		Kind:   model.ControlRoomClosed,
-		Reason: model.ReasonEditsNotSaved,
-		Error:  "recent edits could not be saved and have been discarded",
-	})
 	// Tear down WITHOUT flushing: the whole reason we are here is that the store
 	// will not accept writes, and the teardown matrix forbids persisting a document
 	// whose durability is in doubt (FR-011a).
-	r.teardown(nil)
+	r.teardown(model.NewSessionEnd(model.CodeEditsNotSaved), nil)
 }
 
 // undurableFor reports how long the document has been failing to persist.

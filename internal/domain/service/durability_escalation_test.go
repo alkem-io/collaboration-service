@@ -88,8 +88,8 @@ func TestEscalationIsCountedNamedAndExplained(t *testing.T) {
 	}
 
 	// 3. A disconnect reason that says what happened.
-	if !hasControlReason(a, model.ControlRoomClosed, model.ReasonEditsNotSaved) {
-		t.Fatalf("clients were disconnected without %q; a generic close leaves them assuming their work was saved", model.ReasonEditsNotSaved)
+	if !hasControlCode(a, model.CodeEditsNotSaved) {
+		t.Fatalf("clients were disconnected without %q; a generic close leaves them assuming their work was saved", model.CodeEditsNotSaved)
 	}
 
 	// The room is torn down, and NOT flushed on the way out — the teardown matrix

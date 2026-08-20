@@ -251,13 +251,23 @@ func joinCloseStatus(err error) (websocket.StatusCode, string) {
 	switch {
 	case errors.Is(err, service.ErrRoomFull):
 		return websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached
-	case errors.Is(err, service.ErrForbidden):
+	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrDocumentUnknown):
+		// ONE refusal for both. A separate status or reason for "no such document"
+		// would let anyone holding a socket enumerate which document ids exist by
+		// reading the close code, so the two are deliberately identical on the
+		// wire and separable only in the server's own logs.
 		return websocket.StatusPolicyViolation, "forbidden"
 	case errors.Is(err, service.ErrDocumentPurging):
 		// A policy close, not an internal one: the document is being deleted, so a
-		// blind reconnect is pointless. It mirrors the room-closed reason a client
+		// blind reconnect is pointless. It mirrors the document-deleted reason a client
 		// already in the room receives from the same cascade.
 		return websocket.StatusPolicyViolation, "document deleted"
+	case errors.Is(err, service.ErrShuttingDown):
+		// The pod is going away mid-join. That is not an internal error, and
+		// closing 1011 told the client it was one — so a client reconnecting into
+		// a rolling deploy saw a server fault rather than "come back". It matches
+		// the session-end shutdown case a joined client would have received.
+		return websocket.StatusGoingAway, model.CodeServerShutdown
 	default:
 		return websocket.StatusInternalError, "join failed"
 	}

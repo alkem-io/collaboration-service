@@ -16,14 +16,18 @@ import (
 // drops it (which forces its awareness eviction). Other members are untouched —
 // a limit breach or forced read-only is per-connection (FR-024, constitution §V).
 // A failed control send still drops the member (the connection is already gone).
-func (r *Room) disconnect(id connID, reason string) {
+func (r *Room) disconnect(id connID, code model.SessionEndCode) {
 	m, ok := r.members[id]
 	if !ok {
 		return
 	}
-	if frame := encodeControl(model.ControlMessage{Kind: model.ControlRoomClosed, Error: reason}); frame != nil {
+	// ScopeMember, so the client can tell this from a room that ended: the room is
+	// still serving everyone else, and only this connection is over.
+	end := model.NewSessionEnd(code)
+	if frame := encodeControl(end.Control()); frame != nil {
 		_ = m.conn.Send(frame)
 	}
+	m.conn.CloseAfterDrain(end)
 	if r.dropMember(id) {
 		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomUserChange, Users: len(r.members)})
 	}
@@ -95,12 +99,13 @@ func (r *Room) flushContribution(ctx context.Context) {
 	r.contributors = make(map[string]struct{})
 }
 
-// purge runs the owner-delete cascade on the run loop (T015): it tells every
-// connected client the room is closing (room-closed), purges the snapshot blob and
-// the metadata index, and lets the caller release the room. Idempotent — a
+// purge runs the owner-delete cascade on the run loop (T015): it purges the
+// snapshot blob and the metadata index, and lets the caller release the room.
+// Telling the connected clients is the teardown funnel's job (document-deleted),
+// so the cascade cannot announce a different reason than the one it tears down
+// with. Idempotent — a
 // not-found blob/metadata delete is success (constitution §V, lifecycle-events.md).
 func (r *Room) purge(ctx context.Context) error {
-	r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomClosed, Error: "document deleted"})
 	del, err := r.deps.deleter()
 	if err != nil {
 		return err

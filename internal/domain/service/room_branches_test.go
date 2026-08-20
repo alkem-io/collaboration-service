@@ -223,6 +223,11 @@ func TestJoinReturnsRoomUnavailableAfterRetries(t *testing.T) {
 	mgr.rooms["dead"] = dead
 	mgr.mu.Unlock()
 
+	// Join now requires the document to exist; register it so the test exercises
+	// the behaviour it is actually about.
+	if err := mgr.PreRegister(context.Background(), model.Metadata{ID: "dead", ContentType: model.ContentTypeMemo}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
 	_, _, err := mgr.Join(context.Background(), JoinRequest{ID: "dead", Content: model.ContentTypeMemo, Conn: &captureConn{}})
 	if !errors.Is(err, errRoomUnavailable) {
 		t.Fatalf("Join err = %v, want errRoomUnavailable", err)
@@ -515,8 +520,8 @@ func TestFinishIsIdempotent(t *testing.T) {
 	released := 0
 	room.onReleased = func() { released++ }
 
-	room.finish()
-	room.finish() // must not panic (double close) and must not re-notify
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil) // must not panic (double close) and must not re-notify
 
 	if released != 1 {
 		t.Fatalf("onReleased fired %d times, want exactly 1", released)

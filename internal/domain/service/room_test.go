@@ -40,6 +40,42 @@ type fakeClient struct {
 	ephemeral [][]byte // type-2 ephemeral payloads (post-frame)
 	control   []model.ControlMessage
 	blocked   bool // simulates the inbound side of a network partition: Send drops frames
+
+	// ended records the session end the room closed this connection with, and
+	// toldBeforeClose whether the session-end CONTROL had already arrived when it
+	// did. The second is the ordering assertion. Counting frames instead would
+	// race whatever else is in flight, so a test could see "more frames than
+	// before" and pass even though the close came first.
+	ended           *model.SessionEnd
+	toldBeforeClose bool
+}
+
+// CloseAfterDrain implements service.Conn: the room ends this connection. The
+// fake records the intent rather than tearing anything down, and captures
+// whether the reason had already been delivered — the only moment that is
+// observable.
+func (c *fakeClient) CloseAfterDrain(end model.SessionEnd) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended != nil {
+		return
+	}
+	e := end
+	c.ended = &e
+	for _, m := range c.control {
+		if m.Kind == model.ControlSessionEnd {
+			c.toldBeforeClose = true
+			break
+		}
+	}
+}
+
+// sessionEnd returns the recorded end and whether the session-end control had
+// already reached this client when the close was queued.
+func (c *fakeClient) sessionEnd() (*model.SessionEnd, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ended, c.toldBeforeClose
 }
 
 func newFakeClient(t *testing.T) *fakeClient {
@@ -110,12 +146,43 @@ func (c *fakeClient) Send(frame []byte) error {
 	return nil
 }
 
+// joinExisting is join for a test whose metadata store is rigged to fail writes:
+// the document already "exists" as far as Load is concerned, so pre-registering
+// it (a Save) would fail for reasons the test is not about.
+func (c *fakeClient) joinExisting(m *Manager, id model.DocumentID, content model.ContentType) {
+	c.t.Helper()
+	session, initial, err := m.Join(context.Background(), JoinRequest{
+		ID: id, Content: content, Identity: c.identity, Conn: c,
+	})
+	if err != nil {
+		c.t.Fatalf("join: %v", err)
+	}
+	c.mu.Lock()
+	c.session = session
+	c.mu.Unlock()
+	for _, f := range initial {
+		_ = c.Send(f)
+	}
+	c.withDoc(func(doc *ycrdt.Doc) {
+		c.session.Forward(protocol.EncodeSyncStep1(doc))
+	})
+}
+
 // join attaches the client to the room manager, applies the server's initial
 // frames (the server's SyncStep1 + awareness snapshot), and then drives the
 // client's own SyncStep1 so the server replies with the structs the client is
 // missing. This is the full y-websocket bidirectional handshake.
 func (c *fakeClient) join(m *Manager, id model.DocumentID, content model.ContentType) {
 	c.t.Helper()
+	// The document has to EXIST before anyone can connect to it — Join refuses an
+	// id the metadata store has never heard of (Manager.requireDocument). In the
+	// Alkemio deployment the memo/whiteboard row is that record and is created
+	// long before a socket opens; a standalone test has to create it itself, which
+	// is exactly what PreRegister is for. Tests that exercise the gate deliberately
+	// skip this and call Manager.Join directly.
+	if err := m.PreRegister(context.Background(), model.Metadata{ID: id, ContentType: content}); err != nil {
+		c.t.Fatalf("pre-register %s: %v", id, err)
+	}
 	session, initial, err := m.Join(context.Background(), JoinRequest{
 		ID: id, Content: content, Identity: c.identity, Conn: c,
 	})

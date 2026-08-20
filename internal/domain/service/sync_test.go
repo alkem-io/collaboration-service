@@ -148,6 +148,11 @@ type captureConn struct {
 	frames int
 }
 
+// CloseAfterDrain implements service.Conn. This double only counts frames, so an
+// end intent needs no recording; ordering is asserted against fakeClient, which
+// records both.
+func (c *captureConn) CloseAfterDrain(_ model.SessionEnd) {}
+
 func (c *captureConn) Send(_ []byte) error {
 	c.mu.Lock()
 	c.frames++

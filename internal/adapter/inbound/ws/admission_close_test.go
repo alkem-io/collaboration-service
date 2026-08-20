@@ -10,7 +10,6 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
@@ -32,7 +31,7 @@ func (f fixedAuthZ) Evaluate(context.Context, model.Identity, model.DocumentID, 
 func serverWithAuthZ(t *testing.T, authz fixedAuthZ) string {
 	t.Helper()
 	mgr := service.NewManager(service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authz,
@@ -107,7 +106,7 @@ func TestAnAuthZOutageClosesWithATransientStatus(t *testing.T) {
 func TestEachConnectionIsAuthorizedAfresh(t *testing.T) {
 	authz := &togglingAuthZ{allowed: true}
 	mgr := service.NewManager(service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authz,

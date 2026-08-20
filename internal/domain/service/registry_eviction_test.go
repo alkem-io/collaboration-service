@@ -97,7 +97,7 @@ func TestRoomTornDownDuringMaterializationReleasesItsRegistrySlot(t *testing.T) 
 
 	// The abort: torn down without ever being registered, exactly as acquire does
 	// when a shutdown or a purge cascade wins the race.
-	room.teardown(nil)
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	if residentInRegistry(t, reg, doc) {
 		t.Fatal("a room torn down before registration left its document resident; nothing else evicts it, so that document is retained for the life of the process")

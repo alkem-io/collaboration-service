@@ -259,10 +259,24 @@ func TestTombstoneIsLiftedOnceTheCascadeCompletes(t *testing.T) {
 		t.Fatalf("purge of an absent document should be a no-op: %v", err)
 	}
 
+	// The tombstone is scoped to the cascade, so it is gone — but the document
+	// still does not exist, and THAT is what refuses the join now. Asserting the
+	// specific error is the point: a bare "err != nil" would pass just as happily
+	// if the tombstone had become permanent, which is the bug this guards.
 	a := newFakeClient(t)
-	if _, _, err := mgr.Join(context.Background(), JoinRequest{
+	_, _, err := mgr.Join(context.Background(), JoinRequest{
 		ID: doc, Content: model.ContentTypeMemo, Identity: a.identity, Conn: a,
-	}); err != nil {
-		t.Fatalf("join after the cascade completed: %v", err)
+	})
+	if !errors.Is(err, ErrDocumentUnknown) {
+		t.Fatalf("join after the cascade = %v, want ErrDocumentUnknown", err)
 	}
+	if errors.Is(err, ErrDocumentPurging) {
+		t.Fatal("the tombstone outlived its cascade")
+	}
+
+	// And the id is not burned: re-creating the document makes it joinable again.
+	// The existence gate has no permanent "deleted" state to conflict with a
+	// legitimate re-creation — which a durable tombstone keyed on the id would.
+	b := newFakeClient(t)
+	b.join(mgr, doc, model.ContentTypeMemo)
 }

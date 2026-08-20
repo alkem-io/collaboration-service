@@ -92,7 +92,7 @@ func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoom: %v", err)
 	}
-	t.Cleanup(room.finish)
+	t.Cleanup(releaseRoom(room))
 
 	if room.content != model.ContentTypeWhiteboard {
 		t.Fatalf("room.content = %q, want whiteboard (persisted type must win over the stale handshake)", room.content)

@@ -9,7 +9,6 @@ import (
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/service"
 )
@@ -28,7 +27,7 @@ import (
 // report the problem is a close frame, which clients retry.
 func TestExplicitlyUnknownContentTypeIsRejectedBeforeTheUpgrade(t *testing.T) {
 	mgr := service.NewManager(service.Deps{
-		Metadata:   metainmem.New(),
+		Metadata:   openDocs(),
 		Checkpoint: persistinprocess.New(),
 		Auth:       authopen.New(),
 		AuthZ:      authopen.New(),

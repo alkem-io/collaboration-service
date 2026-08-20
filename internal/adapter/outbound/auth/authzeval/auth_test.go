@@ -152,13 +152,35 @@ func TestEvaluatePolicyResolveFailureFailsClosed(t *testing.T) {
 	}
 }
 
-func TestEvaluateUnknownDocumentFailsClosed(t *testing.T) {
+// TestEvaluateUnknownDocumentIsACleanDenial asserts that a document which does
+// not exist is DENIED, not failed.
+//
+// The distinction is the whole point. An error here fails closed and the socket
+// closes 1011 "join failed" — an internal-error code every client retries — so
+// each reconnect to a deleted document became a permanent hot loop against a
+// server fault that was not one. A clean denial closes 1008 like every other
+// refusal: accurate (no grant exists on a document that does not exist) and
+// identical to a forbidden document, so it cannot be used to probe which ids
+// exist.
+//
+// This is NOT a weakening of fail-closed. "The document is gone" is an ANSWER;
+// only "we could not ask" is a failure, and that still errors — see
+// TestEvaluatePolicyResolveFailureFailsClosed, which drives a store error
+// through the same path and still requires an error.
+//
+// Non-vacuity: drop the errors.Is(err, model.ErrNotFound) branch in Evaluate and
+// this returns an error instead of a denial, failing here.
+func TestEvaluateUnknownDocumentIsACleanDenial(t *testing.T) {
 	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeEval(w, true, "")
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{}})
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "absent", model.PrivilegeRead); err == nil {
-		t.Error("expected an error for a document with no resolvable policy")
+	decision, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "absent", model.PrivilegeRead)
+	if err != nil {
+		t.Fatalf("unknown document must be a clean denial, got error: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("unknown document was ALLOWED; a document that does not exist can grant nothing")
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -142,6 +143,21 @@ func (a *Adapter) Evaluate(ctx context.Context, identity model.Identity, id mode
 	}
 	policyID, err := a.policies.PolicyID(ctx, id)
 	if err != nil {
+		// A document that DOES NOT EXIST is a clean denial, not a failure to
+		// decide. The distinction matters at the socket: an error here fails
+		// closed and closes 1011 "join failed", which clients read as a server
+		// fault and retry forever — so every reconnect to a deleted document
+		// became a permanent hot loop against an internal-error code. A denial
+		// closes 1008 alongside every other refusal, which is both accurate (no
+		// grant exists, and none can) and indistinguishable from a forbidden
+		// document, so this cannot be used to probe which ids exist.
+		//
+		// Only not-found takes this path. A transport failure or an unreachable
+		// metadata backend still fails closed: "we could not ask" must never be
+		// downgraded to "the answer is no" (constitution §V).
+		if errors.Is(err, model.ErrNotFound) {
+			return model.AuthDecision{}, nil
+		}
 		return model.AuthDecision{}, fmt.Errorf("resolve authorization policy for %s: %w", id, err)
 	}
 	if policyID == "" {

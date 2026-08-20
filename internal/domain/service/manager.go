@@ -22,10 +22,14 @@ import (
 // tearing down under a join race (should be vanishingly rare).
 var errRoomUnavailable = errors.New("collaboration room unavailable")
 
-// errShuttingDown is returned from acquire/Join once Manager.Close has begun, so a
+// ErrShuttingDown is returned from acquire/Join once Manager.Close has begun, so a
 // late connection is refused rather than materializing a room that the shutdown
 // drain snapshot already missed and would never drain (002 FR-001).
-var errShuttingDown = errors.New("collaboration manager is shutting down")
+//
+// Exported so the transport can close with a RETRYABLE status: a pod going away
+// mid-join is the ordinary rolling-deploy case, and closing it as an internal
+// error made clients treat a routine restart as a server fault and retry into it.
+var ErrShuttingDown = errors.New("collaboration manager is shutting down")
 
 // ErrRoomFull is returned from Join when the room is at its connection cap
 // (FR-024 max connections per room). The handshake is refused; existing
@@ -37,6 +41,14 @@ var ErrRoomFull = errors.New("collaboration room is full")
 // deleted, and admitting a connection mid-cascade is how deleted content comes
 // back (see Manager.Purge).
 var ErrDocumentPurging = errors.New("collaboration document is being deleted")
+
+// ErrDocumentUnknown is returned from Join when no document with that id exists.
+//
+// It is deliberately NOT distinguishable from a denial on the wire — both close
+// with the same status and reason — so the service cannot be used to enumerate
+// which document ids exist. It is separate from ErrForbidden only so the server
+// side can tell them apart in logs and metrics.
+var ErrDocumentUnknown = errors.New("collaboration document does not exist")
 
 // ErrForbidden is returned from Join when per-document authorization denies the
 // connecting actor read access (a clean deny, not an error — the connection is
@@ -226,6 +238,18 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		return nil, nil, err
 	}
 
+	// THEN check the document exists — after authorization, never before. Ordering
+	// here is a disclosure property, not a preference: a check that ran first
+	// would answer "does document X exist?" for any id an unauthorized caller
+	// cared to name, turning the service into an enumeration oracle for private
+	// content. Authorization refuses those callers before existence is consulted,
+	// and an unknown document is refused with the SAME external result as a
+	// forbidden one (see joinCloseStatus), so the two are indistinguishable from
+	// outside.
+	if err := m.requireDocument(ctx, req.ID); err != nil {
+		return nil, nil, err
+	}
+
 	// Retry once if the acquired room tears down between acquire and join (a
 	// narrow race where the last member left and the idle timer fired). A second
 	// acquire materializes a fresh room.
@@ -256,6 +280,35 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		}
 	}
 	return nil, nil, errRoomUnavailable
+}
+
+// requireDocument refuses a join for a document that does not exist, before the
+// room is materialized.
+//
+// The metadata store IS the existence record, and it is durable in every
+// deployment that has one: in the Alkemio topology `collaboration-fetch`
+// resolves against the memo and whiteboard rows in `server`'s own database, so
+// "not found" means the owning entity is gone — deleted, or never created. That
+// makes this gate survive a process restart and hold regardless of what the
+// client does, which an in-memory tombstone could not.
+//
+// It is what stops a deleted document from coming back. The owner-delete
+// tombstone only spans the cascade itself (beginPurge/endPurge); once it lifts,
+// a reconnect used to materialize a fresh empty room, seed it, and write content
+// and an index row back for a document the owner had deleted. With no
+// authorization configured there was nothing else in the way.
+//
+// A store error that is NOT not-found fails closed: an unreachable backend must
+// not be read as "the document is gone", which would tear down a live document
+// during an outage.
+func (m *Manager) requireDocument(ctx context.Context, id model.DocumentID) error {
+	if _, err := m.deps.Metadata.Load(ctx, id); err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrDocumentUnknown, id)
+		}
+		return fmt.Errorf("resolve document %s: %w", id, err)
+	}
+	return nil
 }
 
 // authorizeSession evaluates the connecting identity's capability for one
@@ -293,7 +346,7 @@ func (m *Manager) authorizeSession(ctx context.Context, id model.DocumentID, ide
 }
 
 // Purge runs the owner-delete cascade for a document (FR-023, T015): it
-// disconnects any connected clients (room-closed), releases the in-memory room,
+// disconnects any connected clients (session-end/document-deleted), releases the in-memory room,
 // and purges the metadata index + the snapshot blob. It is idempotent — deleting
 // a document with no live room still purges the durable rows, and deleting an
 // absent document is a no-op. The room (when live) performs the durable purge on
@@ -403,7 +456,7 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	}
 	if m.closed {
 		m.mu.Unlock()
-		return nil, errShuttingDown
+		return nil, ErrShuttingDown
 	}
 	m.mu.Unlock()
 
@@ -428,7 +481,7 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 		}
 		if m.closed {
 			m.mu.Unlock()
-			return nil, errShuttingDown
+			return nil, ErrShuttingDown
 		}
 		m.mu.Unlock()
 
@@ -446,7 +499,7 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 			// live room on a document being deleted, and its first flush would write
 			// the content back. Tear the fresh, never-served room down instead.
 			m.mu.Unlock()
-			room.teardown(nil)
+			room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 			return nil, ErrDocumentPurging
 		}
 		if m.closed {
@@ -454,8 +507,8 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 			// drain snapshot already missed (it would never be drained). Tear the
 			// fresh, never-served room down directly.
 			m.mu.Unlock()
-			room.teardown(nil)
-			return nil, errShuttingDown
+			room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
+			return nil, ErrShuttingDown
 		}
 		m.rooms[id] = room
 		m.mu.Unlock()

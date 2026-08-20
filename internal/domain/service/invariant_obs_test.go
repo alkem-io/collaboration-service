@@ -256,7 +256,7 @@ func TestFailedSaveLeavesStoredStateIntact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoom: %v", err)
 	}
-	t.Cleanup(room.finish)
+	t.Cleanup(releaseRoom(room))
 
 	insertText(room.doc, "first")
 	room.dirty = true

@@ -95,7 +95,7 @@ func TestConcurrentFirstOpensRestoreExactlyOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newRoom %d: %v", i, err)
 		}
-		t.Cleanup(rooms[i].finish)
+		t.Cleanup(releaseRoom(rooms[i]))
 	}
 
 	// EXACTLY ONE restore, however many rooms raced for the document.

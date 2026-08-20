@@ -50,8 +50,10 @@ func TestSendInitialWaitsForQueueSpaceInsteadOfShedding(t *testing.T) {
 	default:
 	}
 
-	// Make room the way the writer goroutine would, and the pending send lands.
+	// Make room the way the writer goroutine would — take the item off AND
+	// announce the freed slot, which is what wakes a bounded waiter.
 	<-wc.send
+	wc.releaseSpace()
 	select {
 	case err := <-second:
 		if err != nil {

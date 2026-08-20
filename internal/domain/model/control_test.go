@@ -90,3 +90,34 @@ func TestControlMessageCollaboratorMode(t *testing.T) {
 		t.Fatalf("marshal = %s, want %s", string(b), want)
 	}
 }
+
+// TestNewSessionEndRejectsAnUnknownCode pins the fail-loud choice.
+//
+// A code with no table entry has no scope and no disposition, so a zero value
+// would reach the client as an empty disposition — a value it cannot branch on,
+// leaving it unable to decide whether to reconnect. Panicking makes that a
+// developer-visible error at the moment the code is emitted rather than a silent
+// nothing at the far end of a socket.
+func TestNewSessionEndRejectsAnUnknownCode(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("an unlisted code produced a session end instead of panicking; it would reach the client with no disposition")
+		}
+	}()
+	_ = NewSessionEnd("not-a-real-code")
+}
+
+// TestSessionEndControlCarriesEveryTypedField asserts the control message built
+// from an end carries all three fields, since the client branches on each and an
+// omitted one is indistinguishable from an absent value on the wire.
+func TestSessionEndControlCarriesEveryTypedField(t *testing.T) {
+	for _, code := range SessionEndCodes() {
+		msg := NewSessionEnd(code).Control()
+		if msg.Kind != ControlSessionEnd {
+			t.Errorf("kind = %q, want %q", msg.Kind, ControlSessionEnd)
+		}
+		if msg.Code == "" || msg.Scope == "" || msg.Disposition == "" {
+			t.Errorf("control for %q has an empty field: %+v", code, msg)
+		}
+	}
+}

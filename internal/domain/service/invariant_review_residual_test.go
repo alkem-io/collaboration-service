@@ -29,7 +29,7 @@ func TestInvTeardownBalancesConnGauge(t *testing.T) {
 	room.members[3] = roomMember{id: 3, conn: &captureConn{}}
 	metrics.connsOpen.Store(3)
 
-	room.teardown(nil)
+	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	if c := metrics.connsClosed.Load(); c != 3 {
 		t.Fatalf("teardown closed %d connections, want 3 (connections_active gauge leaks by %d)", c, 3-c)
@@ -90,7 +90,7 @@ func TestInvRateLimitChargesMalformedFrames(t *testing.T) {
 
 	waitFor(t, "malformed-frame flood disconnected (rate charged before parse)", func() bool {
 		for _, m := range controlMessages(c) {
-			if m.Kind == model.ControlRoomClosed && m.Error == "update rate exceeded" {
+			if m.Kind == model.ControlSessionEnd && m.Code == model.CodeUpdateRateExceeded {
 				return true
 			}
 		}
