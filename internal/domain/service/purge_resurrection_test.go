@@ -15,161 +15,198 @@ import (
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
+	"github.com/alkem-io/collaboration-service/internal/domain/port"
 
 	"go.uber.org/zap"
 )
 
-// gatedDeleteStore is an in-process CheckpointStore that parks inside
-// Delete, AFTER the content is gone but BEFORE the caller moves on to
-// the index row. That is the resurrection window, and parking there is what makes
-// the race deterministic instead of a timing lottery.
-type gatedDeleteStore struct {
-	*persistinprocess.Store
+// gatedMeta performs the FIRST existence read, then parks holding its RESULT.
+//
+// The ORDER inside Load is the whole point, and getting it backwards makes the
+// test prove nothing. It reads the inner store FIRST and only then blocks,
+// returning the value it captured. So while it is parked, the test can delete the
+// row — and the Join still receives the positive answer it got a moment earlier.
+// That is a genuine STALE READ: old epoch, plus an existence result that was true
+// when taken and is false by the time it is used.
+//
+// Blocking before the inner read instead would just return not-found once the row
+// was gone, the existence gate would refuse the Join, and the epoch would never be
+// exercised at all.
+//
+// Parking here rather than inside a delete is not a convenience: there is no
+// delete left to park inside. `server` performs the durable deletion before it
+// publishes, so CloseDeleted returns immediately and its window has no duration
+// to exploit.
+type gatedMeta struct {
+	port.MetadataStore
 	once    sync.Once
 	entered chan struct{}
 	release chan struct{}
 }
 
-func newGatedDeleteStore() *gatedDeleteStore {
-	return &gatedDeleteStore{
-		Store:   persistinprocess.New(),
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
+func newGatedMeta(inner port.MetadataStore) *gatedMeta {
+	return &gatedMeta{
+		MetadataStore: inner,
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
 	}
 }
 
-func (g *gatedDeleteStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	if err := g.Store.Delete(ctx, req); err != nil {
-		return err
-	}
-	// sync.Once: the cascade may reach this twice (the room-loop purge, then the
-	// Manager's idempotent durable fallback), and only the first passage is the
-	// window under test.
+func (g *gatedMeta) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
+	meta, err := g.MetadataStore.Load(ctx, id)
 	g.once.Do(func() {
 		close(g.entered)
 		<-g.release
 	})
-	return nil
+	return meta, err
 }
 
-// newGatedManager wires a Manager over a store that can be parked mid-cascade.
-func newGatedManager(t *testing.T) (*Manager, *gatedDeleteStore, *metainmem.Store) {
+// newGatedManager wires a Manager whose first existence read can be parked.
+func newGatedManager(t *testing.T) (*Manager, *persistinprocess.Store, *gatedMeta, *serverOwnedMeta) {
 	t.Helper()
-	store := newGatedDeleteStore()
-	meta := metainmem.New()
+	store := persistinprocess.New()
+	owned := &serverOwnedMeta{MetadataStore: metainmem.New(), gone: map[model.DocumentID]bool{}}
+	meta := newGatedMeta(owned)
 	open := authopen.New()
 	mgr := NewManager(Deps{
-
 		Metadata:   meta,
 		Checkpoint: store,
 		Auth:       open,
 		AuthZ:      open,
 	}, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
-		IdleTimeout:  10 * time.Second, // long: only the cascade releases a room
+		IdleTimeout:  10 * time.Second, // long: only an explicit close releases a room
 		SendBuffer:   256,
 	}, nil, zap.NewNop())
-	return mgr, store, meta
+	return mgr, store, meta, owned
 }
 
-// TestJoinRacingTheCascadeCannotResurrectDurableContent is the decisive case for
-// the owner-delete ordering: refuse new acquisitions FIRST, then delete.
+// TestAJoinThatPassedExistenceBeforeTheDeleteIsNotAdmitted is the decisive race
+// for the owner-delete slice, and the reason the per-id tombstone was replaced.
 //
-// The window is on the no-live-room path. Between deleting the content and
-// deleting the index row, a Join finds no room, materializes a fresh one, loads
-// no checkpoint, seeds an empty document — and that room is now live on a
-// document the owner deleted. Its first flush writes content and an index row
-// back. Deleting in the other order does not help; it only changes which artifact
-// is orphaned. The fix is a tombstone consulted by acquire, so the racing Join is
-// refused instead of served.
+// The interleaving is the whole test. A client's Join captures the delete epoch,
+// reads that the document exists — and THEN the owner deletes it. Everything that
+// read is based on is now stale, but the Join has already passed the durable
+// gate, so nothing downstream would refuse it on existence. If it is admitted, it
+// materializes a room on a document that no longer exists, seeds it empty because
+// `server` removed the checkpoint, and its first edit flushes content back.
 //
-// Non-vacuity: drop the tombstone check from acquire and the Join below is
-// admitted, and the test then drives the resurrection to completion so the
-// failure names what actually came back rather than merely reporting a missing
-// error.
-func TestJoinRacingTheCascadeCannotResurrectDurableContent(t *testing.T) {
-	mgr, store, meta := newGatedManager(t)
+// The old per-id tombstone caught this only by accident: it was raised for the
+// duration of two backend deletes. Those deletes are gone, so CloseDeleted now
+// returns in microseconds and a duration-based guard catches nothing. The epoch
+// does not depend on duration.
+//
+// Non-vacuity: it drives an admitted Join all the way to the harm — a REVISION
+// advance on the seeded checkpoint — so a failure names what came back rather
+// than merely reporting a missing error. It goes RED if the epoch is never
+// bumped.
+//
+// It does NOT discriminate WHERE inside acquire the refusal happens. The Join
+// arrives already carrying a stale epoch, so the fast-path check alone catches it
+// and removing a later check leaves this passing. The placements that are
+// independently load-bearing have their own tests:
+// TestAStaleEpochIsRefusedEvenWhenAWarmRoomIsRegistered pins the per-caller
+// post-singleflight check (the only shape that never materializes), and
+// TestACascadeStartingDuringMaterializationLeavesNoLiveRoom pins the final
+// pre-insert check (the only shape where the delete lands mid-materialization).
+func TestAJoinThatPassedExistenceBeforeTheDeleteIsNotAdmitted(t *testing.T) {
+	mgr, store, meta, owned := newGatedManager(t)
+	t.Cleanup(mgr.Close)
 
-	const doc model.DocumentID = "resurrect-durable"
+	const doc model.DocumentID = "raced-by-a-delete"
 
-	// Durable state and an index row, but NO live room: exactly the state a
-	// document is in once its last collaborator has left.
+	// Durable state and an index row, but no live room: the state a document is in
+	// between sessions.
 	seed := newBareRoom(t)
-	insertText(seed.doc, "owner deleted this ")
+	insertText(seed.doc, "content the owner deleted")
 	update, err := ycrdt.EncodeStateAsUpdateV2(seed.doc, nil)
 	if err != nil {
-		t.Fatalf("encode seed state: %v", err)
+		t.Fatalf("encode seed: %v", err)
 	}
 	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
 		DocumentID: backend.DocumentID(doc), Encoding: persistence.EncodingV2,
-		Update:      update,
-		StateVector: []byte("derived-on-read"),
+		Update: update, StateVector: []byte("derived-on-read"),
 	}); err != nil {
 		t.Fatalf("seed durable state: %v", err)
 	}
 	if err := meta.Save(context.Background(), model.Metadata{ID: doc, ContentType: model.ContentTypeMemo}); err != nil {
 		t.Fatalf("seed metadata row: %v", err)
 	}
-	if mgr.RoomCount() != 0 {
-		t.Fatalf("precondition: expected no live room, got %d", mgr.RoomCount())
+	before, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc))
+	if err != nil {
+		t.Fatalf("read the seeded revision: %v", err)
 	}
 
-	purged := make(chan error, 1)
-	go func() { purged <- mgr.Purge(context.Background(), doc) }()
-
-	// Park the cascade in the window: content gone, index row still present.
-	select {
-	case <-store.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("cascade never reached the checkpoint delete")
-	}
-
-	// THE RACE: a client connects while the cascade is mid-flight.
+	// The Join starts FIRST and parks inside its existence read, holding the
+	// pre-delete epoch.
 	joiner := newFakeClient(t)
-	session, _, joinErr := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: joiner.identity, Conn: joiner,
-	})
-	if joinErr == nil {
-		reportResurrection(t, joiner, session, store, purged, doc)
+	type joinOutcome struct {
+		session *Session
+		err     error
 	}
-	if !errors.Is(joinErr, ErrDocumentPurging) {
-		t.Fatalf("Join during the cascade must be refused with ErrDocumentPurging, got %v", joinErr)
-	}
-
-	close(store.release)
+	outcome := make(chan joinOutcome, 1)
+	go func() {
+		s, _, err := mgr.Join(context.Background(), JoinRequest{
+			ID: doc, Content: model.ContentTypeMemo, Identity: joiner.identity, Conn: joiner,
+		})
+		outcome <- joinOutcome{s, err}
+	}()
 	select {
-	case err := <-purged:
-		if err != nil {
-			t.Fatalf("purge: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("purge did not complete after the gate released")
+	case <-meta.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the join never reached its existence read")
 	}
 
-	// The consequence the refusal exists to prevent: nothing durable survives, and
-	// no room was left behind holding the document.
-	if _, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc)); err == nil {
-		t.Fatal("stored state survived the cascade: content was resurrected")
+	// Production order, both halves. `server` removes the row — the parked Join is
+	// already holding the positive answer it read a moment ago, so its result is now
+	// stale — and then the event reaches collab.
+	owned.serverRemoved(doc)
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("CloseDeleted: %v", err)
 	}
-	if _, err := meta.Load(context.Background(), doc); err == nil {
-		t.Fatal("metadata row survived the cascade: the document was resurrected in the index")
+
+	close(meta.release)
+
+	var got joinOutcome
+	select {
+	case got = <-outcome:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the join never completed")
+	}
+
+	if got.err == nil {
+		reportResurrection(t, joiner, got.session, store, doc, before.Revision)
+	}
+	if !errors.Is(got.err, errRoomUnavailable) {
+		t.Fatalf("join = %v, want errRoomUnavailable: a stale admission must be refused transiently so the client reconnects into a fresh existence read", got.err)
 	}
 	if mgr.RoomCount() != 0 {
-		t.Fatalf("a room was materialized during the cascade: %d live", mgr.RoomCount())
+		t.Fatalf("%d room(s) registered for a document deleted mid-join", mgr.RoomCount())
+	}
+	after, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc))
+	if err != nil {
+		t.Fatalf("read the revision after the refusal: %v", err)
+	}
+	if after.Revision != before.Revision {
+		t.Fatalf("revision advanced %d -> %d without an admitted session; something flushed for a deleted document", before.Revision, after.Revision)
 	}
 }
 
-// reportResurrection is reached only when the tombstone is absent: the racing
-// Join was admitted. It drives the window to the actual harm — an edit on the
-// resurrected room flushing durable content back for a deleted document — so the
-// failure names what came back rather than merely reporting a missing error.
+// reportResurrection is reached only when the refusal failed: the racing Join was
+// admitted. It drives the window to the actual harm — an edit on the resurrected
+// room flushing content back for a deleted document — so the failure names what
+// came back rather than merely reporting a missing error.
+//
+// It waits for the REVISION to advance, not for a checkpoint to exist: the
+// document was seeded, so "a checkpoint exists" was already true before the race
+// and would report a false success.
 func reportResurrection(
 	t *testing.T,
 	joiner *fakeClient,
 	session *Session,
-	store *gatedDeleteStore,
-	purged <-chan error,
+	store *persistinprocess.Store,
 	doc model.DocumentID,
+	seededRevision persistence.Revision,
 ) {
 	t.Helper()
 	joiner.mu.Lock()
@@ -177,106 +214,13 @@ func reportResurrection(
 	joiner.mu.Unlock()
 	joiner.observeUpdates()
 	joiner.insertText("resurrected ")
-	close(store.release)
-	<-purged
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc)); err == nil {
-			t.Fatal("a Join admitted inside the cascade wrote durable content back for a deleted document")
+		if cp, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc)); err == nil && cp.Revision > seededRevision {
+			t.Fatal("a Join admitted after the document was deleted wrote durable content back for it")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("a Join landing inside the owner-delete cascade was admitted; it holds a live room on a deleted document")
-}
-
-// TestJoinRacingALiveRoomCascadeIsRefusedCleanly covers the other cascade path.
-//
-// Here the retry budget in Join already prevented resurrection by accident: the
-// draining room stays registered for the length of the cascade, so both acquire
-// attempts hand it back, both enqueues bounce off a room in teardown, and the
-// caller gets errRoomUnavailable. That is the right outcome for the wrong reason
-// — it reports a transient "try again" for a document that is being deleted, and
-// it depends on the cascade outlasting two attempts. With the tombstone the
-// refusal is explicit and does not rest on that timing.
-func TestJoinRacingALiveRoomCascadeIsRefusedCleanly(t *testing.T) {
-	mgr, store, _ := newGatedManager(t)
-
-	const doc model.DocumentID = "resurrect-live"
-
-	a := newFakeClient(t)
-	a.join(mgr, doc, model.ContentTypeMemo)
-	a.observeUpdates()
-	a.insertText("owner deleted this ")
-	waitFor(t, "snapshot persisted", func() bool {
-		_, err := store.LoadCheckpoint(context.Background(), backend.DocumentID(doc))
-		return err == nil
-	})
-
-	purged := make(chan error, 1)
-	go func() { purged <- mgr.Purge(context.Background(), doc) }()
-
-	select {
-	case <-store.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("cascade never reached the checkpoint delete")
-	}
-
-	b := newFakeClient(t)
-	_, _, joinErr := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: b.identity, Conn: b,
-	})
-	if !errors.Is(joinErr, ErrDocumentPurging) {
-		t.Fatalf("Join during a live-room cascade must be refused with ErrDocumentPurging, got %v", joinErr)
-	}
-
-	close(store.release)
-	select {
-	case err := <-purged:
-		if err != nil {
-			t.Fatalf("purge: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("purge did not complete after the gate released")
-	}
-	waitFor(t, "room released", func() bool { return mgr.RoomCount() == 0 })
-}
-
-// TestTombstoneIsLiftedOnceTheCascadeCompletes asserts the tombstone is scoped to
-// the cascade rather than permanent. A document id is not poisoned for the life
-// of the process — once the delete is done, a later connect is an ordinary open,
-// which authorization decides. A tombstone that leaked would silently make every
-// re-created document unjoinable until restart.
-func TestTombstoneIsLiftedOnceTheCascadeCompletes(t *testing.T) {
-	mgr, _ := testManager(t, RoomConfig{
-		SaveDebounce: 10 * time.Millisecond,
-		IdleTimeout:  10 * time.Second,
-		SendBuffer:   256,
-	})
-
-	const doc model.DocumentID = "recreate-me"
-	if err := mgr.Purge(context.Background(), doc); err != nil {
-		t.Fatalf("purge of an absent document should be a no-op: %v", err)
-	}
-
-	// The tombstone is scoped to the cascade, so it is gone — but the document
-	// still does not exist, and THAT is what refuses the join now. Asserting the
-	// specific error is the point: a bare "err != nil" would pass just as happily
-	// if the tombstone had become permanent, which is the bug this guards.
-	a := newFakeClient(t)
-	_, _, err := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: a.identity, Conn: a,
-	})
-	if !errors.Is(err, ErrDocumentUnknown) {
-		t.Fatalf("join after the cascade = %v, want ErrDocumentUnknown", err)
-	}
-	if errors.Is(err, ErrDocumentPurging) {
-		t.Fatal("the tombstone outlived its cascade")
-	}
-
-	// And the id is not burned: re-creating the document makes it joinable again.
-	// The existence gate has no permanent "deleted" state to conflict with a
-	// legitimate re-creation — which a durable tombstone keyed on the id would.
-	b := newFakeClient(t)
-	b.join(mgr, doc, model.ContentTypeMemo)
+	t.Fatal("a Join that passed existence before the delete was admitted; it holds a live room on a deleted document")
 }

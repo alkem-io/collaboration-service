@@ -94,25 +94,6 @@ func (s *Store) Save(ctx context.Context, meta model.Metadata) error {
 	return nil
 }
 
-// Delete purges the document index over collaboration-delete (the owner-delete
-// cascade). Idempotent: the server treats an absent row as success.
-func (s *Store) Delete(ctx context.Context, id model.DocumentID) error {
-	var reply DeleteReply
-	if err := s.rpc.Call(ctx, PatternDelete, DeleteData{ID: string(id)}, &reply); err != nil {
-		return fmt.Errorf("collaboration-delete: %w", err)
-	}
-	if reply.Error != "" {
-		return fmt.Errorf("collaboration-delete: %s", reply.Error)
-	}
-	// Mirror Save: a success=false reply with no error string is still a failure
-	// (the server reports success=true for an already-absent row, so this does
-	// not break delete idempotency).
-	if !reply.Success {
-		return fmt.Errorf("collaboration-delete: server reported failure")
-	}
-	return nil
-}
-
 // Contribution emits the fire-and-forget collaboration-contribution event: the
 // per-window set of contributing actor ids (FR-014). It satisfies
 // port.Contributor so the room can carry the north-star metric forward to the

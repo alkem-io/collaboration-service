@@ -12,22 +12,22 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// CollabLifecycle is the slice of the domain Manager the standalone create/delete
-// API drives (T016): the same pre-register / cascade-purge the RabbitMQ lifecycle
-// consumer uses, so the no-bus HTTP path and the bus path share one
-// implementation (DRY, constitution §VIII). The concrete service.Manager
-// satisfies it.
+// CollabLifecycle is the slice of the domain Manager the standalone create API
+// drives (T016). The concrete service.Manager satisfies it.
+//
+// There is no delete counterpart. `document.deleted` now only closes and evicts a
+// live room — `server` deletes the durable state before publishing — so a
+// standalone DELETE would have reported success while removing nothing. An
+// endpoint that misreports what it did is worse than no endpoint (§II), and the
+// standalone REST surface is accepted for removal regardless.
 type CollabLifecycle interface {
 	// PreRegister writes an initial metadata row ahead of first connect.
 	PreRegister(ctx context.Context, meta model.Metadata) error
-	// Purge runs the owner-delete cascade (disconnect, release, purge durable).
-	Purge(ctx context.Context, id model.DocumentID) error
 }
 
-// CollabAPIHandler serves the standalone document create/delete REST API for the
-// no-bus deployment (FR-020/FR-023). In Alkemio mode the RabbitMQ lifecycle
-// consumer drives the same Manager methods; this HTTP surface is the standalone
-// equivalent (contracts/lifecycle-events.md "Standalone equivalent").
+// CollabAPIHandler serves the standalone document create REST API for the no-bus
+// deployment (FR-020). In Alkemio mode `server` owns document creation; this HTTP
+// surface is the standalone equivalent.
 type CollabAPIHandler struct {
 	// Lifecycle is the domain manager the handlers drive.
 	Lifecycle CollabLifecycle
@@ -73,19 +73,6 @@ type CreateDocumentResponse struct {
 func (r CreateDocumentResponse) Render(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(r)
-}
-
-// DeleteCollabResponse is returned by DELETE /collab/{documentId}: the purged id.
-type DeleteCollabResponse struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
-}
-
-// Render writes the response as JSON with HTTP 200.
-func (r DeleteCollabResponse) Render(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(r)
 }
 
@@ -161,36 +148,6 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	CreateDocumentResponse{ID: id, ContentType: string(content)}.Render(w)
-}
-
-// Delete runs the owner-delete cascade for the standalone deployment: the no-bus
-// equivalent of the document.deleted lifecycle event. It disconnects connected
-// clients, releases the room, and purges the metadata + snapshot. Idempotent at
-// the domain layer (deleting an absent document is success); a genuine purge
-// failure surfaces as 500.
-//
-// @Summary     Delete a collaboration document
-// @Description Cascade-purges a document (disconnect clients, release the room,
-// @Description delete metadata + snapshot) — the no-bus equivalent of the
-// @Description document.deleted lifecycle event.
-// @Tags        collaboration
-// @Produce     json
-// @Param       documentId path string true "Document id"
-// @Success     200 {object} DeleteCollabResponse
-// @Failure     400 {object} ErrorResponse
-// @Failure     500 {object} ErrorResponse
-// @Router      /collab/{documentId} [delete]
-func (h *CollabAPIHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "documentId")
-	if id == "" {
-		ErrorResponse{Error: "missing document id"}.Render(w, http.StatusBadRequest)
-		return
-	}
-	if err := h.Lifecycle.Purge(r.Context(), model.DocumentID(id)); err != nil {
-		ErrorResponse{Error: "failed to delete document"}.Render(w, http.StatusInternalServerError)
-		return
-	}
-	DeleteCollabResponse{ID: id, Deleted: true}.Render(w)
 }
 
 // resolveContentType maps the request's content type to a domain ContentType,

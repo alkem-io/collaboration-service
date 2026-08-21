@@ -94,7 +94,7 @@ func TestStartLifecycleSurfacesABrokerFailure(t *testing.T) {
 
 	err := startLifecycle(cfg, mgr, zap.NewNop(), &closers)
 	if err == nil {
-		t.Fatal("an unusable broker URL must fail startup rather than leaving the cascade unwired")
+		t.Fatal("an unusable broker URL must fail startup rather than leaving the lifecycle consumer unwired")
 	}
 	if !strings.Contains(err.Error(), "lifecycle consumer") {
 		t.Fatalf("error = %v, want it to name the lifecycle consumer; this service opens TWO RabbitMQ connections and an unnamed failure does not say which", err)

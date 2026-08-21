@@ -1,5 +1,5 @@
 // Package service is the application core of the collaboration-service hexagon:
-// room lifecycle (lazy materialize on connect, release/purge on idle/delete),
+// room lifecycle (lazy materialize on connect, release on idle, close on delete),
 // y-protocols sync + awareness orchestration, debounced snapshot persistence,
 // presence/limits, and the document-delete cascade. It depends only on the
 // domain ports (internal/domain/port) and types (internal/domain/model) — never
@@ -13,7 +13,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/uuid"
 
@@ -56,31 +55,6 @@ type Deps struct {
 	// registry, which is correct for a lone room (one room owns one document) and
 	// keeps a directly-constructed Room usable.
 	Registry memory.Registry
-}
-
-// deleter returns the checkpoint store's deletion capability
-// (persistence.Deleter, adopted from the core in go-yjs v0.0.3).
-//
-// Deletion is OPTIONAL in the contract, and deliberately so: some media are
-// forbidden to delete (WORM storage, object locks, regulated archival tiers), and
-// a mandatory Delete cannot express that. A caller that needs erasure therefore
-// type-asserts and fails loudly when it is absent, which beats a store whose
-// Delete silently does nothing.
-//
-// It is derived from Checkpoint rather than wired as a separate Deps field on
-// purpose: the two must be the SAME instance, and a struct with both invites
-// wiring one store as the reader and a different one as the deleter — a bug that
-// compiles, passes most tests, and silently fails to delete anything.
-//
-// app.New asserts persistence.DeletingCheckpointStore at construction, so a store
-// that cannot delete fails startup rather than surfacing here when an owner
-// deletes a document.
-func (d Deps) deleter() (persistence.Deleter, error) {
-	del, ok := d.Checkpoint.(persistence.Deleter)
-	if !ok {
-		return nil, fmt.Errorf("checkpoint store %T cannot delete documents; the owner-delete cascade requires it", d.Checkpoint)
-	}
-	return del, nil
 }
 
 // noopContributor is the standalone default used when Deps.Contributor is nil:

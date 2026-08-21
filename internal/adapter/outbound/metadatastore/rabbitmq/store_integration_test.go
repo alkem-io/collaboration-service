@@ -48,7 +48,7 @@ func startEchoConsumer(t *testing.T, url, queue string) func() {
 			_ = json.Unmarshal(d.Body, &env)
 			var resp any
 			switch env.Pattern {
-			case PatternSave, PatternDelete:
+			case PatternSave:
 				resp = map[string]bool{"success": true}
 			case PatternFetch:
 				resp = FetchReply{Found: true, ContentType: "memo", Version: 1, ContentPointer: "ptr"}
@@ -98,8 +98,5 @@ func TestRabbitMQRoundTrip(t *testing.T) {
 	}
 	if meta.ContentPointer != "ptr" {
 		t.Errorf("Load = %+v", meta)
-	}
-	if err := store.Delete(ctx, "d"); err != nil {
-		t.Fatalf("Delete: %v", err)
 	}
 }

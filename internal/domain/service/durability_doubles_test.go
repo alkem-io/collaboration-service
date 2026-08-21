@@ -61,10 +61,6 @@ func (s *outageStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID)
 	return s.inner.LoadCheckpoint(ctx, id)
 }
 
-func (s *outageStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	return s.inner.Delete(ctx, req)
-}
-
 func (s *outageStore) FenceMode() persistence.FenceMode { return s.inner.FenceMode() }
 
 // durabilityMetrics records the durability signals so a test can assert on the

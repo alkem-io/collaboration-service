@@ -14,9 +14,9 @@ jobs:
     # them, and a failing contract fails the build like any other test.
     #
     # The OpenAPI staleness gate stays disabled: this service is WebSocket-first
-    # and exposes no apispec-annotated REST surface. It was previously pencilled in
-    # for the standalone create/delete HTTP API, which constitution v3.0.0 §III
-    # withdrew along with the standalone deployment.
+    # and its only REST surface is the standalone create endpoint plus /healthz,
+    # neither of which justifies the gate. The standalone deployment itself was
+    # withdrawn by constitution v3.0.0 §III.
     uses: antst/alkemio-github-workflows/.github/workflows/go-ci.yml@v1
     permissions:
       contents: read

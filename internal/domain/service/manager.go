@@ -7,10 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
-	"github.com/antst/go-yjs/backend/persistence"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -35,12 +33,6 @@ var ErrShuttingDown = errors.New("collaboration manager is shutting down")
 // (FR-024 max connections per room). The handshake is refused; existing
 // collaborators are unaffected.
 var ErrRoomFull = errors.New("collaboration room is full")
-
-// ErrDocumentPurging is returned from Join while an owner-delete cascade is in
-// flight for the document. It is a refusal, not a failure: the document is being
-// deleted, and admitting a connection mid-cascade is how deleted content comes
-// back (see Manager.Purge).
-var ErrDocumentPurging = errors.New("collaboration document is being deleted")
 
 // ErrDocumentUnknown is returned from Join when no document with that id exists.
 //
@@ -123,11 +115,15 @@ type Manager struct {
 	// no room is materialized after the shutdown drain snapshot (002 FR-001).
 	closed bool
 
-	// purging is the owner-delete tombstone set: while a document's id is present,
-	// acquire refuses to materialize a room for it. Refcounted rather than a bare
-	// set so two concurrent Purges of one document cannot have the first to finish
-	// lift the tombstone out from under the second.
-	purging map[model.DocumentID]int
+	// deleteEpoch counts owner-deletes, and invalidates admissions in flight across
+	// one. Join captures it before its existence read; acquire re-checks it under
+	// this mutex. Any delete in between refuses the acquisition, whichever way the
+	// two interleave — the guarantee does not depend on a delete taking any
+	// particular amount of time, which is what a per-id marker would have needed.
+	//
+	// It is Manager-wide, so an UNRELATED document's deletion also refuses: a rare
+	// transient retry for one connecting client, never a false admission.
+	deleteEpoch uint64
 
 	// sf collapses concurrent first-connects for the same document onto ONE
 	// materialization, so newRoom runs OFF mu (002 FR-010 — no lock across I/O).
@@ -178,7 +174,6 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 		metrics:  metrics,
 		logger:   logger,
 		rooms:    make(map[model.DocumentID]*Room),
-		purging:  make(map[model.DocumentID]int),
 	}
 }
 
@@ -246,6 +241,13 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 	// and an unknown document is refused with the SAME external result as a
 	// forbidden one (see joinCloseStatus), so the two are indistinguishable from
 	// outside.
+	// Capture the delete epoch IMMEDIATELY BEFORE the existence read, so the pair
+	// "the row existed" and "no delete has happened since" is checked against one
+	// point in time. Reading it after would leave the gap this closes.
+	m.mu.Lock()
+	epoch := m.deleteEpoch
+	m.mu.Unlock()
+
 	if err := m.requireDocument(ctx, req.ID); err != nil {
 		return nil, nil, err
 	}
@@ -254,7 +256,7 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 	// narrow race where the last member left and the idle timer fired). A second
 	// acquire materializes a fresh room.
 	for attempt := 0; attempt < 2; attempt++ {
-		room, err := m.acquire(ctx, req.ID, req.Content)
+		room, err := m.acquire(ctx, req.ID, req.Content, epoch)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -290,13 +292,17 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 // resolves against the memo and whiteboard rows in `server`'s own database, so
 // "not found" means the owning entity is gone — deleted, or never created. That
 // makes this gate survive a process restart and hold regardless of what the
-// client does, which an in-memory tombstone could not.
+// client does, which no in-memory marker could.
 //
-// It is what stops a deleted document from coming back. The owner-delete
-// tombstone only spans the cascade itself (beginPurge/endPurge); once it lifts,
-// a reconnect used to materialize a fresh empty room, seed it, and write content
-// and an index row back for a document the owner had deleted. With no
-// authorization configured there was nothing else in the way.
+// It is what stops a deleted document from coming back on a RECONNECT, and it is
+// the only thing that does: the delete epoch invalidates admissions already in
+// flight, but it is a counter, not a record of which ids are gone — a client
+// connecting a second later captures the current epoch and sails past it. Only
+// this read knows the document no longer exists.
+//
+// The two are complementary and neither is redundant. This gate cannot catch a
+// Join that read the row BEFORE the owner deleted it; the epoch cannot catch a
+// Join that starts afterwards.
 //
 // A store error that is NOT not-found fails closed: an unreachable backend must
 // not be read as "the document is gone", which would tear down a live document
@@ -345,88 +351,76 @@ func (m *Manager) authorizeSession(ctx context.Context, id model.DocumentID, ide
 	return model.ModeViewer, nil
 }
 
-// Purge runs the owner-delete cascade for a document (FR-023, T015): it
-// disconnects any connected clients (session-end/document-deleted), releases the in-memory room,
-// and purges the metadata index + the snapshot blob. It is idempotent — deleting
-// a document with no live room still purges the durable rows, and deleting an
-// absent document is a no-op. The room (when live) performs the durable purge on
-// its own run loop so the Y.Doc's single-writer invariant holds; when no room is
-// live the Manager purges directly.
-func (m *Manager) Purge(ctx context.Context, id model.DocumentID) error {
-	// ORDER IS LOAD-BEARING: refuse new acquisitions, THEN tear the room down,
-	// THEN delete. Without the first step the cascade has a resurrection window —
-	// a Join landing between the content delete and the index delete materializes
-	// a fresh room, finds no checkpoint, seeds an empty document, and its first
-	// flush writes content and an index row back for a document the owner deleted.
-	// The tombstone closes that window by making the racing Join fail
-	// (ErrDocumentPurging) instead of materializing.
-	m.beginPurge(id)
-	defer m.endPurge(id)
-
+// CloseDeleted reacts to the owner deleting a document (FR-023, T015): it
+// disconnects connected clients with session-end/document-deleted and releases
+// the in-memory room. It DELETES NOTHING.
+//
+// `server` removes the entity, profile, storage bucket and checkpoint blob before
+// it enqueues the outbox row that becomes this event, so by the time it arrives
+// the durable state is already gone. Idempotent in both directions: a document
+// with no live room is a no-op, and a repeated event closes an already-closed
+// room without error.
+//
+// The room (when live) runs its own teardown on its run loop so the Y.Doc's
+// single-writer invariant holds, and that teardown deliberately does NOT flush —
+// flushing would write content back for a document that no longer exists.
+func (m *Manager) CloseDeleted(ctx context.Context, id model.DocumentID) error {
+	// ORDER IS LOAD-BEARING: invalidate in-flight admissions, THEN tear the room
+	// down — and both under the same mutex the admission path uses, or the two can
+	// interleave with nothing to see each other.
+	//
+	// Without the first step there is a resurrection window. A Join that already
+	// passed the existence gate (server's row was still there) materializes a fresh
+	// room, finds no checkpoint because server deleted it, seeds an empty document,
+	// and once a session is admitted its first edit flushes content back for a
+	// document the owner deleted. Bumping the epoch here makes that Join refuse
+	// admission instead.
+	//
+	// The Join-time existence gate is the SECOND line of defence, not a
+	// replacement: it refuses an unknown id and server's row is already gone by the
+	// time this event arrives — but a Join that read the row BEFORE the delete has
+	// already passed it, and only the epoch catches that one.
 	m.mu.Lock()
+	m.deleteEpoch++
 	room, live := m.rooms[id]
 	m.mu.Unlock()
 
 	if live {
 		done := make(chan error, 1)
-		if room.enqueue(command{kind: cmdPurge, done2: done}) {
-			select {
-			case err := <-done:
-				return err
-			case <-room.done:
-				// The room tore down without running our purge — its run loop exited
-				// after our enqueue won the buffered-send race, so `done` is never
-				// written and a bare `<-done` would block forever. Fall through to the
-				// direct durable purge below; it is idempotent, so even a purge that
-				// DID run is harmless to repeat.
+		if !room.enqueueCtx(ctx, command{kind: cmdCloseDeleted, done2: done}) {
+			// enqueueCtx refuses for two opposite reasons, and they must not be
+			// conflated. A room that is no longer active is the outcome we wanted —
+			// it already tore down. A room that is STILL active means the caller's
+			// deadline elapsed against a wedged run loop, which is transient and must
+			// be retried, or the document keeps a live room nobody will ever close.
+			if room.lc.is(stateActive) {
+				// TWO different reasons land here, and only one of them has a ctx
+				// error. enqueueCtx also gives up on its OWN enqueueDeadline while the
+				// caller's context is still perfectly healthy — wrapping a nil
+				// ctx.Err() there would render as %!w(<nil>) and wrap nothing.
+				if cerr := ctx.Err(); cerr != nil {
+					return fmt.Errorf("close for %s: a live room did not accept it: %w", id, cerr)
+				}
+				return fmt.Errorf("close for %s: %w", id, errRoomUnavailable)
 			}
+			return nil
 		}
-		// The room tore down between lookup and enqueue; fall through to a direct
-		// durable purge so no orphan is left.
+		select {
+		case err := <-done:
+			return err
+		case <-room.done:
+			// The room tore down without running our command — its run loop exited
+			// after our enqueue won the buffered-send race, so `done` is never
+			// written and a bare `<-done` would block forever. The room is gone,
+			// which is the outcome we wanted.
+		case <-ctx.Done():
+			// Accepted but not completed inside the deadline. Transient: the broker
+			// redelivers, and this same deadline is what paces that retry — no sleep
+			// and no retry state of our own.
+			return fmt.Errorf("close for %s: accepted but not completed: %w", id, ctx.Err())
+		}
 	}
-	return m.purgeDurable(ctx, id)
-}
-
-// beginPurge raises the owner-delete tombstone for id, so acquire refuses to
-// materialize a room for it until the cascade finishes.
-func (m *Manager) beginPurge(id model.DocumentID) {
-	m.mu.Lock()
-	m.purging[id]++
-	m.mu.Unlock()
-}
-
-// endPurge lowers the tombstone raised by beginPurge. The tombstone is scoped to
-// the cascade, not permanent: once the document is gone, a later connect is an
-// ordinary open of a non-existent document, which authorization decides — not
-// something this map should be adjudicating forever.
-func (m *Manager) endPurge(id model.DocumentID) {
-	m.mu.Lock()
-	if m.purging[id] <= 1 {
-		delete(m.purging, id)
-	} else {
-		m.purging[id]--
-	}
-	m.mu.Unlock()
-}
-
-// purgeDurable deletes the metadata row and the snapshot blob for a document with
-// no live room. It resolves the blob pointer from the metadata row (a missing row
-// means nothing to purge). Idempotent: not-found is success.
-func (m *Manager) purgeDurable(ctx context.Context, id model.DocumentID) error {
-	// Delete the durable state FIRST, then the index row. The deleter is
-	// idempotent, so a document that never had stored state is not an error, and
-	// the index row is what makes the state findable — dropping it first would
-	// orphan the content instead of removing it.
-	del, err := m.deps.deleter()
-	if err != nil {
-		return err
-	}
-	if err := del.Delete(ctx, persistence.DeleteRequest{DocumentID: backend.DocumentID(id)}); err != nil {
-		return err
-	}
-	if err := m.deps.Metadata.Delete(ctx, id); err != nil && !errors.Is(err, model.ErrNotFound) {
-		return err
-	}
+	// No live room: nothing to close, and nothing durable to delete.
 	return nil
 }
 
@@ -437,29 +431,21 @@ func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
 	return m.deps.Metadata.Save(ctx, meta)
 }
 
-// acquire returns the live room for id, creating and starting it under the lock
-// if absent so two concurrent first-connects share one room. The room's release
-// callback removes it from the registry, closing the lazy-create/idle-release
-// loop.
-func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content model.ContentType) (*Room, error) {
-	m.mu.Lock()
-	// The tombstone is checked BEFORE the registry hit, not after: a room that is
-	// already draining under a cascade must not be handed out either, or the
-	// caller's retry loop just races the cascade again on a fresh room.
-	if _, purging := m.purging[id]; purging {
-		m.mu.Unlock()
-		return nil, ErrDocumentPurging
-	}
-	if room, ok := m.rooms[id]; ok {
-		m.mu.Unlock()
-		return room, nil
-	}
-	if m.closed {
-		m.mu.Unlock()
-		return nil, ErrShuttingDown
-	}
-	m.mu.Unlock()
-
+// acquire returns the live room for id, materializing one if absent. A per-id
+// singleflight coalesces concurrent first-connects onto a single materialization,
+// which runs OFF the registry lock; the lock is taken only briefly to register the
+// result, and the room is started after that. Its release callback removes it from
+// the registry, closing the lazy-create/idle-release loop.
+// expectedEpoch is the caller's delete epoch, read before it checked that the
+// document exists. Any owner-delete since then refuses this acquisition: the
+// caller's "it exists" is stale, and admitting on a stale read is how deleted
+// content comes back.
+//
+// A delete of an UNRELATED document also refuses, because the epoch is
+// Manager-wide. That is the deliberate trade: a rare, transient retry for one
+// connecting client, in exchange for never needing per-id bookkeeping whose
+// correctness depended on how long a delete happened to take.
+func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content model.ContentType, expectedEpoch uint64) (*Room, error) {
 	// Materialize OFF the registry lock (002 FR-010): newRoom does backend I/O
 	// (snapshot load, fan-out subscribe) that must NOT run under m.mu, or one
 	// unresponsive backend would wedge every Manager op — including shutdown. A
@@ -468,13 +454,12 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	// Materialization and the run loop outlive the connecting request, so they must
 	// not inherit its cancellation (context.WithoutCancel).
 	v, err, _ := m.sf.Do(string(id), func() (interface{}, error) {
-		// Re-check under the lock — another singleflight winner may have inserted,
-		// or a Purge may have raised the tombstone since the fast path above.
+		// No epoch check here. This function is SHARED: singleflight hands one
+		// execution's result to every caller that deduplicated behind it, and those
+		// callers can hold different epochs. A check here would speak only for
+		// whichever caller happened to lead, so the per-caller check lives after
+		// sf.Do returns instead.
 		m.mu.Lock()
-		if _, purging := m.purging[id]; purging {
-			m.mu.Unlock()
-			return nil, ErrDocumentPurging
-		}
 		if room, ok := m.rooms[id]; ok {
 			m.mu.Unlock()
 			return room, nil
@@ -493,14 +478,19 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 		room.onReleased = func() { m.remove(id, room) }
 
 		m.mu.Lock()
-		if _, purging := m.purging[id]; purging {
-			// A cascade began while this room was materializing OFF the lock. It has
-			// already loaded (or seeded) the document; registering it now would put a
-			// live room on a document being deleted, and its first flush would write
-			// the content back. Tear the fresh, never-served room down instead.
+		if m.deleteEpoch != expectedEpoch {
+			// A delete landed while this room was materializing OFF the lock. This
+			// check is about REGISTRATION, not admission — the per-caller check after
+			// sf.Do already decides who may be admitted. What it prevents is a room
+			// for a just-deleted document being inserted into the registry, where the
+			// delete that raced it has already looked and found nothing to close.
+			//
+			// Tearing down rather than merely declining to register is what stops it
+			// leaking: it was never inserted, so nothing will ever release it, and its
+			// run loop starts with the idle timer stopped.
 			m.mu.Unlock()
 			room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
-			return nil, ErrDocumentPurging
+			return nil, errRoomUnavailable
 		}
 		if m.closed {
 			// A shutdown began during materialization: don't register a room the
@@ -519,6 +509,28 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// THE PER-CALLER EPOCH CHECK, and the reason it is HERE rather than inside the
+	// function above: singleflight collapses concurrent acquisitions of one document
+	// onto a single execution, so a caller holding a stale epoch can be handed a
+	// room produced by a caller holding a fresh one. Only a check outside the shared
+	// function sees this caller's own epoch.
+	//
+	// It also covers the warm-room shape, which never materializes and so never
+	// reaches the pre-insert check: an existing room is returned straight from the
+	// registry, and this is the only thing standing between it and a stale
+	// admission.
+	//
+	// The reverse pairing — a fresh caller behind a stale leader — is refused too,
+	// because the leader's error is shared. That is a transient false retry, the same
+	// trade an unrelated document's deletion already makes, and the client reconnects
+	// into a fresh existence read.
+	m.mu.Lock()
+	stale := m.deleteEpoch != expectedEpoch
+	m.mu.Unlock()
+	if stale {
+		return nil, errRoomUnavailable
 	}
 	return v.(*Room), nil
 }
@@ -549,8 +561,8 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 	}
 	// The registry slot is NOT evicted here. It is evicted by the room's own
 	// teardown, which covers this path and one this path cannot reach: a room torn
-	// down during materialization — a shutdown race, or a purge cascade raising the
-	// tombstone while newRoom ran off the lock — never entered m.rooms, so `removed`
+	// down during materialization — a shutdown race, or a delete bumping the epoch
+	// while newRoom ran off the lock — never entered m.rooms, so `removed`
 	// is false and an evict guarded by it would never run. That room did acquire a
 	// registry handle, so the document would outlive every room that ever owned it
 	// with nothing left to clean it up.

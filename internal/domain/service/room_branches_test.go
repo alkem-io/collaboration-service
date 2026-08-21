@@ -158,48 +158,55 @@ func TestNewManagerNilMetricsDefaultsToNop(t *testing.T) {
 	waitFor(t, "room released", func() bool { return mgr.RoomCount() == 0 })
 }
 
-// TestPurgeFallsThroughToDurableWhenRoomGone asserts Purge purges the durable
-// rows directly when no live room exists (the room-less branch + purgeDurable):
-// deleting a document whose room already released must still remove its metadata
-// and blob, leaving no orphan.
-func TestPurgeFallsThroughToDurableWhenRoomGone(t *testing.T) {
+// TestCloseDeletedOnAColdDocumentDeletesNothing is RED #2 for the owner-delete
+// slice: with no live room there is nothing to close, and nothing to delete.
+//
+// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
+// it enqueues the outbox row that becomes document.deleted, so a delete issued
+// here is at best a redundant round-trip against a bucket that is already gone.
+// This seeds durable state that server has NOT deleted and proves collab leaves
+// it entirely alone — the discriminating half, because a store that still deleted
+// would pass a test that only checked for absence.
+//
+// Non-vacuity: restore either durable delete in CloseDeleted and both assertions
+// below fail.
+func TestCloseDeletedOnAColdDocumentDeletesNothing(t *testing.T) {
 	meta := metainmem.New()
 	blob := persistinprocess.New()
 	open := authopen.New()
 	ctx := context.Background()
 
-	// Seed a durable document with stored state, but never materialize a room.
+	// Durable state that `server` has NOT removed, and no live room.
 	if _, err := blob.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "orphan", Encoding: persistence.EncodingV2, Update: []byte("snapshot"), StateVector: []byte("sv"),
+		DocumentID: "cold", Encoding: persistence.EncodingV2, Update: []byte("snapshot"), StateVector: []byte("sv"),
 	}); err != nil {
 		t.Fatalf("seed stored state: %v", err)
 	}
 	if err := meta.Save(ctx, model.Metadata{
-		ID: "orphan", ContentType: model.ContentTypeMemo,
-		ContentPointer: "file-orphan",
+		ID: "cold", ContentType: model.ContentTypeMemo, ContentPointer: "file-cold",
 	}); err != nil {
 		t.Fatalf("seed metadata: %v", err)
 	}
 
 	mgr := NewManager(Deps{Metadata: meta, Checkpoint: blob, Auth: open, AuthZ: open}, fastConfig(), nil, nil)
-	if err := mgr.Purge(ctx, "orphan"); err != nil {
-		t.Fatalf("Purge: %v", err)
+	if err := mgr.CloseDeleted(ctx, "cold"); err != nil {
+		t.Fatalf("CloseDeleted on a cold document must succeed: %v", err)
 	}
 
-	if _, err := meta.Load(ctx, "orphan"); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("metadata row not purged: err=%v", err)
+	if _, err := meta.Load(ctx, "cold"); err != nil {
+		t.Fatalf("metadata row was touched: err=%v; the row belongs to server and collab must not delete it", err)
 	}
-	if _, err := blob.LoadCheckpoint(ctx, "orphan"); !errors.Is(err, persistence.ErrNotFound) {
-		t.Fatalf("stored state not purged: err=%v", err)
+	if _, err := blob.LoadCheckpoint(ctx, "cold"); err != nil {
+		t.Fatalf("checkpoint was touched: err=%v; the blob belongs to file-service and server already removed it in production", err)
 	}
 }
 
-// TestPurgeDurableAbsentDocumentIsNoOp asserts purging a document with no
+// TestPurgeDurableAbsentDocumentIsNoOp asserts deleting a document with no
 // metadata row (and no live room) is a successful no-op (idempotent delete).
 func TestPurgeDurableAbsentDocumentIsNoOp(t *testing.T) {
 	mgr := NewManager(newTestDeps().Deps, fastConfig(), nil, nil)
-	if err := mgr.Purge(context.Background(), "never-existed"); err != nil {
-		t.Fatalf("purging an absent document must be a no-op, got: %v", err)
+	if err := mgr.CloseDeleted(context.Background(), "never-existed"); err != nil {
+		t.Fatalf("deleting an absent document must be a no-op, got: %v", err)
 	}
 }
 
@@ -632,41 +639,6 @@ func TestSendBufferDefaultsWhenZeroWithOtherTimers(t *testing.T) {
 
 // --- manager.go: purgeDurable blob-delete error ---
 
-// failingDeleteStore is a CheckpointStore whose delete fails, to drive
-// purgeDurable's error branch.
-type failingDeleteStore struct {
-	persistence.CheckpointStore
-}
-
-func (failingDeleteStore) Delete(context.Context, persistence.DeleteRequest) error {
-	return errors.New("blob backend down")
-}
-
-// TestPurgeDurablePropagatesBlobDeleteError asserts a non-NotFound blob Delete
-// error during a room-less purge propagates (so a failed cascade is surfaced, not
-// silently swallowed leaving a half-deleted document).
-func TestPurgeDurablePropagatesBlobDeleteError(t *testing.T) {
-	meta := metainmem.New()
-	open := authopen.New()
-	ctx := context.Background()
-	if err := meta.Save(ctx, model.Metadata{
-		ID: "del-fail", ContentType: model.ContentTypeMemo,
-		ContentPointer: "del-fail",
-	}); err != nil {
-		t.Fatalf("seed metadata: %v", err)
-	}
-
-	mgr := NewManager(Deps{
-		Metadata:   meta,
-		Checkpoint: failingDeleteStore{CheckpointStore: persistinprocess.New()},
-		Auth:       open, AuthZ: open,
-	}, fastConfig(), nil, nil)
-
-	if err := mgr.Purge(ctx, "del-fail"); err == nil {
-		t.Fatal("Purge must propagate a non-NotFound blob delete error")
-	}
-}
-
 // --- room.go: handleLeave / dropMember absent member ---
 
 // TestHandleLeaveAbsentMemberEmitsNoControl asserts leaving a connection that is
@@ -747,7 +719,6 @@ func TestDispatchSyncUnknownSubTagIsNoOp(t *testing.T) {
 
 // compile-time assertions that the local fakes satisfy the adopted contracts.
 var (
-	_ hub.Hub             = erroringSubHub{}
-	_ hub.Hub             = erroringPubHub{}
-	_ persistence.Deleter = failingDeleteStore{}
+	_ hub.Hub = erroringSubHub{}
+	_ hub.Hub = erroringPubHub{}
 )

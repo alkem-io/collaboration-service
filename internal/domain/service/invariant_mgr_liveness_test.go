@@ -33,9 +33,6 @@ func (g *gateMeta) Load(ctx context.Context, id model.DocumentID) (model.Metadat
 	return g.inner.Load(ctx, id)
 }
 func (g *gateMeta) Save(ctx context.Context, m model.Metadata) error { return g.inner.Save(ctx, m) }
-func (g *gateMeta) Delete(ctx context.Context, id model.DocumentID) error {
-	return g.inner.Delete(ctx, id)
-}
 
 // TestInvMgrLivenessAcquireDoesNotHoldLockAcrossIO — INV-MGR-LIVENESS (spec 002
 // FR-010). A single unresponsive backend reached inside newRoom MUST NOT block other

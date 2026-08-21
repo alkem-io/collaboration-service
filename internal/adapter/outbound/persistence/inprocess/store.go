@@ -141,29 +141,3 @@ func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (pers
 }
 
 var _ persistence.CheckpointStore = (*Store)(nil)
-
-// Delete removes a document's durable state (persistence.Deleter).
-//
-// Idempotent: deleting an absent document succeeds. The owner-delete cascade
-// retries, and the second attempt must not fail the operation it is completing.
-//
-// A REJECTED delete leaves the state intact. That is the property that stops a
-// superseded owner erasing what its replacement is serving, so the fence is
-// checked before anything is removed rather than alongside.
-func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.checkFence(req.DocumentID, req.Fence); err != nil {
-		return err
-	}
-	delete(s.blobs, req.DocumentID)
-	delete(s.vectors, req.DocumentID)
-	delete(s.revisions, req.DocumentID)
-	return nil
-}
-
-var _ persistence.DeletingCheckpointStore = (*Store)(nil)

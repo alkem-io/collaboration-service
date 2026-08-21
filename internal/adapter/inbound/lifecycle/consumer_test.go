@@ -15,31 +15,22 @@ import (
 // fakeManager records the lifecycle calls the consumer makes, to assert routing
 // without a live Manager/room.
 type fakeManager struct {
-	mu          sync.Mutex
-	purged      []model.DocumentID
-	registered  []model.Metadata
-	purgeErr    error
-	registerErr error
+	mu       sync.Mutex
+	closed   []model.DocumentID
+	closeErr error
 }
 
-func (f *fakeManager) Purge(_ context.Context, id model.DocumentID) error {
+func (f *fakeManager) CloseDeleted(_ context.Context, id model.DocumentID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.purged = append(f.purged, id)
-	return f.purgeErr
+	f.closed = append(f.closed, id)
+	return f.closeErr
 }
 
-func (f *fakeManager) PreRegister(_ context.Context, meta model.Metadata) error {
+func (f *fakeManager) closedIDs() []model.DocumentID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.registered = append(f.registered, meta)
-	return f.registerErr
-}
-
-func (f *fakeManager) purgedIDs() []model.DocumentID {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]model.DocumentID(nil), f.purged...)
+	return append([]model.DocumentID(nil), f.closed...)
 }
 
 // eventBody builds the NestJS event envelope { pattern, data, id } the consumer
@@ -61,43 +52,22 @@ func newConsumer(mgr Manager) *Consumer {
 	return &Consumer{mgr: mgr, logger: zap.NewNop()}
 }
 
-// TestDocumentDeletedCascades asserts a document.deleted event triggers a Manager
-// purge for the document id (FR-023, SC-010).
-func TestDocumentDeletedCascades(t *testing.T) {
+// TestDocumentDeletedClosesTheRoom asserts a document.deleted event routes to the
+// Manager's close for that document id (FR-023, SC-010).
+func TestDocumentDeletedClosesTheRoom(t *testing.T) {
 	mgr := &fakeManager{}
 	c := newConsumer(mgr)
 
 	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-1"}))
 
-	got := mgr.purgedIDs()
+	got := mgr.closedIDs()
 	if len(got) != 1 || got[0] != "doc-1" {
-		t.Fatalf("purged = %v, want [doc-1]", got)
-	}
-}
-
-// TestDocumentDeletedIdempotentOnError asserts a purge error is swallowed (logged,
-// not propagated) so a redelivery or an absent doc never crashes the consumer.
-func TestDocumentDeletedIdempotentOnError(t *testing.T) {
-	mgr := &fakeManager{purgeErr: errors.New("already gone")}
-	c := newConsumer(mgr)
-	// Must not panic; the error is logged and dropped.
-	c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-2"}))
-}
-
-// TestUnknownPatternIgnored asserts an unrelated pattern is ignored without error
-// (the consumer shares the bus with the metadata-store RPC replies).
-func TestUnknownPatternIgnored(t *testing.T) {
-	mgr := &fakeManager{}
-	c := newConsumer(mgr)
-	c.handle(context.Background(), eventBody(t, "some-other-pattern", map[string]string{"x": "y"}))
-	c.handle(context.Background(), []byte("not json"))
-	if len(mgr.purgedIDs()) != 0 {
-		t.Fatal("unknown pattern triggered a cascade")
+		t.Fatalf("closed = %v, want [doc-1]", got)
 	}
 }
 
 // TestMalformedAndEmptyEventsAreTerminal asserts an event with a malformed or
-// empty-id payload drives no cascade and is judged terminal: no amount of
+// empty-id payload drives no close and is judged terminal: no amount of
 // redelivery makes an unparseable body or a blank id actionable, so it leaves
 // the retry schedule for the dead-letter queue instead of cycling forever.
 func TestMalformedAndEmptyEventsAreTerminal(t *testing.T) {
@@ -110,16 +80,15 @@ func TestMalformedAndEmptyEventsAreTerminal(t *testing.T) {
 		eventBody(t, PatternDocumentDeleted, "not-an-object"),
 	}
 	for i, body := range bodies {
-		if got := c.handle(context.Background(), body); got != ackTerminal {
-			t.Errorf("body %d: handle = %v, want ackTerminal", i, got)
+		if got := c.handle(context.Background(), body); got != rejectPoison {
+			t.Errorf("body %d: handle = %v, want rejectPoison", i, got)
 		}
 	}
 
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
-	if len(mgr.purged)+len(mgr.registered) != 0 {
-		t.Fatalf("empty/malformed events drove a cascade: purged=%v registered=%v",
-			mgr.purged, mgr.registered)
+	if len(mgr.closed) != 0 {
+		t.Fatalf("empty/malformed events drove a close: closed=%v", mgr.closed)
 	}
 }
 
@@ -137,9 +106,9 @@ func TestHandleVerdictsSeparateSuccessFromUnactionable(t *testing.T) {
 		want ackAction
 	}{
 		{"deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"}), ackSuccess},
-		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"}), ackTerminal},
-		{"not-json", []byte("not json"), ackTerminal},
-		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}), ackTerminal},
+		{"unknown-pattern", eventBody(t, "other", map[string]string{"x": "y"}), rejectPoison},
+		{"not-json", []byte("not json"), rejectPoison},
+		{"empty-id-deleted", eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: ""}), rejectPoison},
 	} {
 		if got := c.handle(context.Background(), tc.body); got != tc.want {
 			t.Errorf("%s: handle = %v, want %v", tc.name, got, tc.want)
@@ -147,15 +116,15 @@ func TestHandleVerdictsSeparateSuccessFromUnactionable(t *testing.T) {
 	}
 }
 
-// TestATransientPurgeFailureIsRetriedNotDropped asserts a transient purge failure
-// returns retryLater, so the event goes down the retry ladder rather than being
-// acked away. The cascade is a correctness requirement — document.deleted is the
-// only path that purges a document, so dropping one orphans content the owner
+// TestATransientCloseFailureIsRetriedNotDropped asserts a transient close failure
+// returns requeue, so the broker redelivers it rather than it being
+// acked away. document.deleted is the only path that closes a room for a deleted
+// document, so dropping one leaves a live room serving content the owner
 // believes is gone.
-func TestATransientPurgeFailureIsRetriedNotDropped(t *testing.T) {
-	mgr := &fakeManager{purgeErr: errors.New("backend down")}
+func TestATransientCloseFailureIsRetriedNotDropped(t *testing.T) {
+	mgr := &fakeManager{closeErr: errors.New("backend down")}
 	c := newConsumer(mgr)
-	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != retryLater {
-		t.Fatalf("handle on purge failure = %v, want retryLater", got)
+	if got := c.handle(context.Background(), eventBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-fail"})); got != requeue {
+		t.Fatalf("handle on a refused close = %v, want requeue", got)
 	}
 }

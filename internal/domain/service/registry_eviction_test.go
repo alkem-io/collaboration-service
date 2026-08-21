@@ -96,7 +96,7 @@ func TestRoomTornDownDuringMaterializationReleasesItsRegistrySlot(t *testing.T) 
 	}
 
 	// The abort: torn down without ever being registered, exactly as acquire does
-	// when a shutdown or a purge cascade wins the race.
+	// when a shutdown or an owner-delete wins the race.
 	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	if residentInRegistry(t, reg, doc) {

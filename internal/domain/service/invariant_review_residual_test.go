@@ -14,7 +14,7 @@ import (
 // security consequence) but each becomes a permanent, NON-VACUOUS test here: the
 // per-test comment names exactly which fix it locks and what regression re-opens it.
 
-// TestInvTeardownBalancesConnGauge — finding [1]. teardown (cmdClose/cmdPurge) must
+// TestInvTeardownBalancesConnGauge — finding [1]. teardown (cmdClose/cmdCloseDeleted) must
 // account ConnClosed for every member still attached, because those clients never
 // traverse the per-connection Leave path. Without the balancing walk in teardown the
 // connections_active gauge leaks upward by the live-member count on every forced

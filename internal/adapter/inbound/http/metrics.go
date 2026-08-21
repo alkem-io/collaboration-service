@@ -6,7 +6,6 @@ package http
 
 import (
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -146,7 +145,6 @@ func InitMetrics() {
 			FanoutTotal,
 			FanoutLagSeconds,
 			ContributingActors,
-			LifecycleTransfersTotal,
 			LifecycleQueueReadyDepth,
 			LifecycleDeadLetteredTotal,
 		)
@@ -233,42 +231,23 @@ func (PrometheusMetrics) FanoutFailed() { FanoutTotal.WithLabelValues("error").I
 // unlabeled .Set per room would be last-window-wins).
 func (PrometheusMetrics) ContributingActors(n int) { ContributingActors.Observe(float64(n)) }
 
-// LifecycleTransfersTotal counts lifecycle events republished onto the retry
-// ladder or into the dead-letter queue, by target queue and whether the broker
-// confirmed the publish.
-//
-// The first transfer to a retry tier is the alertable moment. A lifecycle event
-// that failed once means the backend behind the cascade is down, and the ladder
-// buys ~35 minutes before the event reaches the DLQ — which is the window in which
-// a human can act. Waiting for the DLQ to fill up is waiting until it is too late.
-//
-//	increase(collaboration_lifecycle_transfers_total{queue=~".+\\.retry\\..+"}[5m]) > 0
-//
-// outcome="unconfirmed" is separate and more serious: the event was NOT handed to
-// the broker, so it is still an unacknowledged delivery waiting on a channel
-// recycle. A sustained rate there means transfers are not landing at all.
-var LifecycleTransfersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Namespace: "collaboration",
-	Name:      "lifecycle_transfers_total",
-	Help:      "Lifecycle events republished to a retry tier or the DLQ, by target queue and publish outcome.",
-}, []string{"queue", "outcome"})
-
 // LifecycleQueueReadyDepth is the READY message count of each queue in the
 // lifecycle topology.
 //
-// This is the signal LifecycleTransfersTotal cannot give. A counter only goes up,
-// so the increment that put ten events in the DLQ scrolls out of the alert window
-// while the events stay there. Ready depth stays visible until someone drains the
-// queue — and for the DLQ it is exact, because nothing consumes it and nothing
-// dead-letters out of it, so no message there is ever in the parked state below:
+// This is the signal LifecycleDeadLetteredTotal cannot give. A counter only goes
+// up, so the increment that put ten events in the DLQ scrolls out of the alert
+// window while the events stay there. Ready depth stays visible until someone
+// drains the queue — and for the DLQ it is exact, because nothing consumes it and
+// nothing dead-letters out of it, so no message there is ever in the parked state
+// below:
 //
 //	collaboration_lifecycle_queue_ready_depth{queue=~".+\\.dlq"} > 0
 //
 // READY is the honest word, and it makes this a LOWER BOUND on unattended work
-// rather than a measure of it. The number comes from AMQP's queue.declare-ok, which
-// does not report a total, and a message the broker has parked for a pending
-// dead-letter hop is neither ready nor unacknowledged — so it reads as zero here
-// while being present.
+// rather than a measure of it. The number comes from AMQP's queue.declare-ok,
+// which does not report a total, and a message the broker has parked for a hop
+// into a missing DLQ is neither ready nor unacknowledged — so it reads as zero
+// here while being present.
 //
 // The signal for that state is RabbitMQ's own, because only the broker can see it:
 // the `messages` column of `rabbitmqctl list_queues name messages messages_ready`,
@@ -277,13 +256,10 @@ var LifecycleTransfersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 // reachable only while a dead-letter target is missing, and the consumer re-declares
 // the whole topology on every re-attach and every poll, so it is bounded rather than
 // open-ended.
-//
-// Per-tier ready depth stands in for message age, quantized by the ladder: an event
-// in the 30m tier has already survived 30s + 5m.
 var LifecycleQueueReadyDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "collaboration",
 	Name:      "lifecycle_queue_ready_depth",
-	Help:      "Ready message count of each queue in the lifecycle topology (excludes messages parked for a pending dead-letter hop).",
+	Help:      "Ready message count of each queue in the lifecycle topology.",
 }, []string{"queue"})
 
 // PrometheusLifecycleObserver bridges the lifecycle consumer's operational
@@ -291,41 +267,27 @@ var LifecycleQueueReadyDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 // of a Prometheus import (hexagon §I).
 type PrometheusLifecycleObserver struct{}
 
-// EventTransferred counts one republished event by target queue and outcome.
-func (PrometheusLifecycleObserver) EventTransferred(queue string, confirmed bool) {
-	outcome := "unconfirmed"
-	if confirmed {
-		outcome = "confirmed"
-	}
-	LifecycleTransfersTotal.WithLabelValues(queue, outcome).Inc()
-}
-
 // QueueReadyDepth publishes one queue's ready message count.
 func (PrometheusLifecycleObserver) QueueReadyDepth(queue string, ready int) {
 	LifecycleQueueReadyDepth.WithLabelValues(queue).Set(float64(ready))
 }
 
-// LifecycleDeadLetteredTotal counts events reaching the dead-letter queue, by
-// pattern and by how many operator replays they have already survived.
+// LifecycleDeadLetteredTotal counts events rejected to the dead-letter queue, by
+// pattern.
 //
-// The replays label is what a plain DLQ counter cannot give. A replay clears the
-// attempt count by design — otherwise the event returns to the DLQ on its first
-// failure and looks like a replay that worked — so after a replay every event
-// reports "attempt 3" again. Only the replay count separates an event that just
-// failed for the first time from one a person has already sent round the ladder
-// three times:
+// Any non-zero value is actionable: the DLQ now holds ONLY envelopes this service
+// can never act on — unparseable, or a pattern outside the contract — so a
+// message here is a producer/consumer contract mismatch, not a transient failure
+// that might clear itself. Transient failures are requeued and never reach it.
 //
-//	increase(collaboration_lifecycle_dead_lettered_total{replays!="0"}[1h]) > 0
-//
-// That is the escalation signal: the fix that was applied before the last replay
-// did not work, and repeating it will not help.
+//	increase(collaboration_lifecycle_dead_lettered_total[1h]) > 0
 var LifecycleDeadLetteredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "collaboration",
 	Name:      "lifecycle_dead_lettered_total",
-	Help:      "Lifecycle events moved to the dead-letter queue, by pattern and prior operator replays.",
-}, []string{"pattern", "replays"})
+	Help:      "Lifecycle events rejected to the dead-letter queue as unactionable, by pattern.",
+}, []string{"pattern"})
 
-// EventDeadLettered counts one event reaching the DLQ.
-func (PrometheusLifecycleObserver) EventDeadLettered(pattern string, replays int32) {
-	LifecycleDeadLetteredTotal.WithLabelValues(pattern, strconv.FormatInt(int64(replays), 10)).Inc()
+// EventDeadLettered counts one event rejected to the DLQ.
+func (PrometheusLifecycleObserver) EventDeadLettered(pattern string) {
+	LifecycleDeadLetteredTotal.WithLabelValues(pattern).Inc()
 }

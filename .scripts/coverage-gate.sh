@@ -23,9 +23,7 @@
 # scope — including lifecycle.NopObserver, kept in observer_nop.go for exactly
 # this reason. Everything else — every domain rule and adapter — must clear the bar.
 #
-# The exclusion covers the entrypoint only, never the logic behind it. cmd/
-# lifecycle-replay is a flag parser in front of lifecycle.Replay, and Replay
-# itself is inside the bar and covered against a real broker.
+# The exclusion covers the entrypoint only, never the logic behind it.
 #
 # Usage:
 #   .scripts/coverage-gate.sh [threshold]

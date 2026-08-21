@@ -4,8 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/antst/go-yjs/backend"
-	"github.com/antst/go-yjs/backend/persistence"
 	"github.com/google/uuid"
 
 	"go.uber.org/zap"
@@ -204,24 +202,4 @@ func (r *Room) settleContributionFlight() {
 // second producer — it only returns a batch that was collected while enabled.
 func (r *Room) contributionEnabled() bool {
 	return r.cfg.ContributionWindow > 0
-}
-
-// purge runs the owner-delete cascade on the run loop (T015): it purges the
-// snapshot blob and the metadata index, and lets the caller release the room.
-// Telling the connected clients is the teardown funnel's job (document-deleted),
-// so the cascade cannot announce a different reason than the one it tears down
-// with. Idempotent — a
-// not-found blob/metadata delete is success (constitution §V, lifecycle-events.md).
-func (r *Room) purge(ctx context.Context) error {
-	del, err := r.deps.deleter()
-	if err != nil {
-		return err
-	}
-	if err := del.Delete(ctx, persistence.DeleteRequest{DocumentID: backend.DocumentID(r.id)}); err != nil {
-		return err
-	}
-	if err := r.deps.Metadata.Delete(ctx, r.id); err != nil && !isNotFound(err) {
-		return err
-	}
-	return nil
 }

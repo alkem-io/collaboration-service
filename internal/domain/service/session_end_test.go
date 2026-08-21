@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -163,54 +164,6 @@ func TestMembersAreToldBeforeTheyAreClosed(t *testing.T) {
 	}
 }
 
-// TestEveryTeardownPathEndsTheSocket walks the teardown paths that can hold
-// members and requires each to end its connections with a code.
-//
-// Four of the nine teardown paths used to close nothing at all: the socket was
-// left open, the member deleted from the room, and the client's later frames
-// silently discarded by a room that no longer existed. The panic and
-// generation-invalidation paths were two of them, which is why they are here
-// alongside the ones that always announced.
-func TestEveryTeardownPathEndsTheSocket(t *testing.T) {
-	cases := []struct {
-		name string
-		code model.SessionEndCode
-		run  func(t *testing.T, mgr *Manager, doc model.DocumentID)
-	}{
-		{"graceful shutdown", model.CodeServerShutdown, func(_ *testing.T, mgr *Manager, _ model.DocumentID) {
-			mgr.Close()
-		}},
-		{"owner delete", model.CodeDocumentDeleted, func(t *testing.T, mgr *Manager, doc model.DocumentID) {
-			if err := mgr.Purge(context.Background(), doc); err != nil {
-				t.Fatalf("purge: %v", err)
-			}
-		}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			mgr, _ := testManager(t, fastConfig())
-			const doc model.DocumentID = "teardown-path"
-			a := newFakeClient(t)
-			a.join(mgr, doc, model.ContentTypeMemo)
-
-			tc.run(t, mgr, doc)
-
-			waitFor(t, "member ended", func() bool {
-				end, _ := a.sessionEnd()
-				return end != nil
-			})
-			end, _ := a.sessionEnd()
-			if end.Code != tc.code {
-				t.Errorf("session end = %q, want %q", end.Code, tc.code)
-			}
-			if !hasControlCode(a, tc.code) {
-				t.Errorf("client was closed without a %q control", tc.code)
-			}
-		})
-	}
-}
-
 // --- C: an unknown document is refused before anything is materialized ---
 
 // countingDeps records the durable calls a join makes, so a refusal can be shown
@@ -260,13 +213,12 @@ func countingManager(t *testing.T) (*Manager, *countingDeps, *countingCheckpoint
 
 // TestUnknownDocumentIsRefusedWithoutMaterializing is the resurrection gate.
 //
-// The owner-delete tombstone only spans the cascade itself. Once it lifted, a
-// reconnect to a deleted document materialized a fresh room, seeded an empty
-// document, and its first flush wrote content and an index row back for a
-// document the owner had deleted — with no authorization configured, nothing
-// else stood in the way. The refusal has to happen BEFORE materialization, so
-// this asserts the absence of the work rather than just the presence of an
-// error.
+// The metadata store is the durable existence record, and this is the gate that
+// consults it. Without it, connecting to an id that does not exist materializes a
+// fresh room, seeds an empty document, and its first flush writes content and an
+// index row for a document that was never there — or was deleted. The refusal has
+// to happen BEFORE materialization, so this asserts the absence of the work rather
+// than just the presence of an error.
 //
 // Non-vacuity: delete the requireDocument call from Join and the room is
 // materialized, LoadCheckpoint runs, and the counts below are non-zero.
@@ -291,84 +243,6 @@ func TestUnknownDocumentIsRefusedWithoutMaterializing(t *testing.T) {
 	mgr.mu.Unlock()
 	if rooms != 0 {
 		t.Errorf("%d room(s) left behind for a refused join", rooms)
-	}
-}
-
-// TestDeletedDocumentStaysRefusedAcrossRestart proves the gate is durable rather
-// than a longer-lived in-memory tombstone: a brand-new Manager over the SAME
-// metadata store still refuses. Nothing about the refusal lives in the process
-// that performed the delete.
-func TestDeletedDocumentStaysRefusedAcrossRestart(t *testing.T) {
-	meta := metainmem.New()
-	open := authopen.New()
-	newMgr := func() *Manager {
-		m := NewManager(Deps{
-			Metadata:   meta,
-			Checkpoint: persistinprocess.New(),
-			Auth:       open,
-			AuthZ:      open,
-		}, fastConfig(), nil, nil)
-		t.Cleanup(m.Close)
-		return m
-	}
-
-	const doc model.DocumentID = "deleted-then-restarted"
-	first := newMgr()
-	a := newFakeClient(t)
-	a.join(first, doc, model.ContentTypeMemo)
-	if err := first.Purge(context.Background(), doc); err != nil {
-		t.Fatalf("purge: %v", err)
-	}
-
-	// A different Manager — the process restarted, and its purge tombstone map is
-	// empty. The document is still gone.
-	second := newMgr()
-	b := newFakeClient(t)
-	_, _, err := second.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: b.identity, Conn: b,
-	})
-	if !errors.Is(err, ErrDocumentUnknown) {
-		t.Fatalf("join after restart = %v, want ErrDocumentUnknown", err)
-	}
-}
-
-// TestExistenceGateCostsOneLoadPerJoin measures what the gate actually costs,
-// rather than reasoning about it from the adapter's internals.
-//
-// With `open` authorization there is no policy resolution, so the gate's Load is
-// the only one before materialization and the room's own load follows it. The
-// number is pinned so a future change that turns this into a per-frame or
-// per-retry lookup is visible as a test failure rather than as latency.
-func TestExistenceGateCostsOneLoadPerJoin(t *testing.T) {
-	mgr, meta, _ := countingManager(t)
-	const doc model.DocumentID = "load-count"
-	if err := mgr.PreRegister(context.Background(), model.Metadata{ID: doc, ContentType: model.ContentTypeMemo}); err != nil {
-		t.Fatalf("pre-register: %v", err)
-	}
-	meta.loads.Store(0)
-
-	a := newFakeClient(t)
-	if _, _, err := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: a.identity, Conn: a,
-	}); err != nil {
-		t.Fatalf("join: %v", err)
-	}
-
-	// One for the gate, one for the room's own metadata (version, policy, bucket).
-	if got := meta.loads.Load(); got != 2 {
-		t.Fatalf("Metadata.Load ran %d times for a cold join, want 2 (gate + room)", got)
-	}
-
-	// A SECOND joiner reuses the live room, so only the gate runs.
-	meta.loads.Store(0)
-	b := newFakeClient(t)
-	if _, _, err := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: b.identity, Conn: b,
-	}); err != nil {
-		t.Fatalf("second join: %v", err)
-	}
-	if got := meta.loads.Load(); got != 1 {
-		t.Fatalf("Metadata.Load ran %d times for a join onto a live room, want 1 (gate only)", got)
 	}
 }
 
@@ -409,4 +283,32 @@ func TestInvalidatedGenerationTellsMembersTheirEditsAreGone(t *testing.T) {
 	if !hasControlCode(a, model.CodeEditsNotSaved) {
 		t.Error("the member was not told its unsaved edits were discarded")
 	}
+}
+
+// serverOwnedMeta models the production ownership boundary: `server` owns the
+// metadata row and removes it itself. Collab has no Delete on the MetadataStore
+// port — that method was removed with the owner-delete cascade — so a test that
+// needs the row gone has to take it away from the outside, exactly as the real
+// owner does.
+type serverOwnedMeta struct {
+	port.MetadataStore
+	mu   sync.Mutex
+	gone map[model.DocumentID]bool
+}
+
+// serverRemoved is `server` deleting the row.
+func (m *serverOwnedMeta) serverRemoved(id model.DocumentID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gone[id] = true
+}
+
+func (m *serverOwnedMeta) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
+	m.mu.Lock()
+	removed := m.gone[id]
+	m.mu.Unlock()
+	if removed {
+		return model.Metadata{}, model.ErrNotFound
+	}
+	return m.MetadataStore.Load(ctx, id)
 }

@@ -4,28 +4,22 @@
 //
 // The unit tests drive handle()/processOne() against fakes; those prove what this
 // code does. These prove what the BROKER does with it, which is a separate
-// question and the one that actually bit: RabbitMQ 3.9.13 accepts x-message-ttl
-// and x-dead-letter-strategy on a quorum queue, echoes both back, and then never
-// expires anything. Every argument in the topology is a promise made by the
-// broker, and only a real broker can be asked whether it kept it.
+// question. Every argument in the topology is a promise made by the broker, and
+// only a real broker can be asked whether it kept it — most of all the main
+// queue's argument table, which `server` declares too and which fails
+// PRECONDITION_FAILED if the two ever drift.
 //
 // Run with: go test -tags=integration ./...
 //
 // Required env (skipped when unset):
 //
-//	RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
-//
-// The broker must be >= MinBrokerVersion. Against an older one Connect fails
-// closed with an explanatory error, which is itself the correct outcome.
+//	RABBITMQ_TEST_URL=amqp://user:pass@localhost:5672/
 package lifecycle
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	nethttp "net/http"
-	neturl "net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -41,15 +35,15 @@ import (
 // recordingManager records the lifecycle calls the consumer routes to it.
 type recordingManager struct {
 	mu       sync.Mutex
-	purged   []string
-	purgeErr error
+	closed   []string
+	closeErr error
 }
 
-func (m *recordingManager) Purge(_ context.Context, id model.DocumentID) error {
+func (m *recordingManager) CloseDeleted(_ context.Context, id model.DocumentID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.purged = append(m.purged, string(id))
-	return m.purgeErr
+	m.closed = append(m.closed, string(id))
+	return m.closeErr
 }
 
 func (m *recordingManager) count(list *[]string) int {
@@ -149,95 +143,6 @@ func messageCount(t *testing.T, queue string) int {
 	return q.Messages
 }
 
-// totalMessageCount reads a queue's TOTAL message count — ready plus unacked plus
-// anything the broker is holding for a pending dead-letter hop.
-//
-// queue.declare-ok reports only the READY count, which is not the same number and
-// is the wrong one here: a message retained by at-least-once dead-lettering while
-// its target is unroutable is neither ready nor unacknowledged. Reading the ready
-// count makes a broker doing exactly the right thing look like one that dropped
-// the message. Only the management API exposes the total, so this is the one place
-// the tests reach for it.
-func totalMessageCount(t *testing.T, queue string) int {
-	t.Helper()
-	base := os.Getenv("RABBITMQ_MANAGEMENT_URL")
-	if base == "" {
-		t.Skip("RABBITMQ_MANAGEMENT_URL not set (e.g. http://guest:guest@localhost:15672)")
-	}
-	u, err := neturl.Parse(base)
-	if err != nil {
-		t.Fatalf("parse RABBITMQ_MANAGEMENT_URL: %v", err)
-	}
-	user, pass := "guest", "guest"
-	if u.User != nil {
-		user = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			pass = p
-		}
-	}
-	endpoint := fmt.Sprintf("%s://%s/api/queues/%s/%s", u.Scheme, u.Host, neturl.PathEscape("/"), neturl.PathEscape(queue))
-	req, err := nethttp.NewRequest(nethttp.MethodGet, endpoint, nil)
-	if err != nil {
-		t.Fatalf("build management request: %v", err)
-	}
-	req.SetBasicAuth(user, pass)
-	resp, err := (&nethttp.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		t.Fatalf("management API: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == nethttp.StatusNotFound {
-		return 0
-	}
-	if resp.StatusCode != nethttp.StatusOK {
-		t.Fatalf("management API for %s: HTTP %d", queue, resp.StatusCode)
-	}
-	var q struct {
-		Messages *int `json:"messages"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&q); err != nil {
-		t.Fatalf("decode management response: %v", err)
-	}
-	if q.Messages == nil {
-		return 0
-	}
-	return *q.Messages
-}
-
-// requireStableTotal waits for a queue's total message count to reach want and
-// then STAY there for a settle window.
-//
-// The management API's queue statistics are eventually consistent (they refresh on
-// collect_statistics_interval, 5s by default), so a single sample is flaky in both
-// directions: it can read 0 for a queue that holds a message, and it can read a
-// stale 1 for one that no longer does. Sampling once made this test pass two runs
-// in three. A reading that holds steady across the refresh interval is the weakest
-// claim that is actually true of the broker.
-func requireStableTotal(t *testing.T, queue string, want int, why string) {
-	t.Helper()
-	const settle = 6 * time.Second
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		if totalMessageCount(t, queue) != want {
-			time.Sleep(time.Second)
-			continue
-		}
-		stableUntil := time.Now().Add(settle)
-		steady := true
-		for time.Now().Before(stableUntil) {
-			time.Sleep(time.Second)
-			if got := totalMessageCount(t, queue); got != want {
-				steady = false
-				break
-			}
-		}
-		if steady {
-			return
-		}
-	}
-	t.Fatalf("%s holds %d messages in total, want a steady %d. %s", queue, totalMessageCount(t, queue), want, why)
-}
-
 // envelope builds the NestJS event envelope { pattern, data, id } the producer
 // sends.
 func envelopeBody(t *testing.T, pattern string, data any) []byte {
@@ -293,7 +198,7 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	queue := uniqueName("collab-lifecycle-int")
 	docID := uniqueName("live-doc")
 	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+	deleteQueues(t, names.main, names.dlq)
 
 	mgr := &recordingManager{}
 	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, mgr, zap.NewNop())
@@ -303,36 +208,52 @@ func TestConsumerConsumesLivePublishedEvents(t *testing.T) {
 	t.Cleanup(func() { _ = consumer.Close() })
 
 	_, ch := dialTest(t)
-	// The producer's own declaration of Q1 — the frozen contract. If the argument
-	// SET or its VALUES drift from declareTopology's table the broker refuses one
-	// of them, which is exactly the failure this asserts cannot happen. (Integer
-	// widths are normalized by the broker, so it is the values that must match, not
-	// the Go types.)
+	// A HAND-WRITTEN MIRROR of the producer's declaration of the main queue — the
+	// frozen cross-repo contract, written here as `server` writes it
+	// (server: src/core/microservices/microservices.module.ts). If the argument SET
+	// or its VALUES drift from declareTopology's table, the broker refuses whichever
+	// side declares second with PRECONDITION_FAILED and that side does not start.
+	//
+	// This table is a HAND-WRITTEN MIRROR of what `server` declares, not server's
+	// code. It cannot detect a change made only on that side — server's own
+	// declaration is pinned by its own test (server eb12d945, which landed the
+	// matching dead-letter pair). What this proves is that the two tables, as
+	// written, are equivalent to a real broker: if they were not, the declaration
+	// below fails PRECONDITION_FAILED.
+	//
+	// Keeping the mirror truthful is a manual obligation on both sides, and queue
+	// arguments are immutable, so a divergence is repaired by deleting and
+	// recreating the queue rather than by redeploying. (Integer widths are
+	// normalized by the broker, so it is the values that must match, not the Go
+	// types.)
 	if _, err := ch.QueueDeclare(queue, true, false, false, false, amqp.Table{
-		"x-queue-type":     "quorum",
-		"x-delivery-limit": int32(-1),
+		"x-queue-type":              "quorum",
+		"x-delivery-limit":          int32(-1),
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": queue + ".dlq",
 	}); err != nil {
-		t.Fatalf("the producer's declaration of Q1 was refused: %v", err)
+		t.Fatalf("the producer's declaration of the main queue was refused: %v", err)
 	}
 	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: docID}))
 
-	if !eventually(func() bool { return mgr.has(&mgr.purged, docID) }) {
-		t.Fatal("consumer never cascaded the published document.deleted")
+	if !eventually(func() bool { return mgr.has(&mgr.closed, docID) }) {
+		t.Fatal("consumer never routed the published document.deleted to the Manager")
 	}
 }
 
 // TestQ1RejectsAnInequivalentProducerDeclaration proves the frozen contract is
 // actually enforced by the broker rather than merely agreed in a document.
 //
-// If a producer declares Q1 with different arguments, RabbitMQ refuses with
-// PRECONDITION_FAILED and closes the channel. That is the failure mode the frozen
-// {x-queue-type: quorum} table exists to avoid, and it is why no dead-letter
-// argument may be added to Q1 on this side.
+// If a producer declares the main queue with ANY different argument set or value,
+// RabbitMQ refuses with PRECONDITION_FAILED and closes the channel. That applies
+// to every entry in the frozen table equally — queue type, delivery limit, and the
+// dead-letter pair — so drift on either side is a startup failure rather than
+// silent misbehaviour.
 func TestQ1RejectsAnInequivalentProducerDeclaration(t *testing.T) {
 	url := brokerURL(t)
 	queue := uniqueName("collab-lifecycle-precond")
 	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+	deleteQueues(t, names.main, names.dlq)
 
 	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, &recordingManager{}, zap.NewNop())
 	if err != nil {
@@ -352,41 +273,6 @@ func TestQ1RejectsAnInequivalentProducerDeclaration(t *testing.T) {
 	}
 }
 
-// TestAFailedEventLandsOnTheFirstRetryTier proves the transfer publish actually
-// routes on a real broker.
-//
-// A confirm alone would not prove it: on the default exchange, publishing to a
-// queue that does not exist is a silent discard that still confirms. Here the
-// message is counted where it was sent.
-func TestAFailedEventLandsOnTheFirstRetryTier(t *testing.T) {
-	url := brokerURL(t)
-	queue := uniqueName("collab-lifecycle-retry")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	mgr := &recordingManager{purgeErr: errors.New("backend down")}
-	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, mgr, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = consumer.Close() })
-
-	_, ch := dialTest(t)
-	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-retry"}))
-
-	if !eventually(func() bool { return mgr.count(&mgr.purged) >= 1 }) {
-		t.Fatal("the consumer never attempted the purge")
-	}
-	if !eventually(func() bool { return messageCount(t, names.tiers[0]) == 1 }) {
-		t.Fatalf("the failed event is not on the first retry tier (%s holds %d messages); it was either dropped or acked without being transferred",
-			names.tiers[0], messageCount(t, names.tiers[0]))
-	}
-	// And it is no longer on Q1 — acked only after the transfer confirmed.
-	if got := messageCount(t, names.main); got != 0 {
-		t.Fatalf("%s still holds %d messages after a confirmed transfer", names.main, got)
-	}
-}
-
 // TestAnUnactionableEventLandsInTheDeadLetterQueue proves an envelope nothing can
 // act on is RECORDED rather than swallowed. No amount of redelivery makes an
 // unparseable body actionable, so it skips the ladder — but dropping it would
@@ -395,7 +281,7 @@ func TestAnUnactionableEventLandsInTheDeadLetterQueue(t *testing.T) {
 	url := brokerURL(t)
 	queue := uniqueName("collab-lifecycle-dlq")
 	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+	deleteQueues(t, names.main, names.dlq)
 
 	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, &recordingManager{}, zap.NewNop())
 	if err != nil {
@@ -409,151 +295,8 @@ func TestAnUnactionableEventLandsInTheDeadLetterQueue(t *testing.T) {
 	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
 		t.Fatalf("the unactionable event is not in %s (it holds %d); it was swallowed", names.dlq, messageCount(t, names.dlq))
 	}
-	for _, tier := range names.tiers {
-		if got := messageCount(t, tier); got != 0 {
-			t.Errorf("%s holds %d messages; an unactionable envelope must not enter the retry ladder", tier, got)
-		}
-	}
-}
-
-// probeTier declares a main/tier pair with the production argument shape but a
-// short TTL, so the broker's honouring of that shape can be tested in seconds
-// rather than in the ladder's real 30s/5m/30m.
-//
-// dlRoutingKey is separate from mainQueue on purpose: pointing it at a queue that
-// does not exist is how the missing-target case is set up.
-func probeTier(t *testing.T, ch *amqp.Channel, mainQueue, tierQueue, dlRoutingKey string, ttlMS int32) {
-	t.Helper()
-	if _, err := ch.QueueDeclare(mainQueue, true, false, false, false, amqp.Table{
-		"x-queue-type":     "quorum",
-		"x-delivery-limit": int32(-1),
-	}); err != nil {
-		t.Fatalf("declare %s: %v", mainQueue, err)
-	}
-	if _, err := ch.QueueDeclare(tierQueue, true, false, false, false, amqp.Table{
-		"x-queue-type":              "quorum",
-		"x-message-ttl":             ttlMS,
-		"x-dead-letter-exchange":    "",
-		"x-dead-letter-routing-key": dlRoutingKey,
-		"x-dead-letter-strategy":    "at-least-once",
-		"x-overflow":                "reject-publish",
-	}); err != nil {
-		t.Fatalf("declare %s: %v", tierQueue, err)
-	}
-}
-
-// TestBrokerExpiresARetryTierBackToItsTarget is the assertion the whole ladder
-// rests on, asked of the broker rather than of this code.
-//
-// RabbitMQ 3.9.13 accepts every one of these arguments, reports them back on
-// inspection, and never expires anything — measured, not assumed. Against such a
-// broker this test fails; against >= 3.13.2 it passes. Connect refuses to start
-// below the floor for exactly this reason, and this is the test that keeps the
-// floor honest as the ladder or the broker moves.
-func TestBrokerExpiresARetryTierBackToItsTarget(t *testing.T) {
-	_, ch := dialTest(t)
-	base := uniqueName("collab-ttl-probe")
-	main, tier := base, base+".tier"
-	deleteQueues(t, main, tier)
-	probeTier(t, ch, main, tier, main, 2000)
-
-	publishRaw(t, ch, tier, []byte(`{"probe":true}`))
-	if !eventually(func() bool { return messageCount(t, tier) == 1 }) {
-		t.Fatalf("the probe message never landed in %s", tier)
-	}
-
-	if !eventuallyWithin(20*time.Second, func() bool { return messageCount(t, main) == 1 }) {
-		t.Fatalf("after the TTL, %s holds %d messages and %s holds %d: the broker ACCEPTED x-message-ttl and x-dead-letter-strategy on a quorum queue and then expired nothing. Every retry would accumulate in its tier and never be redelivered, with no error anywhere",
-			main, messageCount(t, main), tier, messageCount(t, tier))
-	}
-	if got := messageCount(t, tier); got != 0 {
-		t.Fatalf("%s still holds %d messages after the dead-letter hop", tier, got)
-	}
-}
-
-// TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing is the at-least-once
-// assertion, and the reason x-dead-letter-strategy is set at all.
-//
-// With the broker default (at-most-once) the dead-letter republish is internal and
-// unconditional: if the message cannot be routed at expiry, it is gone. With
-// at-least-once the hop is conditional on the target confirming it, so an
-// unroutable dead-letter leaves the message in the SOURCE queue. The whole ladder
-// is a promise of durability, and a delay tier that silently drops on expiry is
-// the one failure that would make the promise a lie.
-//
-// Two queues, identical but for the strategy, run through one timeline. The
-// control is what makes the result mean anything: if the default also retained,
-// the argument could be dropped from the topology with no loss.
-//
-// The count must be the TOTAL, not the ready count. A message held for a pending
-// dead-letter hop is neither ready nor unacknowledged, so queue.declare-ok reports
-// zero for a message that is very much still there — an earlier version of this
-// test read that number and "failed" against a broker doing exactly the right
-// thing. Only the management API exposes the total, and it is eventually
-// consistent, hence the settle window.
-//
-// What at-least-once does NOT do, measured on 3.13.2 over two minutes: retry the
-// hop once the missing target is created. The message stays put. Retention is the
-// guarantee; recovery is an operator action. That is why the topology declares
-// every queue up front, and why a deleted tier queue is an incident rather than
-// something that heals itself.
-func TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing(t *testing.T) {
-	_, ch := dialTest(t)
-	base := uniqueName("collab-retain-probe")
-	atLeastOnce := base + ".at-least-once"
-	atMostOnce := base + ".at-most-once"
-	missing := base + ".missing" // deliberately never declared
-	deleteQueues(t, atLeastOnce, atMostOnce, missing)
-
-	// The TTL has to outlast the management API's statistics interval, or "the
-	// message was here before it expired" is not an observable state and the
-	// control proves nothing.
-	const ttlMS = 30_000
-
-	declare := func(name string, extra amqp.Table) {
-		args := amqp.Table{
-			"x-queue-type":              "quorum",
-			"x-message-ttl":             int32(ttlMS),
-			"x-dead-letter-exchange":    "",
-			"x-dead-letter-routing-key": missing,
-		}
-		for k, v := range extra {
-			args[k] = v
-		}
-		if _, err := ch.QueueDeclare(name, true, false, false, false, args); err != nil {
-			t.Fatalf("declare %s: %v", name, err)
-		}
-	}
-	declare(atLeastOnce, amqp.Table{
-		"x-dead-letter-strategy": "at-least-once",
-		"x-overflow":             "reject-publish",
-	})
-	declare(atMostOnce, nil) // broker default
-
-	published := time.Now()
-	publishRaw(t, ch, atLeastOnce, []byte(`{"probe":true}`))
-	publishRaw(t, ch, atMostOnce, []byte(`{"probe":true}`))
-
-	// Both hold their message before expiry. Without this the control's later
-	// absence would be indistinguishable from a publish that never landed.
-	requireStableTotal(t, atLeastOnce, 1, "The message never landed, so nothing below can be concluded.")
-	requireStableTotal(t, atMostOnce, 1, "The control message never landed, so its later absence says nothing.")
-
-	if until := time.Until(published.Add(ttlMS*time.Millisecond + 5*time.Second)); until > 0 {
-		time.Sleep(until)
-	}
-
-	if got := totalMessageCount(t, missing); got != 0 {
-		t.Fatalf("%s holds %d messages but was never declared", missing, got)
-	}
-	requireStableTotal(t, atLeastOnce, 1,
-		"The expired message was DROPPED rather than retained. A delay tier that discards on expiry silently loses every retry it was built to protect.")
-	requireStableTotal(t, atMostOnce, 0,
-		"The at-most-once control retained its expired message too. If the broker default already retains, the retention above is not evidence that x-dead-letter-strategy does anything.")
-
-	// The retained message is parked for the pending hop, not offered for delivery.
-	if got := messageCount(t, atLeastOnce); got != 0 {
-		t.Fatalf("%s reports %d READY messages; the retained message should be held for the dead-letter hop", atLeastOnce, got)
+	if got := messageCount(t, names.main); got != 0 {
+		t.Errorf("the main queue holds %d messages; poison must be dead-lettered, not requeued to spin forever", got)
 	}
 }
 
@@ -563,28 +306,29 @@ func TestDepthPollingReportsRealBrokerCounts(t *testing.T) {
 	url := brokerURL(t)
 	queue := uniqueName("collab-lifecycle-depth")
 	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+	deleteQueues(t, names.main, names.dlq)
 
 	obs := &countingObserver{depths: map[string]int{}}
-	mgr := &recordingManager{purgeErr: errors.New("backend down")}
+	// A poison envelope: rejected to the DLQ, where it stays and is countable.
 	consumer, err := Connect(Config{
 		URL: url, Queue: queue,
 		DepthPollInterval: 200 * time.Millisecond, Observer: obs,
-	}, mgr, zap.NewNop())
+	}, &recordingManager{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	t.Cleanup(func() { _ = consumer.Close() })
 
 	_, ch := dialTest(t)
-	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-depth"}))
+	publishRaw(t, ch, queue, []byte("not a lifecycle envelope"))
 
-	if !eventually(func() bool { return obs.depth(names.tiers[0]) == 1 }) {
-		t.Fatalf("the depth gauge never reported the failed event on %s (reported %d); the DLQ/backlog alert would read as empty while events sat in the ladder",
-			names.tiers[0], obs.depth(names.tiers[0]))
+	if !eventually(func() bool { return obs.depth(names.dlq) == 1 }) {
+		t.Fatalf("the depth gauge never reported the dead-lettered event on %s (reported %d); the DLQ alert would read as empty while poison sat there",
+			names.dlq, obs.depth(names.dlq))
 	}
-	if got := obs.depth(names.dlq); got != 0 {
-		t.Fatalf("depth for %s = %d, want 0", names.dlq, got)
+	// The main queue drains: poison is rejected, not requeued.
+	if !eventually(func() bool { return obs.depth(names.main) == 0 }) {
+		t.Fatalf("depth for the main queue = %d, want 0; poison that requeues spins forever", obs.depth(names.main))
 	}
 }
 
@@ -593,9 +337,7 @@ type countingObserver struct {
 	depths map[string]int
 }
 
-func (o *countingObserver) EventTransferred(string, bool) {}
-
-func (o *countingObserver) EventDeadLettered(string, int32) {}
+func (o *countingObserver) EventDeadLettered(string) {}
 
 func (o *countingObserver) QueueReadyDepth(queue string, ready int) {
 	o.mu.Lock()
@@ -607,66 +349,6 @@ func (o *countingObserver) depth(queue string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.depths[queue]
-}
-
-// TestTheRealLadderRedeliversAfterTheFirstTierExpires walks the PRODUCTION
-// topology end to end, with the real 30-second first tier.
-//
-// The probe tests above prove the broker honours the argument shape; this proves
-// the shape we actually ship is wired correctly — that a failing event leaves Q1,
-// waits out the tier, comes back to Q1 on its own, is redelivered to this
-// consumer, and (still failing) moves one rung further down the ladder.
-//
-// Nothing shorter covers it. Two things only appear here: RabbitMQ's dead-letter
-// cycle detection, which drops a message that would return to a queue it has
-// already been dead-lettered from and which the tier→Q1 hop looks superficially
-// like; and the attempt header surviving the broker's own republish, which is what
-// makes the second failure advance to the 5m tier instead of repeating the 30s one
-// forever.
-//
-// It takes ~40s, so it is skipped under -short.
-func TestTheRealLadderRedeliversAfterTheFirstTierExpires(t *testing.T) {
-	if testing.Short() {
-		t.Skip("the first retry tier is 30s; skipped under -short")
-	}
-	url := brokerURL(t)
-	queue := uniqueName("collab-lifecycle-ladder")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	mgr := &recordingManager{purgeErr: errors.New("backend down")}
-	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, mgr, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = consumer.Close() })
-
-	_, ch := dialTest(t)
-	publishRaw(t, ch, queue, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-ladder"}))
-
-	if !eventually(func() bool { return mgr.count(&mgr.purged) == 1 }) {
-		t.Fatal("the consumer never attempted the first purge")
-	}
-	if !eventually(func() bool { return messageCount(t, names.tiers[0]) == 1 }) {
-		t.Fatalf("the failed event is not on %s", names.tiers[0])
-	}
-
-	// The tier's TTL is 30s. After it, the broker dead-letters the message back to
-	// Q1, the consumer is redelivered it, fails again, and transfers it onward.
-	if !eventuallyWithin(60*time.Second, func() bool { return mgr.count(&mgr.purged) == 2 }) {
-		t.Fatalf("the event was never redelivered after the first tier expired (purge attempts: %d). Either the tier did not expire, or RabbitMQ's dead-letter cycle detection dropped the tier→Q1 hop — in which case every retry is silently discarded 30 seconds after it fails",
-			mgr.count(&mgr.purged))
-	}
-	if !eventuallyWithin(15*time.Second, func() bool { return messageCount(t, names.tiers[1]) == 1 }) {
-		t.Fatalf("the redelivered event did not advance to %s (it holds %d, and %s holds %d). The attempt header did not survive the broker's republish, so the event would cycle the first tier forever and never reach the DLQ",
-			names.tiers[1], messageCount(t, names.tiers[1]), names.tiers[0], messageCount(t, names.tiers[0]))
-	}
-	if got := messageCount(t, names.tiers[0]); got != 0 {
-		t.Errorf("%s still holds %d messages after the hop", names.tiers[0], got)
-	}
-	if got := messageCount(t, names.dlq); got != 0 {
-		t.Errorf("%s holds %d messages; the schedule is not exhausted yet", names.dlq, got)
-	}
 }
 
 // TestTheDepthPollRecreatesADeletedQueue is half of the recovery story, and the
@@ -682,7 +364,7 @@ func TestTheDepthPollRecreatesADeletedQueue(t *testing.T) {
 	url := brokerURL(t)
 	queue := uniqueName("collab-lifecycle-redeclare")
 	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
+	deleteQueues(t, names.main, names.dlq)
 
 	// A DELIBERATELY SLOW poll. The gap between deleting the queue and the poll
 	// recreating it is the only window in which "it is really gone" is observable,
@@ -700,18 +382,18 @@ func TestTheDepthPollRecreatesADeletedQueue(t *testing.T) {
 	t.Cleanup(func() { _ = consumer.Close() })
 
 	_, ch := dialTest(t)
-	if _, err := ch.QueueDelete(names.tiers[2], false, false, false); err != nil {
-		t.Fatalf("delete %s: %v", names.tiers[2], err)
+	if _, err := ch.QueueDelete(names.dlq, false, false, false); err != nil {
+		t.Fatalf("delete %s: %v", names.dlq, err)
 	}
 	// Deleting a quorum queue is a Raft operation, so allow it to become visible
 	// rather than assuming it is instant — but well inside one poll interval, so
 	// the recreation below is still the poll's doing and not the delete failing.
-	if !eventuallyWithin(poll/2, func() bool { return !queueExists(t, names.tiers[2]) }) {
-		t.Fatalf("%s was still present half a poll interval after being deleted", names.tiers[2])
+	if !eventuallyWithin(poll/2, func() bool { return !queueExists(t, names.dlq) }) {
+		t.Fatalf("%s was still present half a poll interval after being deleted", names.dlq)
 	}
 
-	if !eventuallyWithin(30*time.Second, func() bool { return queueExists(t, names.tiers[2]) }) {
-		t.Fatalf("%s was not recreated by the depth poll; a deleted tier stays missing, and anything dead-lettering into it parks in a state nothing reports", names.tiers[2])
+	if !eventuallyWithin(30*time.Second, func() bool { return queueExists(t, names.dlq) }) {
+		t.Fatalf("%s was not recreated by the depth poll. A missing DLQ is not benign: the main queue dead-letters into it with the DEFAULT at-most-once strategy, so a rejected poison message is DISCARDED rather than recorded while its target is absent. The redeclare is what bounds that window", names.dlq)
 	}
 }
 
@@ -731,463 +413,4 @@ func queueExists(t *testing.T, queue string) bool {
 	defer func() { _ = ch.Close() }()
 	_, err = ch.QueueDeclarePassive(queue, true, false, false, false, nil)
 	return err == nil
-}
-
-// TestConnectReleasesAnEventParkedForAMissingTarget is the recovery, demonstrated
-// end to end rather than described.
-//
-// An expired retry whose dead-letter target does not exist is retained by
-// at-least-once in a state no consumer and no shovel can read: neither ready nor
-// unacknowledged. The question is what gets it out. Measured on 3.13.2: creating
-// the target is enough — the broker retries the hop on its own and releases the
-// message about three minutes later. Nothing else is required, and nothing else
-// works in the meantime.
-//
-// That makes the recovery action "declare the missing queue", which is precisely
-// what this service does at startup and on every re-attach and depth poll. So the
-// test drives it through the service: park an event for a Q1 that does not exist,
-// then start the consumer and watch the event arrive and be applied.
-//
-// ~4 minutes; skipped under -short.
-func TestConnectReleasesAnEventParkedForAMissingTarget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("the broker retries a parked dead-letter hop on a ~3 minute cycle; skipped under -short")
-	}
-	url := brokerURL(t)
-	queue := uniqueName("collab-lifecycle-parked")
-	names := namesFor(queue)
-	parking := queue + ".parking" // a probe tier, not part of the topology
-	deleteQueues(t, append([]string{names.main, names.dlq, parking}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	// A delay tier shaped exactly like a real one, dead-lettering into a Q1 that
-	// does not exist yet. Its TTL is short only so the parking happens promptly;
-	// the tier duration has nothing to do with the release.
-	if _, err := ch.QueueDeclare(parking, true, false, false, false, amqp.Table{
-		"x-queue-type":              "quorum",
-		"x-message-ttl":             int32(2000),
-		"x-dead-letter-exchange":    "",
-		"x-dead-letter-routing-key": names.main,
-		"x-dead-letter-strategy":    "at-least-once",
-		"x-overflow":                "reject-publish",
-	}); err != nil {
-		t.Fatalf("declare %s: %v", parking, err)
-	}
-	docID := "doc-parked"
-	publishRaw(t, ch, parking, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: docID}))
-
-	// Park it: expire with the target absent.
-	time.Sleep(8 * time.Second)
-	if queueExists(t, names.main) {
-		t.Fatalf("%s exists; the event cannot be parked and the test would prove nothing", names.main)
-	}
-	requireStableTotal(t, parking, 1, "The event was not parked, so the release below would prove nothing.")
-	if got := messageCount(t, parking); got != 0 {
-		t.Fatalf("%s reports %d ready; a parked message must be invisible to the ready count, or this is not the state under test", parking, got)
-	}
-
-	// Starting the consumer declares Q1 — and that is the whole recovery action.
-	mgr := &recordingManager{}
-	consumer, err := Connect(Config{URL: url, Queue: queue, DepthPollInterval: -1}, mgr, zap.NewNop())
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = consumer.Close() })
-
-	if !eventuallyWithin(5*time.Minute, func() bool { return mgr.has(&mgr.purged, docID) }) {
-		t.Fatalf("the parked event never reached the consumer after %s was declared (parking queue still holds %d in total). Declaring the missing target is the documented recovery action; if it does not release the message, the runbook has no working recovery and the event is unreachable by any consumer or shovel",
-			names.main, totalMessageCount(t, parking))
-	}
-	// And the source drained — the event was released, not delivered AND retained.
-	// Stable, because the management statistics lag the release by an interval.
-	requireStableTotal(t, parking, 0,
-		"The event reached the consumer but its source still holds it, so a later poll would deliver it again.")
-}
-
-// TestReplayReturnsDeadLetteredEventsToTheLadder is the replay path, end to end
-// against a real broker.
-//
-// Three properties, each of which a naive replay gets wrong:
-//
-//   - The attempt count is CLEARED, so the event gets the whole ladder again.
-//     A shovel preserves headers, so a shovelled event arrives still marked
-//     "attempt 3" and goes straight back to the DLQ on its first failure — which
-//     looks exactly like a replay that worked.
-//   - The replay count is INCREMENTED, because clearing the attempt count erases
-//     the only evidence the event has been round before. Without it, an event a
-//     person has replayed three times into a still-broken backend is
-//     indistinguishable from one arriving for the first time.
-//   - The dead-letter copy is released only after the republish is confirmed, so
-//     a failed publish cannot lose the event.
-func TestReplayReturnsDeadLetteredEventsToTheLadder(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-lifecycle-replay")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-
-	// Seed the dead-letter queue exactly as an exhausted schedule leaves it: the
-	// body a producer sent, carrying the attempt header from the end of the ladder.
-	//
-	// Deliberately WITHOUT running a consumer. An earlier version published to Q1
-	// and closed the consumer to get the event moving, then purged Q1 before
-	// seeding — and an unacknowledged delivery is REQUEUED when the consumer's
-	// channel closes, which can land after the purge. The assertion below then read
-	// the original event rather than the replayed one and saw no replay count. It
-	// passed locally and failed in CI, which is exactly the shape of that race.
-	docID := "doc-replayed"
-	if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp.Persistent,
-		Headers:      amqp.Table{headerAttempt: tierCount},
-		Body:         envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: docID}),
-	}); err != nil {
-		t.Fatalf("seed the DLQ: %v", err)
-	}
-	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
-		t.Fatalf("the event never reached %s", names.dlq)
-	}
-	// Q1 must be empty, or the Get below could read something other than the
-	// replayed event and the assertion would be about the wrong message.
-	if got := messageCount(t, names.main); got != 0 {
-		t.Fatalf("%s holds %d messages before the replay", names.main, got)
-	}
-
-	// Replay it.
-	replayConn, replayCh := dialTest(t)
-	_ = replayConn
-	res, err := Replay(context.Background(), replayCh, queue, 0)
-	if err != nil {
-		t.Fatalf("Replay: %v", err)
-	}
-	if res.Moved != 1 {
-		t.Fatalf("Replay moved %d event(s), want 1", res.Moved)
-	}
-	if !eventually(func() bool { return messageCount(t, names.dlq) == 0 }) {
-		t.Fatalf("%s still holds %d messages; the dead-letter copy was not released", names.dlq, messageCount(t, names.dlq))
-	}
-
-	// Inspect what actually landed on the main queue.
-	_, inspect := dialTest(t)
-	var got amqp.Delivery
-	if !eventually(func() bool {
-		d, ok, err := inspect.Get(names.main, false)
-		if err != nil || !ok {
-			return false
-		}
-		got = d
-		return true
-	}) {
-		t.Fatalf("nothing arrived on %s after the replay", names.main)
-	}
-	defer func() { _ = got.Ack(false) }()
-
-	if _, present := got.Headers[headerAttempt]; present {
-		t.Fatalf("the replayed event still carries %s = %v. It will fail once and go straight back to the dead-letter queue, which is indistinguishable from a replay that worked",
-			headerAttempt, got.Headers[headerAttempt])
-	}
-	if got := replaysOf(got.Headers); got != 1 {
-		t.Fatalf("%s = %d, want 1; clearing the attempt count erases the event's history, so without this a repeatedly-replayed event looks like a first arrival", headerReplays, got)
-	}
-}
-
-// TestASecondReplayIsDistinguishableFromTheFirst asserts the replay counter
-// accumulates. That is the whole reason it exists: after a replay the attempt
-// count is deliberately zero again, so this is the only thing that says "the fix
-// applied before the last replay did not work".
-//
-// Running three rounds on one connection also pins that Replay releases the
-// dead-letter queue when it finishes. It does not: an earlier version left its
-// consumer attached, so the next round's message was swallowed the instant it
-// arrived — held unacknowledged on a channel nobody was reading, invisible to the
-// ready depth and unreachable by a second replay. Rounds 2 and 3 fail without the
-// cancel.
-func TestASecondReplayIsDistinguishableFromTheFirst(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-lifecycle-replay2")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-
-	body := envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-twice"})
-	for round := int32(1); round <= 3; round++ {
-		// Put it in the DLQ as an exhausted schedule would, carrying whatever
-		// replay count the previous round produced.
-		headers := amqp.Table{headerAttempt: tierCount}
-		if round > 1 {
-			headers[headerReplays] = round - 1
-		}
-		if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
-			ContentType: "application/json", DeliveryMode: amqp.Persistent,
-			Headers: headers, Body: body,
-		}); err != nil {
-			t.Fatalf("round %d: seed the DLQ: %v", round, err)
-		}
-		if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
-			t.Fatalf("round %d: the event never reached %s", round, names.dlq)
-		}
-
-		_, replayCh := dialTest(t)
-		if _, err := Replay(context.Background(), replayCh, queue, 0); err != nil {
-			t.Fatalf("round %d: Replay: %v", round, err)
-		}
-
-		_, inspect := dialTest(t)
-		var d amqp.Delivery
-		if !eventually(func() bool {
-			got, ok, err := inspect.Get(names.main, false)
-			if err != nil || !ok {
-				return false
-			}
-			d = got
-			return true
-		}) {
-			t.Fatalf("round %d: nothing arrived on %s", round, names.main)
-		}
-		if got := replaysOf(d.Headers); got != round {
-			t.Fatalf("round %d: %s = %d, want %d; the counter must accumulate or repeated replays are invisible", round, headerReplays, got, round)
-		}
-		_ = d.Ack(false)
-	}
-}
-
-// amqpChannelShim adapts *amqp.Channel to the narrow brokerChannel the topology
-// helper takes, so the test declares exactly what production declares.
-type amqpChannelShim struct{ ch *amqp.Channel }
-
-func (c *amqpChannelShim) QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error) {
-	return c.ch.QueueDeclare(name, durable, autoDelete, exclusive, noWait, args)
-}
-func (c *amqpChannelShim) Qos(prefetchCount, prefetchSize int, global bool) error {
-	return c.ch.Qos(prefetchCount, prefetchSize, global)
-}
-func (c *amqpChannelShim) Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
-	return c.ch.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args)
-}
-func (c *amqpChannelShim) Cancel(consumer string, noWait bool) error {
-	return c.ch.Cancel(consumer, noWait)
-}
-func (c *amqpChannelShim) Confirm(noWait bool) error { return c.ch.Confirm(noWait) }
-func (c *amqpChannelShim) NotifyPublish(ch chan amqp.Confirmation) chan amqp.Confirmation {
-	return c.ch.NotifyPublish(ch)
-}
-func (c *amqpChannelShim) NotifyReturn(ch chan amqp.Return) chan amqp.Return {
-	return c.ch.NotifyReturn(ch)
-}
-func (c *amqpChannelShim) PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error {
-	return c.ch.PublishWithContext(ctx, exchange, key, mandatory, immediate, msg)
-}
-func (c *amqpChannelShim) Close() error { return c.ch.Close() }
-
-// TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue is the durability
-// half of the replay path.
-//
-// The dead-letter queue is the last copy of the event. If a replay released it
-// before the republish was confirmed — or trusted a confirm without checking for a
-// return — a publish to a main queue that is not there would destroy the event
-// outright: on the default exchange an unroutable publish is a silent discard that
-// still gets confirmed. So the replay must fail loudly and change nothing.
-func TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-lifecycle-replay-fail")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-	if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
-		ContentType: "application/json", DeliveryMode: amqp.Persistent,
-		Headers: amqp.Table{headerAttempt: tierCount},
-		Body:    envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-stranded"}),
-	}); err != nil {
-		t.Fatalf("seed the DLQ: %v", err)
-	}
-	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
-		t.Fatal("the event never reached the dead-letter queue")
-	}
-
-	// Take away the target.
-	if _, err := ch.QueueDelete(names.main, false, false, false); err != nil {
-		t.Fatalf("delete %s: %v", names.main, err)
-	}
-
-	_, replayCh := dialTest(t)
-	res, err := Replay(context.Background(), replayCh, queue, 0)
-	if err == nil {
-		t.Fatal("Replay reported success with no queue to publish to; on the default exchange that publish is a silent discard that still confirms, so the event would be gone")
-	}
-	if res.Moved != 0 {
-		t.Fatalf("Replay reported %d moved event(s) when none could land", res.Moved)
-	}
-
-	// The event is still in the dead-letter queue. Closing the replay channel
-	// returns the unacknowledged copy.
-	_ = replayCh.Close()
-	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
-		t.Fatalf("%s holds %d messages after a failed replay, want 1: the only copy of the event was released before the republish landed", names.dlq, messageCount(t, names.dlq))
-	}
-}
-
-// TestDeadLetterDepthReportsWhatIsWaiting covers the replay command's -dry-run
-// reading. An operator uses it to decide whether to replay at all, so a count that
-// silently read zero would end the investigation before it started.
-func TestDeadLetterDepthReportsWhatIsWaiting(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-lifecycle-depth-read")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	shim := &amqpChannelShim{ch: ch}
-	if err := declareTopology(shim, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-
-	if got, err := DeadLetterDepth(shim, queue); err != nil || got != 0 {
-		t.Fatalf("DeadLetterDepth on an empty queue = %d, %v; want 0, nil", got, err)
-	}
-	for i := 0; i < 3; i++ {
-		publishRaw(t, ch, names.dlq, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "d"}))
-	}
-	if !eventually(func() bool {
-		n, err := DeadLetterDepth(shim, queue)
-		return err == nil && n == 3
-	}) {
-		n, _ := DeadLetterDepth(shim, queue)
-		t.Fatalf("DeadLetterDepth = %d, want 3; -dry-run would tell an operator there is nothing to replay", n)
-	}
-}
-
-// redeliverByChannelClose consumes one message and closes the channel WITHOUT
-// acking it, n times. That is precisely what the transfer-failure path does: leave
-// the delivery unacknowledged, recycle the channel, let the broker redeliver.
-//
-// It returns how many deliveries it actually received.
-func redeliverByChannelClose(t *testing.T, queue string, n int) int {
-	t.Helper()
-	seen := 0
-	for i := 0; i < n; i++ {
-		conn, err := amqp.Dial(brokerURL(t))
-		if err != nil {
-			t.Fatalf("redelivery %d: dial: %v", i, err)
-		}
-		ch, err := conn.Channel()
-		if err != nil {
-			_ = conn.Close()
-			t.Fatalf("redelivery %d: channel: %v", i, err)
-		}
-		if err := ch.Qos(1, 0, false); err != nil {
-			t.Fatalf("redelivery %d: qos: %v", i, err)
-		}
-		deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
-		if err != nil {
-			t.Fatalf("redelivery %d: consume: %v", i, err)
-		}
-		select {
-		case _, ok := <-deliveries:
-			if ok {
-				seen++
-			}
-		case <-time.After(2 * time.Second):
-		}
-		_ = ch.Close()
-		_ = conn.Close()
-	}
-	return seen
-}
-
-// TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries is the RabbitMQ 4.0 guard.
-//
-// 4.0 gives quorum queues a default delivery-limit of 20; 3.x was unlimited. Our
-// transfer-failure contract deliberately leaves the delivery UNACKED and recycles
-// the channel so the event stays broker-owned — and every recycle is another
-// delivery. Q1 has no dead-letter exchange by design, because transfers out of it
-// are our own confirmed publishes rather than broker dead-lettering. So at the
-// limit there is nowhere to divert to and the broker DROPS the message.
-//
-// Measured on 4.0.5 without the argument: the 21st delivery loses it, silently. A
-// document.deleted vanishing that way means a document the owner deleted is never
-// purged, with nothing in any log to say so.
-//
-// This test fails on a default-limit queue and passes with x-delivery-limit=-1.
-func TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-q1-redelivery")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-	publishRaw(t, ch, names.main, envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-redelivered"}))
-	if !eventually(func() bool { return messageCount(t, names.main) == 1 }) {
-		t.Fatal("the event never landed on Q1")
-	}
-
-	const rounds = 25 // past the 4.0 default of 20
-	if got := redeliverByChannelClose(t, names.main, rounds); got != rounds {
-		t.Fatalf("received %d of %d redeliveries; the broker stopped redelivering before the run finished", got, rounds)
-	}
-
-	requireStableTotal(t, names.main, 1,
-		"Q1 lost the event after more than twenty unacknowledged redeliveries. RabbitMQ 4.0 applies a default quorum delivery-limit of 20 and Q1 has no dead-letter exchange, so the message is DROPPED rather than diverted — a deleted document is never purged and nothing reports it.")
-}
-
-// TestTheDeadLetterQueueSurvivesRepeatedFailedReplays is the same limit on the
-// other consumer-owned queue.
-//
-// The DLQ normally has no consumer, so nothing increments a delivery count — until
-// somebody runs a replay. A replay that cannot land leaves the dead-letter copy
-// UNACKED and its channel closes, which is a delivery; that is the documented,
-// correct behaviour (the DLQ copy is the last one in existence, so it must not be
-// released before the republish is confirmed). Repeat it enough times against a
-// still-broken backend and the default limit discards the very message the DLQ
-// exists to preserve for a human.
-func TestTheDeadLetterQueueSurvivesRepeatedFailedReplays(t *testing.T) {
-	brokerURL(t)
-	queue := uniqueName("collab-dlq-redelivery")
-	names := namesFor(queue)
-	deleteQueues(t, append([]string{names.main, names.dlq}, names.tiers...)...)
-
-	_, ch := dialTest(t)
-	if err := declareTopology(&amqpChannelShim{ch: ch}, names); err != nil {
-		t.Fatalf("declare topology: %v", err)
-	}
-	if err := ch.PublishWithContext(context.Background(), "", names.dlq, false, false, amqp.Publishing{
-		ContentType: "application/json", DeliveryMode: amqp.Persistent,
-		Headers: amqp.Table{headerAttempt: tierCount},
-		Body:    envelopeBody(t, PatternDocumentDeleted, DeletedEvent{ID: "doc-replayed-often"}),
-	}); err != nil {
-		t.Fatalf("seed the DLQ: %v", err)
-	}
-	if !eventually(func() bool { return messageCount(t, names.dlq) == 1 }) {
-		t.Fatal("the event never reached the dead-letter queue")
-	}
-
-	// Every replay finds its target missing, so every one leaves the copy unacked.
-	if _, err := ch.QueueDelete(names.main, false, false, false); err != nil {
-		t.Fatalf("delete %s: %v", names.main, err)
-	}
-	const attempts = 25
-	for i := 0; i < attempts; i++ {
-		_, replayCh := dialTest(t)
-		if _, err := Replay(context.Background(), replayCh, queue, 1); err == nil {
-			t.Fatalf("replay %d succeeded with no target queue", i)
-		}
-		_ = replayCh.Close()
-	}
-
-	requireStableTotal(t, names.dlq, 1,
-		"The dead-letter queue lost its message after repeated failed replays. Each failed replay leaves the copy unacknowledged and closes its channel — a delivery — and RabbitMQ 4.0's default quorum delivery-limit of 20 then discards the last copy of an event that was waiting for a human.")
 }

@@ -358,48 +358,4 @@ func readErrBody(r io.Reader) string {
 	return strings.TrimSpace(string(b))
 }
 
-var _ persistence.DeletingCheckpointStore = (*Store)(nil)
-
-// Delete removes the document's file (persistence.Deleter).
-//
-// Idempotent: a document with no pointer, or whose file is already gone,
-// deletes successfully — the cascade retries, and a second delete must not fail
-// the operation it is completing.
-//
-// The store is Unfenced, so a non-zero fence is ErrUnexpectedFence and the state
-// is left intact. Checked BEFORE the pointer is resolved: a rejected delete must
-// not have reached the network at all.
-func (s *Store) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if req.Fence != 0 {
-		return persistence.ErrUnexpectedFence
-	}
-	pointer, _, err := s.pointers.Pointer(ctx, req.DocumentID)
-	switch {
-	case err == nil:
-	case errors.Is(err, ErrNoPointer):
-		return nil // never had a file
-	default:
-		return fmt.Errorf("resolving file pointer: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete,
-		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer), nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	resp, err := s.client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("file-service delete: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
-		return nil
-	default:
-		return fmt.Errorf("file-service delete: unexpected status %d: %s", resp.StatusCode, readErrBody(resp.Body))
-	}
-}
+var _ persistence.CheckpointStore = (*Store)(nil)

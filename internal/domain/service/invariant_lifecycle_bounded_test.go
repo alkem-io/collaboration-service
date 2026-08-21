@@ -34,7 +34,7 @@ func TestInvLifecycleBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { _ = m.Purge(ctx, id); close(done) }()
+	go func() { _ = m.CloseDeleted(ctx, id); close(done) }()
 
 	select {
 	case <-done:

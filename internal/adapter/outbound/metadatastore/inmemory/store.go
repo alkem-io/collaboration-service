@@ -92,13 +92,5 @@ func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	return in
 }
 
-// Delete removes the index row for id. Idempotent.
-func (s *Store) Delete(_ context.Context, id model.DocumentID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.rows, id)
-	return nil
-}
-
 // compile-time assertion that Store satisfies the port.
 var _ port.MetadataStore = (*Store)(nil)

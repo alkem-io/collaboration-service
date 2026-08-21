@@ -221,11 +221,6 @@ func joinCloseStatus(err error) (websocket.StatusCode, string) {
 		// reading the close code, so the two are deliberately identical on the
 		// wire and separable only in the server's own logs.
 		return websocket.StatusPolicyViolation, "forbidden"
-	case errors.Is(err, service.ErrDocumentPurging):
-		// A policy close, not an internal one: the document is being deleted, so a
-		// blind reconnect is pointless. It mirrors the document-deleted reason a client
-		// already in the room receives from the same cascade.
-		return websocket.StatusPolicyViolation, "document deleted"
 	case errors.Is(err, service.ErrShuttingDown):
 		// The pod is going away mid-join. That is not an internal error, and
 		// closing 1011 told the client it was one — so a client reconnecting into

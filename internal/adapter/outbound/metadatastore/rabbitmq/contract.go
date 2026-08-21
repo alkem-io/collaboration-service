@@ -73,18 +73,6 @@ type FetchReply struct {
 	Error           string `json:"error,omitempty"`
 }
 
-// DeleteData is the collaboration-delete request payload (the owner-delete
-// cascade purges the index row; the blob is purged separately via the checkpoint store).
-type DeleteData struct {
-	ID string `json:"id"`
-}
-
-// DeleteReply is the collaboration-delete reply.
-type DeleteReply struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-}
-
 // InfoData is the collaboration-info request payload: who is asking about which
 // document (carried forward from the legacy info pattern, unified field names —
 // actorId, never userId, per constitution §III).
@@ -122,7 +110,6 @@ type User struct {
 const (
 	PatternSave         = "collaboration-save"
 	PatternFetch        = "collaboration-fetch"
-	PatternDelete       = "collaboration-delete"
 	PatternInfo         = "collaboration-info"
 	PatternContribution = "collaboration-contribution"
 )

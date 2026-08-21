@@ -1,13 +1,19 @@
 // Package lifecycle is the inbound RabbitMQ lifecycle consumer: it reacts to the
-// Alkemio server's owner-driven document lifecycle events (FR-023) on the same
-// bus as the metadata persistence. `document.deleted` cascades a purge (the room
-// is closed and the metadata + snapshot are deleted, no orphan);
-// per-document authorization for connected clients. The wire shape is the NestJS
-// event envelope { pattern, data, id }, so a NestJS @EventPattern publisher on
-// the server reaches it natively.
+// Alkemio server's owner-driven document lifecycle events (FR-023) on a dedicated
+// queue.
 //
-// See contracts/lifecycle-events.md. The standalone (no-bus) equivalent is the
-// create/delete HTTP API (T016).
+// `document.deleted` CLOSES AND EVICTS a live room. It deletes nothing durable.
+// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
+// it enqueues the outbox row that becomes this event (server:
+// memo.service.ts / whiteboard.service.ts — the cascade runs ahead of the
+// transaction that removes the leaf and enqueues), so by the time the event
+// arrives there is nothing here left to delete. A document with no live room is a
+// no-op.
+//
+// The wire shape is the NestJS event envelope { pattern, data, id }, so a NestJS
+// @EventPattern publisher on the server reaches it natively.
+//
+// See contracts/lifecycle-events.md.
 package lifecycle
 
 import (
@@ -16,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -28,7 +33,7 @@ const (
 	PatternDocumentDeleted = "document.deleted"
 )
 
-// DeletedEvent is the document.deleted payload: the document to purge.
+// DeletedEvent is the document.deleted payload: the document to close.
 type DeletedEvent struct {
 	ID string `json:"id"`
 }
@@ -53,11 +58,9 @@ type Consumer struct {
 
 	// mu guards the live broker attachment. The supervisor goroutine swaps it on
 	// reconnect; Close reads it from whatever goroutine calls Close.
-	mu       sync.Mutex
-	conn     brokerConn
-	ch       brokerChannel
-	confirms chan amqp.Confirmation
-	returns  chan amqp.Return
+	mu   sync.Mutex
+	conn brokerConn
+	ch   brokerChannel
 
 	// handlerTimeout bounds the processing context of a single delivery (resolved
 	// from Config.HandlerTimeout, defaulting to DefaultHandlerTimeout) so one stuck
@@ -68,18 +71,10 @@ type Consumer struct {
 	// queue so the parts cannot drift apart.
 	names queueNames
 
-	// confirmTimeout bounds the wait for the broker's confirm/return answers to a
-	// transfer publish. Both channels are read in transfer(); with a bounded QoS and
-	// a serial consume loop there is exactly one publish outstanding, so correlation
-	// is positional. A broker that neither
-	// confirms nor returns must not hold the consume loop open indefinitely; the
-	// delivery stays unacked and is redelivered after the recycle.
-	confirmTimeout time.Duration
-
-	// recycleBackoff delays the channel close after an unconfirmable transfer, and
-	// paces the supervisor's re-attach attempts, so redelivery is retried at a
-	// bounded rate rather than spinning.
-	recycleBackoff time.Duration
+	// reattachBackoff paces the supervisor's re-attach attempts after the broker
+	// drops a connection or session, so a broker that is down is retried at a
+	// bounded rate rather than spun on.
+	reattachBackoff time.Duration
 
 	// closed is shut when Close runs, so a pending recycle does not outlive the
 	// consumer or close a channel the shutdown path is already closing.
@@ -87,22 +82,21 @@ type Consumer struct {
 	closeOnce sync.Once
 }
 
-// ackAction tells consume how to acknowledge a delivery after handle processed it.
+// ackAction tells processOne how to acknowledge a delivery after handle ran.
 type ackAction int
 
 const (
-	// ackSuccess acks the delivery: it was processed, idempotently a no-op, or is
-	// unactionable (unparseable / unrelated pattern) so requeuing it is pointless.
+	// ackSuccess acks: the room was closed, or there was no room to close.
 	ackSuccess ackAction = iota
-	// retryLater is a genuine processing failure that may succeed later — a
-	// transient backend error. The event is transferred to the next delay tier and
-	// redelivered when its TTL expires.
-	retryLater
-	// ackTerminal is an envelope this service can never act on: unparseable, or a
-	// pattern outside the contract. It is transferred to the DLQ rather than
-	// dropped, so a shape mismatch between producer and consumer shows up as queue
-	// depth instead of vanishing.
-	ackTerminal
+	// requeue is a transient refusal — a still-live room that would not accept the
+	// close command within the handler deadline. Nack(requeue=true); the broker
+	// redelivers, and the deadline is what keeps that from spinning.
+	requeue
+	// rejectPoison is an envelope this service can never act on at any future time:
+	// unparseable, or a pattern outside the contract. Nack(requeue=false), which
+	// the main queue's DLX turns into a DLQ record, so a producer/consumer shape
+	// mismatch surfaces as queue depth instead of vanishing.
+	rejectPoison
 )
 
 // handle decodes one event body and routes it to the Manager, returning how the
@@ -113,34 +107,34 @@ const (
 // mismatch. Those are terminal: recorded in the dead-letter queue rather than
 // acked away, so the mismatch is visible as queue depth instead of vanishing.
 //
-// A genuine cascade failure returns retryLater and is redelivered on the retry
-// schedule. The cascade is a correctness requirement and is idempotent, so a
-// duplicate delivery is survivable where a lost one is not.
+// A live room that refuses the close returns requeue and is redelivered. Closing
+// is idempotent, so a duplicate delivery is survivable where a lost one is not.
 func (c *Consumer) handle(ctx context.Context, body []byte) ackAction {
 	var env envelope
 	if err := json.Unmarshal(body, &env); err != nil {
-		return ackTerminal // not a lifecycle envelope: record it, do not swallow it.
+		return rejectPoison // not a lifecycle envelope: record it, do not swallow it.
 	}
 	switch env.Pattern {
 	case PatternDocumentDeleted:
 		return c.handleDeleted(ctx, env.Data)
 	default:
-		return ackTerminal // outside the contract: record it.
+		return rejectPoison // outside the contract: record it.
 	}
 }
 
 func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackAction {
 	var ev DeletedEvent
 	if err := json.Unmarshal(data, &ev); err != nil || ev.ID == "" {
-		return ackTerminal // malformed payload: record it rather than swallow it.
+		return rejectPoison // malformed payload: record it rather than swallow it.
 	}
-	if err := c.mgr.Purge(ctx, model.DocumentID(ev.ID)); err != nil {
-		// The purge is idempotent (a not-found delete is success), so a returned
-		// error is a transient backend failure worth retrying — down the ladder
-		// rather than ack-and-drop, or the document is orphaned.
-		c.logger.Warn("document delete cascade failed; moving the event down the retry ladder",
+	if err := c.mgr.CloseDeleted(ctx, model.DocumentID(ev.ID)); err != nil {
+		// CloseDeleted is idempotent and deletes nothing durable — `server` has
+		// already removed the entity, profile, bucket and checkpoint before the event
+		// is enqueued. So an error here means only that a still-live room would not
+		// accept the close, which is transient by nature: requeue and try again.
+		c.logger.Warn("document close/evict was refused by a live room; requeueing the event",
 			zap.String("doc", ev.ID), zap.Error(err))
-		return retryLater
+		return requeue
 	}
 	return ackSuccess
 }

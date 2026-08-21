@@ -21,26 +21,19 @@ jobs:
 
     services:
       rabbitmq:
-        # Pinned to the exact broker infrastructure-operations deploys, so CI
-        # proves the topology against the version that actually runs it rather
-        # than against one that merely satisfies the floor.
+        # Pinned to the broker infrastructure-operations deploys, so CI proves the
+        # topology against the version that actually runs it.
         #
-        # The pin is load-bearing in BOTH directions. Below lifecycle.MinBrokerVersion
-        # a quorum queue accepts x-message-ttl and x-dead-letter-strategy, echoes
-        # them back, and expires nothing (measured on 3.9.13). From 4.0 a quorum
-        # queue applies a default delivery-limit of 20 where 3.x was unlimited,
-        # which drops an unacked-and-redelivered message on a queue with no
-        # dead-letter exchange — Q1 and the DLQ both — unless x-delivery-limit=-1
-        # is set explicitly. An unbounded tag could drift into either failure.
-        #
-        # -management, not -alpine: the retention assertion needs a queue's TOTAL
-        # message count, and a message held for a pending dead-letter hop is neither
-        # ready nor unacknowledged, so queue.declare-ok cannot see it. Only the
-        # management API exposes the number.
+        # The pin matters for x-delivery-limit. From 4.0 a quorum queue applies a
+        # default delivery-limit of 20 where 3.x was unlimited, which drops a
+        # redelivered message on a queue with no dead-letter route. Both queues set
+        # -1 explicitly; an unbounded tag could drift onto a version where that
+        # argument means something different.
+        # -management matches the image the environments run. No test uses the
+        # management API, so its port and env are deliberately not wired.
         image: rabbitmq:4.0.5-management
         ports:
           - 5672:5672
-          - 15672:15672
         options: >-
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 10s --health-timeout 5s --health-retries 12
@@ -48,7 +41,6 @@ jobs:
     env:
       # Integration-suite backend wiring (the build-tagged tests skip when unset).
       RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
-      RABBITMQ_MANAGEMENT_URL: http://guest:guest@localhost:15672
 
     steps:
       - name: Checkout
@@ -70,19 +62,11 @@ jobs:
         working-directory: test/e2e/jsinterop
         run: npm ci
 
-      # This step takes ~6 minutes, and most of that is three lifecycle tests that
-      # wait on a real broker: the parked dead-letter hop recovers on RabbitMQ's
-      # own ~3-minute retry cycle, the retention assertion needs a TTL longer than
-      # the management API's statistics interval, and the ladder round-trip is
-      # gated by the shipped 30s first tier. None of that can be made faster
-      # without measuring something other than the broker.
-      #
-      # Those tests are t.Skip'd under -short, so adding -short here looks like a
-      # free six minutes. It is not: it silently deletes the only assertions that
-      # prove the retry ladder works against a real 4.0.5, including that Q1 and
-      # the DLQ survive more than twenty unacknowledged redeliveries. Reviewed and
-      # kept deliberately;
-      # see specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md.
+      # The lifecycle integration tests no longer wait on broker timers. The retry
+      # ladder they used to exercise — a ~3-minute dead-letter hop, a TTL longer
+      # than the management API's statistics interval, and a 30s first tier — was
+      # deleted along with the tiers themselves, so this lane is now bounded by the
+      # work rather than by RabbitMQ's own clocks.
       - name: Integration + e2e + coverage gate (≥95%)
         run: ./.scripts/coverage-gate.sh 95.0
 

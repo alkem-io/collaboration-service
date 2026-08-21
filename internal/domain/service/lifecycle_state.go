@@ -44,7 +44,7 @@ const (
 	// stateActive: the run loop is serving; the room accepts commands and peer
 	// updates. The ONLY state in which enqueue admits new work.
 	stateActive
-	// stateDraining: a teardown was triggered (close | purge | idle-empty). No new
+	// stateDraining: a teardown was triggered (shutdown | owner-delete | idle-empty). No new
 	// work is accepted; the single teardown sequence (flush → aux-goroutine
 	// teardown → close(done) → release) runs. Entered exactly once.
 	stateDraining
@@ -73,7 +73,7 @@ func (s roomState) String() string {
 //	Materializing → Active     (materialization succeeded; the room starts serving)
 //	Materializing → Draining   (torn down before it served — abort, or close while
 //	                            still materializing in the singleflight path)
-//	Active        → Draining   (close | purge | idle-empty triggered teardown)
+//	Active        → Draining   (shutdown | owner-delete | idle-empty triggered teardown)
 //	Draining      → Closed     (the teardown sequence finished)
 //
 // Closed is terminal. Active→Closed is illegal: an active room MUST pass through

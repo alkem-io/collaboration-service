@@ -494,18 +494,19 @@ func TestDisabledContributionWindowCollectsAndEmitsNothing(t *testing.T) {
 	}
 }
 
-// TestPurgeDoesNotEmitContributionsForADeletedDocument pins that the owner-delete
-// path skips analytics entirely.
+// TestCloseDeletedDoesNotEmitContributionsForADeletedDocument pins that the
+// owner-delete path skips analytics entirely.
 //
-// purgeNow deletes the metadata row before teardown's analytics would run, and
-// `server`'s contribution consumer resolves the document id against the memo and
-// whiteboard rows: a deleted document misses both, so the event is discarded and
-// logged as "collaboration-contribution for unknown document". Emitting it is a
-// bus round trip whose only outcome is a warn per delete.
+// The row is already gone when this event arrives — `server` removes the entity
+// before enqueueing it — and `server`'s contribution consumer resolves the document
+// id against the memo and whiteboard rows. A deleted document misses both, so the
+// event is discarded and logged as "collaboration-contribution for unknown
+// document". Emitting it is a bus round trip whose only outcome is a warn per
+// delete. (The dropped final window is BASIC-004, still open.)
 //
 // Non-vacuity: drop the `end.Code != model.CodeDocumentDeleted` guard in teardown
 // and this emits, failing here.
-func TestPurgeDoesNotEmitContributionsForADeletedDocument(t *testing.T) {
+func TestCloseDeletedDoesNotEmitContributionsForADeletedDocument(t *testing.T) {
 	room := newBareRoom(t)
 	recorded := &recordingContributor{}
 	room.deps.Contributor = recorded

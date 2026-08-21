@@ -3,103 +3,110 @@ package service
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// TestConcurrentPurgesOfOneDocumentShareTheTombstone covers the refcount branch
-// in endPurge.
+// TestAnUnrelatedDeleteCostsOneRetryNotAPermanentRefusal pins the deliberate
+// trade the delete epoch makes.
 //
-// The tombstone is a count, not a flag, and the count is what makes concurrent
-// cascades safe: if the first Purge to finish deleted the entry outright, it
-// would lift the tombstone out from under a second cascade still running, and a
-// Join arriving in the remainder of that second cascade would be admitted — the
-// resurrection the tombstone exists to prevent.
+// The epoch is Manager-wide, so deleting ANY document invalidates every admission
+// already in flight — including for documents nobody touched. That is the price
+// of not keeping per-id bookkeeping whose correctness depended on how long a
+// delete happened to take. What must never happen is the price becoming
+// permanent: the client reconnects, captures the new epoch, and gets in.
 //
-// Non-vacuity: change endPurge to delete unconditionally and the mid-cascade Join
-// below is admitted.
-func TestConcurrentPurgesOfOneDocumentShareTheTombstone(t *testing.T) {
+// Non-vacuity: make the epoch monotonically compared (>= instead of !=) and the
+// first Join below stops being refused, collapsing the guarantee this replaced.
+func TestAnUnrelatedDeleteCostsOneRetryNotAPermanentRefusal(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
-	const doc model.DocumentID = "double-purge"
+	const doc model.DocumentID = "innocent-bystander"
 
-	// The document EXISTS, so the only thing that can refuse a join here is the
-	// tombstone — which is what this test is about. Without this the join would be
-	// refused for not existing and the assertion would pass vacuously.
+	// The document EXISTS, so the only thing that can refuse the first join is the
+	// epoch. Without this it would be refused for not existing and the assertion
+	// would pass vacuously.
 	if err := mgr.PreRegister(context.Background(), model.Metadata{ID: doc, ContentType: model.ContentTypeMemo}); err != nil {
 		t.Fatalf("pre-register: %v", err)
 	}
 
-	// Two overlapping cascades: raise twice, lower once, and the document must
-	// still be refused.
-	mgr.beginPurge(doc)
-	mgr.beginPurge(doc)
-	mgr.endPurge(doc)
+	// A join that captured its epoch, then a delete of a DIFFERENT document lands
+	// before it acquires. Driven by holding the captured epoch explicitly, because
+	// the real interleaving is a nanosecond wide.
+	mgr.mu.Lock()
+	stale := mgr.deleteEpoch
+	mgr.mu.Unlock()
+	if err := mgr.CloseDeleted(context.Background(), "some-other-document"); err != nil {
+		t.Fatalf("CloseDeleted of an unrelated document: %v", err)
+	}
+	if _, err := mgr.acquire(context.Background(), doc, model.ContentTypeMemo, stale); !errors.Is(err, errRoomUnavailable) {
+		t.Fatalf("acquire on a stale epoch = %v, want errRoomUnavailable", err)
+	}
+	if mgr.RoomCount() != 0 {
+		t.Fatalf("a refused acquire left %d room(s) registered", mgr.RoomCount())
+	}
 
+	// The retry: a fresh Join captures the current epoch and is admitted.
 	a := newFakeClient(t)
 	if _, _, err := mgr.Join(context.Background(), JoinRequest{
 		ID: doc, Content: model.ContentTypeMemo, Identity: a.identity, Conn: a,
-	}); !errors.Is(err, ErrDocumentPurging) {
-		t.Fatalf("Join during the second cascade = %v, want ErrDocumentPurging; the first cascade to finish must not lift the tombstone for the other", err)
-	}
-
-	// The second cascade finishes and the document becomes joinable again.
-	mgr.endPurge(doc)
-	b := newFakeClient(t)
-	if _, _, err := mgr.Join(context.Background(), JoinRequest{
-		ID: doc, Content: model.ContentTypeMemo, Identity: b.identity, Conn: b,
 	}); err != nil {
-		t.Fatalf("join after every cascade completed: %v", err)
+		t.Fatalf("join after the unrelated delete: %v; the refusal must be transient, not permanent", err)
 	}
 }
 
-// TestPurgeDurableReportsAStoreThatCannotDelete covers purgeDurable's capability
-// branch: a checkpoint store with no Delete cannot complete an owner-delete, and
-// the cascade must report that rather than dropping the index row and calling it
-// done — which would leave the content behind with nothing pointing at it.
-func TestPurgeDurableReportsAStoreThatCannotDelete(t *testing.T) {
-	deps := newTestDeps()
-	deps.Checkpoint = nonDeletingStore{}
-	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
-
-	if err := mgr.Purge(context.Background(), "no-deleter"); err == nil {
-		t.Fatal("a purge against a store that cannot delete must fail; silently dropping the index row would orphan the content")
-	}
-}
-
-// TestAcquireRefusesOnceShutdownHasBegun covers the closed check on both the fast
-// path and the singleflight re-check.
+// TestAStaleEpochIsRefusedEvenWhenAWarmRoomIsRegistered discriminates the
+// PER-CALLER epoch check that runs after singleflight returns.
 //
-// The two are not redundant. Materialization runs OFF the registry lock, so a
-// shutdown can begin in that window; without the second check a room would be
-// registered after the drain snapshot was taken and would never be drained —
-// its unsaved edits lost with no shutdown flush.
+// A warm room is handed straight back from the registry, so this shape never
+// materializes and never reaches the pre-insert check. The post-singleflight check
+// is the only thing between an existing room and a stale admission.
+//
+// Non-vacuity: remove ONLY that check and this fails while the materialization
+// test still passes.
+func TestAStaleEpochIsRefusedEvenWhenAWarmRoomIsRegistered(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	const doc model.DocumentID = "warm-room"
+
+	// A live, registered room, so acquire returns it without materializing.
+	a := newFakeClient(t)
+	a.join(mgr, doc, model.ContentTypeMemo)
+	if mgr.RoomCount() != 1 {
+		t.Fatalf("precondition: %d rooms, want 1 registered so acquire returns it without materializing", mgr.RoomCount())
+	}
+
+	mgr.mu.Lock()
+	stale := mgr.deleteEpoch
+	mgr.mu.Unlock()
+
+	// Some other document is deleted. The warm room is untouched and must stay
+	// untouched — but an admission holding the pre-delete epoch is stale.
+	if err := mgr.CloseDeleted(context.Background(), "an-unrelated-document"); err != nil {
+		t.Fatalf("CloseDeleted: %v", err)
+	}
+
+	if _, err := mgr.acquire(context.Background(), doc, model.ContentTypeMemo, stale); !errors.Is(err, errRoomUnavailable) {
+		t.Fatalf("acquire on a stale epoch with a warm room = %v, want errRoomUnavailable", err)
+	}
+	// The unrelated delete must not have closed the warm room.
+	if mgr.RoomCount() != 1 {
+		t.Fatalf("%d rooms after an unrelated delete, want the warm room still live; a global epoch must invalidate ADMISSIONS, never existing sessions", mgr.RoomCount())
+	}
+}
+
+// TestAcquireRefusesOnceShutdownHasBegun covers the shutdown check inside acquire:
+// once Close has taken its drain snapshot, no further room may be materialized, or
+// it would never be drained and its edits would be lost.
+//
+// The shutdown-DURING-materialization branch is a different one and is pinned by
+// TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom.
 func TestAcquireRefusesOnceShutdownHasBegun(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
 	mgr.Close()
 
-	// Fast path: closed is observed before any materialization.
-	if _, err := mgr.acquire(context.Background(), "after-close", model.ContentTypeMemo); err == nil {
+	if _, err := mgr.acquire(context.Background(), "after-close", model.ContentTypeMemo, 0); err == nil {
 		t.Fatal("acquire must refuse once shutdown has begun")
-	}
-
-	// Concurrent acquires all refuse, exercising the singleflight arm too.
-	var wg sync.WaitGroup
-	errs := make([]error, 8)
-	for i := range errs {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, errs[i] = mgr.acquire(context.Background(), "after-close", model.ContentTypeMemo)
-		}(i)
-	}
-	wg.Wait()
-	for i, err := range errs {
-		if err == nil {
-			t.Fatalf("concurrent acquire %d was admitted after shutdown", i)
-		}
 	}
 }
 
@@ -111,56 +118,17 @@ func TestAcquireReturnsTheLiveRoomToASecondCaller(t *testing.T) {
 		SendBuffer: 64, SaveDebounce: time.Hour, IdleTimeout: time.Hour,
 	})
 
-	first, err := mgr.acquire(context.Background(), "shared", model.ContentTypeMemo)
+	first, err := mgr.acquire(context.Background(), "shared", model.ContentTypeMemo, 0)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	t.Cleanup(releaseRoom(first))
 
-	second, err := mgr.acquire(context.Background(), "shared", model.ContentTypeMemo)
+	second, err := mgr.acquire(context.Background(), "shared", model.ContentTypeMemo, 0)
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
 	if second != first {
 		t.Fatal("a second acquire materialized a DIFFERENT room for the same document; two rooms would hold two live copies of one document and diverge")
-	}
-}
-
-// TestConcurrentAcquiresOfOnePurgingDocumentAllRefuse covers the tombstone check
-// INSIDE the singleflight, which the fast-path check cannot reach.
-//
-// The two are not redundant. Materialization runs off the registry lock, so a
-// cascade can raise the tombstone after a caller passed the fast path and while
-// it waits on the singleflight. Without the inner check that caller would be
-// handed a freshly materialized room for a document being deleted — and its
-// first flush would write the content back.
-//
-// Driven with many concurrent acquires so the singleflight genuinely has
-// followers rather than a single winner taking the fast path.
-func TestConcurrentAcquiresOfOnePurgingDocumentAllRefuse(t *testing.T) {
-	mgr, _ := testManager(t, fastConfig())
-	const doc model.DocumentID = "purging-race"
-
-	mgr.beginPurge(doc)
-	t.Cleanup(func() { mgr.endPurge(doc) })
-
-	var wg sync.WaitGroup
-	errs := make([]error, 16)
-	for i := range errs {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, errs[i] = mgr.acquire(context.Background(), doc, model.ContentTypeMemo)
-		}(i)
-	}
-	wg.Wait()
-
-	for i, err := range errs {
-		if !errors.Is(err, ErrDocumentPurging) {
-			t.Fatalf("concurrent acquire %d during a cascade = %v, want ErrDocumentPurging; a room handed out here would flush content back for a deleted document", i, err)
-		}
-	}
-	if mgr.RoomCount() != 0 {
-		t.Fatalf("%d rooms were materialized for a document being purged", mgr.RoomCount())
 	}
 }

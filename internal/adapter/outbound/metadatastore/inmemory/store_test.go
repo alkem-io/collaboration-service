@@ -136,23 +136,3 @@ func TestBlankContentTypePreservesTheStoredOne(t *testing.T) {
 		t.Fatalf("a blank contentType overwrote the stored one: got %q, want preserved %q; the next open would resolve the type from the handshake and could materialize a memo root for a whiteboard", got.ContentType, model.ContentTypeWhiteboard)
 	}
 }
-
-// TestDeleteRemovesTheRowAndIsIdempotent pins the index half of the owner-delete
-// cascade. Idempotence is not cosmetic here: the cascade retries, and a second
-// attempt must complete the operation rather than fail it.
-func TestDeleteRemovesTheRowAndIsIdempotent(t *testing.T) {
-	s := New()
-	ctx := context.Background()
-	if err := s.Save(ctx, model.Metadata{ID: "doc", ContentType: model.ContentTypeMemo}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := s.Delete(ctx, "doc"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if _, err := s.Load(ctx, "doc"); !errors.Is(err, model.ErrNotFound) {
-		t.Fatalf("Load after Delete = %v, want ErrNotFound", err)
-	}
-	if err := s.Delete(ctx, "doc"); err != nil {
-		t.Fatalf("second Delete must succeed (the cascade retries): %v", err)
-	}
-}

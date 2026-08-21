@@ -18,8 +18,6 @@ import (
 type fakeLifecycle struct {
 	mu         sync.Mutex
 	registered []model.Metadata
-	purged     []model.DocumentID
-	purgeErr   error
 	createErr  error
 }
 
@@ -30,17 +28,9 @@ func (f *fakeLifecycle) PreRegister(_ context.Context, meta model.Metadata) erro
 	return f.createErr
 }
 
-func (f *fakeLifecycle) Purge(_ context.Context, id model.DocumentID) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.purged = append(f.purged, id)
-	return f.purgeErr
-}
-
 func newCollabRouter(h *CollabAPIHandler) *chi.Mux {
 	r := chi.NewRouter()
 	r.Post("/collab/{documentId}", h.Create)
-	r.Delete("/collab/{documentId}", h.Delete)
 	return r
 }
 
@@ -204,49 +194,6 @@ func TestCreateDocumentRejectsUnknownField(t *testing.T) {
 	}
 }
 
-// TestDeleteDocumentCascades asserts DELETE /collab/{id} runs the same cascade
-// purge as the bus event and returns 200 (FR-023, T016).
-func TestDeleteDocumentCascades(t *testing.T) {
-	lc := &fakeLifecycle{}
-	h := &CollabAPIHandler{Lifecycle: lc}
-	r := newCollabRouter(h)
-
-	req := httptest.NewRequest(http.MethodDelete, "/collab/doc-5", nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
-	}
-	var resp DeleteCollabResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID != "doc-5" || !resp.Deleted {
-		t.Fatalf("response mismatch: %+v", resp)
-	}
-	lc.mu.Lock()
-	defer lc.mu.Unlock()
-	if len(lc.purged) != 1 || lc.purged[0] != "doc-5" {
-		t.Fatalf("purge mismatch: %v", lc.purged)
-	}
-}
-
-// TestDeleteDocumentPropagatesError asserts a cascade error surfaces as a 500
-// (the durable purge genuinely failed — not an idempotent absent doc).
-func TestDeleteDocumentPropagatesError(t *testing.T) {
-	lc := &fakeLifecycle{purgeErr: context.DeadlineExceeded}
-	h := &CollabAPIHandler{Lifecycle: lc}
-	r := newCollabRouter(h)
-
-	req := httptest.NewRequest(http.MethodDelete, "/collab/doc-6", nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rr.Code)
-	}
-}
-
 // TestCreateDocumentPropagatesError asserts a pre-register failure is a 500.
 func TestCreateDocumentPropagatesError(t *testing.T) {
 	lc := &fakeLifecycle{createErr: context.DeadlineExceeded}
@@ -261,22 +208,15 @@ func TestCreateDocumentPropagatesError(t *testing.T) {
 	}
 }
 
-// TestMissingDocumentIDRejected asserts the create/delete handlers reject an empty
+// TestMissingDocumentIDRejected asserts the create handler rejects an empty
 // document id with a 400 when invoked without the route param set.
 func TestMissingDocumentIDRejected(t *testing.T) {
 	h := &CollabAPIHandler{Lifecycle: &fakeLifecycle{}}
 
-	for _, method := range []string{http.MethodPost, http.MethodDelete} {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(method, "/collab/", strings.NewReader(`{}`))
-		switch method {
-		case http.MethodPost:
-			h.Create(rr, req)
-		case http.MethodDelete:
-			h.Delete(rr, req)
-		}
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("%s empty id: status = %d, want 400", method, rr.Code)
-		}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/collab/", strings.NewReader(`{}`))
+	h.Create(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("empty id: status = %d, want 400", rr.Code)
 	}
 }

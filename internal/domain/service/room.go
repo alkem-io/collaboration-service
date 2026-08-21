@@ -81,7 +81,7 @@ type command struct {
 	mode model.CollaboratorMode
 	data []byte
 	done chan joinResult
-	// done2 returns the result of a cmdPurge run on the room loop (T015).
+	// done2 acknowledges a cmdCloseDeleted that ran on the room loop (T015).
 	done2 chan error
 	// contribution completion is produced by the one bounded off-loop periodic
 	// emit and reconciled on the room loop.
@@ -96,9 +96,11 @@ const (
 	cmdMessage
 	cmdPersist
 	cmdClose
-	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
-	// (session-end/document-deleted), purge metadata + blob, and release the room (T015).
-	cmdPurge
+	// cmdCloseDeleted reacts to the owner deleting the document, on the run loop:
+	// disconnect clients (session-end/document-deleted) and release the room. It
+	// deletes nothing and does not flush — `server` already removed the durable
+	// state before publishing the event (T015).
+	cmdCloseDeleted
 	cmdContributionDone
 )
 
@@ -249,7 +251,7 @@ type Room struct {
 	cancelSub func()
 
 	// ctx is the room-lifetime context every backend call on the run loop derives
-	// from (authZ eval, persist, purge, peer publish). It is cancelled exactly once,
+	// from (authZ eval, persist, teardown, peer publish). It is cancelled exactly once,
 	// on release (finish), so a hung backend call unblocks when the room tears down
 	// and a shutdown does not leave the single-writer loop wedged behind I/O. Each
 	// individual call is additionally bounded by cfg.BackendTimeout via opCtx, so a
@@ -276,7 +278,7 @@ func (r *Room) backendTimeout() time.Duration {
 }
 
 // opCtx returns a timeout-bounded context for a single backend call made on the
-// run loop (authZ eval, persist, purge, publish), derived from the room-lifetime
+// run loop (authZ eval, persist, teardown, publish), derived from the room-lifetime
 // context. The returned cancel MUST be called (defer) to release the timer. The
 // timeout bounds a slow/hung backend so it cannot stall the single-writer loop;
 // the parent ctx cancellation unblocks the call immediately on room release.
@@ -309,14 +311,6 @@ func (r *Room) flushContributionNow() {
 	r.flushContribution(ctx)
 }
 
-// purgeNow runs the owner-delete cascade under a bounded, room-scoped context so a
-// slow/hung blob/metadata backend cannot wedge the loop.
-func (r *Room) purgeNow() error {
-	ctx, cancel := r.opCtx()
-	defer cancel()
-	return r.purge(ctx)
-}
-
 // enqueueDeadline backstops a producer blocked on a full command channel (002
 // FR-008): the loop stays drained because every handler is bounded, so this rarely
 // fires, but a producer must never wait forever on a wedged loop.
@@ -332,7 +326,7 @@ func (r *Room) enqueue(cmd command) bool {
 // enqueueCtx submits a command to the run loop, returning false if the room has torn
 // down (state left Active) OR the producer's context/deadline elapses before a
 // buffer slot frees. The state check refuses new work BEFORE done is closed, so a
-// tearing-down room rejects producers early and Join/Purge retry into a fresh room.
+// tearing-down room rejects producers early and Join/CloseDeleted retry into a fresh room.
 func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
 	if !r.lc.is(stateActive) {
 		return false
@@ -346,7 +340,7 @@ func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
 	default:
 	}
 	// Slow path: the command buffer is full. Bounded-block so a producer (Forward /
-	// Leave / Purge) is never wedged behind a stuck loop — it gives up at the
+	// Leave / CloseDeleted) is never wedged behind a stuck loop — it gives up at the
 	// caller's ctx (e.g. the lifecycle handler timeout) or the deadline backstop.
 	t := time.NewTimer(enqueueDeadline)
 	defer t.Stop()
@@ -387,7 +381,7 @@ type RoomConfig struct {
 	// then reset (FR-014). Zero disables contribution flushing.
 	ContributionWindow time.Duration
 	// BackendTimeout bounds each backend call made on the room's single-writer run
-	// loop (authZ evaluation, snapshot persist, owner-delete purge, cross-pod
+	// loop (authZ evaluation, snapshot persist, owner-delete close, cross-pod
 	// publish). A slow or hung backend would otherwise stall the loop and block
 	// every other member's joins/messages/disconnects. Zero falls back to
 	// defaultBackendTimeout; the call is still cancelled when the room releases.
@@ -446,7 +440,7 @@ const (
 	defaultCollaboratorInactivity  = 0
 	defaultContributionWindowEvery = 10 * time.Minute
 	// defaultBackendTimeout bounds each backend call on the run loop (authZ,
-	// persist, purge, publish) so a hung backend cannot wedge the single-writer
+	// persist, teardown, publish) so a hung backend cannot wedge the single-writer
 	// loop. Generous enough for a slow-but-alive backend; far below any human-
 	// noticeable room stall.
 	defaultBackendTimeout = 30 * time.Second
@@ -989,13 +983,14 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	case cmdPersist:
 		r.persistNow()
 
-	case cmdPurge:
-		r.teardown(model.NewSessionEnd(model.CodeDocumentDeleted), func() {
-			err := r.purgeNow()
-			if cmd.done2 != nil {
-				cmd.done2 <- err
-			}
-		})
+	case cmdCloseDeleted:
+		// No flush hook. The owner deleted the document and `server` already removed
+		// its checkpoint blob, so persisting here would write content back for a
+		// document that no longer exists — the orphan this path exists to avoid.
+		r.teardown(model.NewSessionEnd(model.CodeDocumentDeleted), nil)
+		if cmd.done2 != nil {
+			cmd.done2 <- nil
+		}
 		return false
 
 	case cmdClose:
@@ -1846,7 +1841,7 @@ func (r *Room) persist(ctx context.Context) {
 
 // teardown runs the single, ordered room-release sequence (002 FR-013) — the ONE
 // place teardown ordering lives, so it cannot be mis-sequenced per call site: stop
-// accepting (beginTeardown) → flush (the caller's final persist/purge/broadcast, may
+// accepting (beginTeardown) → flush (the caller's final persist/broadcast, may
 // be nil) → cancel the room context (unblocking the decoupled fan-out) → tear down
 // the fan-out subscription → close(done) →
 // notify the Manager → mark Closed. beginTeardown is the idempotent guard: only the
@@ -1980,7 +1975,7 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 		flush()
 	}
 	// Balance the connection gauge for members still attached at teardown.
-	// cmdClose/cmdPurge tear the room down without each client traversing the
+	// cmdClose/cmdCloseDeleted tear the room down without each client traversing the
 	// per-connection Leave path, so their ConnOpened would otherwise never be
 	// matched by a ConnClosed — leaking connections_active upward by the member
 	// count. dropMember (the only other ConnClosed caller) deletes from r.members
@@ -2020,12 +2015,14 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// NOT on the owner-delete path — and this is a KNOWN CONTRACT GAP, not a
 	// settled design, so it is written down as one.
 	//
-	// What is established: purgeNow has already deleted the metadata row by the
-	// time this runs, and `server`'s contribution consumer resolves the id against
-	// the memo/whiteboard rows (collaboration-integration.service.ts). A deleted
-	// document misses BOTH lookups, so the event would be discarded and logged as
-	// "collaboration-contribution for unknown document". Emitting from here is a
-	// bus round trip whose only outcome is a warn per delete.
+	// What is established: the row is ALREADY GONE before this event ever reaches
+	// the service. `server` removes the entity, profile and bucket and then enqueues
+	// the outbox row that becomes document.deleted, so by the time teardown runs
+	// there is nothing left to resolve against. Its contribution consumer looks the
+	// id up in the memo/whiteboard rows (collaboration-integration.service.ts) and
+	// would discard the event, logging "collaboration-contribution for unknown
+	// document". Emitting from here is a bus round trip whose only outcome is a
+	// warn per delete.
 	//
 	// What is NOT established: that losing it is acceptable. The final partial
 	// window — contributions since the last periodic tick — IS dropped when a
@@ -2033,11 +2030,13 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// current contributor map. That the current arrangement cannot emit it
 	// USEFULLY is not the same as saying it should not be emitted at all.
 	//
-	// The loss is a consequence of ORDERING, not impossibility: the delete happens
-	// inside flush() just above, so there is a point in this same funnel where the
-	// entity still exists. Moving the emit there, or changing the consumer to
-	// accept a contribution for a just-deleted document, are both live options and
-	// both span repos. Pending disposition; do not read this branch as final.
+	// No ordering INSIDE this funnel can recover it. An earlier draft assumed the
+	// delete happened here and that moving the emit earlier would find the entity
+	// still alive; it does not, because the deletion is the producer's and completes
+	// before the event is published. The only remaining option is producer-side
+	// enrichment — the event carrying what the consumer would otherwise look up.
+	// That spans repos and is not decided here. BASIC-004 stays OPEN; do not read
+	// this branch as a settled design.
 	//
 	// Any in-flight periodic emit is left alone either way: its goroutine
 	// completes on its own bounded context and exits on r.done.

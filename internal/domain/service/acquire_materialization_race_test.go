@@ -19,9 +19,9 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// gatedStore parks a materializing room inside newRoom, and a cascade inside its
-// delete, so the window between "the room has loaded" and "the room is registered"
-// can be held open deliberately.
+// gatedStore parks a materializing room inside newRoom, so the window between
+// "the room has loaded" and "the room is registered" can be held open
+// deliberately.
 //
 // No production seam is needed: the Manager already takes its stores as ports, so
 // the window is widened from the outside.
@@ -32,10 +32,6 @@ type gatedStore struct {
 	loadEntered chan struct{}
 	loadRelease chan struct{}
 	loadOnce    sync.Once
-
-	deleteEntered chan struct{}
-	deleteRelease chan struct{}
-	deleteOnce    sync.Once
 }
 
 func newGatedStore() *gatedStore {
@@ -45,8 +41,6 @@ func newGatedStore() *gatedStore {
 		inner:           inner,
 		loadEntered:     make(chan struct{}),
 		loadRelease:     make(chan struct{}),
-		deleteEntered:   make(chan struct{}),
-		deleteRelease:   make(chan struct{}),
 	}
 }
 
@@ -56,14 +50,6 @@ func (g *gatedStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID) 
 		<-g.loadRelease
 	})
 	return g.CheckpointStore.LoadCheckpoint(ctx, id)
-}
-
-func (g *gatedStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	g.deleteOnce.Do(func() {
-		close(g.deleteEntered)
-		<-g.deleteRelease
-	})
-	return g.inner.Delete(ctx, req)
 }
 
 // gatedManager builds a Manager over the gated store, with the document already
@@ -112,16 +98,23 @@ func gatedManager(t *testing.T, store *gatedStore, doc model.DocumentID) *Manage
 // window, held open on purpose.
 //
 // acquire materializes OFF the registry lock, because newRoom does backend I/O and
-// holding the lock across it would wedge every other document. That means a Purge
-// can begin — and raise its tombstone — while a room for the same document is
+// holding the lock across it would wedge every other document. That means an
+// owner-delete close can raise its tombstone while a room for the same document is
 // already loading. Registering that room afterwards would put a LIVE room on a
-// document the owner has deleted, and its first flush would write the content and
-// the index row straight back. The owner deletes a document and it reappears.
+// document the owner has deleted, and its first flush would write a checkpoint and
+// an index row straight back. The owner deletes a document and it reappears.
 //
-// The fast-path tombstone check cannot catch this: it ran before the cascade
+// The fast-path tombstone check cannot catch this: it ran before the close
 // started. Only the re-check after materialization can, and it has to tear the
 // fresh room down rather than merely refusing to register it, or the room's own
 // timers keep it alive and flushing.
+//
+// The tombstone is raised DIRECTLY rather than by calling CloseDeleted on another
+// goroutine. CloseDeleted no longer deletes anything, so on a document with no
+// live room it returns immediately and lowers the tombstone in the same breath —
+// there is no I/O left to park inside. Raising it here holds the window open
+// deterministically instead of racing an instantaneous call, and it is the same
+// state CloseDeleted puts the Manager in.
 func TestACascadeStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 	store := newGatedStore()
 	const doc model.DocumentID = "cascade-during-materialization"
@@ -140,38 +133,29 @@ func TestACascadeStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 	// The join is now parked inside newRoom, holding no registry lock.
 	<-store.loadEntered
 
-	purgeErr := make(chan error, 1)
-	go func() { purgeErr <- mgr.Purge(context.Background(), doc) }()
-
-	// The cascade has raised its tombstone and is parked in the content delete, so
-	// it is still in flight when the room finishes loading.
-	<-store.deleteEntered
+	// The owner deletes the document while the room is still loading. This returns
+	// immediately — nothing durable to remove, and no room registered yet to close —
+	// which is exactly the point: what refuses the racing Join is the bumped epoch,
+	// not a window held open by slow I/O.
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("CloseDeleted: %v", err)
+	}
 
 	close(store.loadRelease)
 	select {
 	case err := <-joinErr:
-		if !errors.Is(err, ErrDocumentPurging) {
-			t.Fatalf("join during a cascade returned %v, want ErrDocumentPurging", err)
+		if !errors.Is(err, errRoomUnavailable) {
+			t.Fatalf("join during an owner-delete close returned %v, want errRoomUnavailable — a transient refusal the client retries with a fresh existence read", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the join never completed")
-	}
-
-	close(store.deleteRelease)
-	select {
-	case err := <-purgeErr:
-		if err != nil {
-			t.Fatalf("Purge: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the purge never completed")
 	}
 
 	mgr.mu.Lock()
 	_, registered := mgr.rooms[doc]
 	mgr.mu.Unlock()
 	if registered {
-		t.Fatal("a room materialized during the cascade was registered anyway; it is live on a deleted document and its first flush writes the content back")
+		t.Fatal("a room materialized during the close was registered anyway; it is live on a deleted document and its first flush writes the content back")
 	}
 	// Refusing to register is only half of it: the room DID acquire a registry
 	// handle during materialization, and nothing else will ever release it. An
@@ -226,7 +210,6 @@ func TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 		t.Fatal("the join never completed")
 	}
 
-	close(store.deleteRelease)
 	<-closed
 
 	mgr.mu.Lock()

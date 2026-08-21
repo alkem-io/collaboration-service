@@ -314,9 +314,11 @@ func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
 		// close reason — the join is refused so no control frame carries it.
 		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached},
 		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation, "forbidden"},
-		// A document being deleted is a verdict too: reconnecting cannot help, so it
-		// must not read as a transient failure the client should retry through.
-		{"document purging", service.ErrDocumentPurging, websocket.StatusPolicyViolation, "document deleted"},
+		// A document that was deleted is refused by the EXISTENCE gate, which is
+		// indistinguishable from forbidden on the wire — see the ErrDocumentUnknown
+		// case above. There is no separate "being deleted" status: a Join racing a
+		// delete now fails transiently and the client reconnects into that same
+		// existence check.
 		// Wrapped policy errors must keep their verdict. Reported as internal instead,
 		// a denied client would reconnect in a loop against a permanent refusal.
 		{"wrapped forbidden", fmt.Errorf("joining: %w", service.ErrForbidden), websocket.StatusPolicyViolation, "forbidden"},

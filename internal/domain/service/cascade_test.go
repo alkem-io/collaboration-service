@@ -2,96 +2,152 @@ package service
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
-	"github.com/antst/go-yjs/backend/persistence"
-
-	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
-	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
-	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
-	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
-// errInjectedBlobDelete is the sentinel a test blob store returns from Delete to
-// drive the cascade error path.
-var errInjectedBlobDelete = errors.New("blob delete failed")
-
-// TestPurgeDisconnectsAndPurgesLiveRoom asserts the owner-delete cascade on a
-// live room: connected clients get session-end/document-deleted, the room is released, and the
-// metadata row + snapshot blob are purged (FR-023, SC-010, T015).
-func TestPurgeDisconnectsAndPurgesLiveRoom(t *testing.T) {
+// TestCloseDeletedEvictsALiveRoomAndDeletesNothing is RED #1 for the owner-delete
+// slice, and the one that pins its whole point.
+//
+// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
+// it enqueues the outbox row that becomes document.deleted (server:
+// memo.service.ts / whiteboard.service.ts run the cascade ahead of the
+// transaction that removes the leaf and enqueues). So by the time this event
+// arrives there is nothing durable left for collab to remove, and issuing a
+// delete would at best be a redundant round-trip against a deleted bucket.
+//
+// What collab still owes is the LIVE part: tell the connected clients with the
+// one stable typed code, and evict the room.
+//
+// It seeds a real snapshot first, deliberately. Asserting only "the room went
+// away" would pass against a store that still deleted; the surviving snapshot is
+// what discriminates.
+//
+// Non-vacuity: restore either durable delete in the teardown path and the two
+// survival assertions fail.
+func TestCloseDeletedEvictsALiveRoomAndDeletesNothing(t *testing.T) {
 	mgr, deps := testManager(t, RoomConfig{
 		SaveDebounce: 10 * time.Millisecond,
-		IdleTimeout:  10 * time.Second, // long: only the cascade releases it
+		IdleTimeout:  10 * time.Second, // long: only the close releases the room
 		SendBuffer:   256,
 	})
 
-	a := newFakeClient(t)
-	a.join(mgr, "purge-live", model.ContentTypeMemo)
+	// TWO connected clients: the acceptance boundary is room-wide, and a teardown
+	// that ended only the first would pass with one.
+	a, b := newFakeClient(t), newFakeClient(t)
+	a.join(mgr, "close-live", model.ContentTypeMemo)
+	b.join(mgr, "close-live", model.ContentTypeMemo)
 	a.observeUpdates()
 	a.insertText("doomed ")
 
-	// Wait for a snapshot so there is a blob to purge.
+	// A real snapshot, so "nothing was deleted" is a claim about something.
 	waitFor(t, "snapshot persisted", func() bool {
-		_, err := deps.storedState(context.Background(), "purge-live")
+		_, err := deps.storedState(context.Background(), "close-live")
 		return err == nil
 	})
 
-	if err := mgr.Purge(context.Background(), "purge-live"); err != nil {
-		t.Fatalf("purge: %v", err)
+	if err := mgr.CloseDeleted(context.Background(), "close-live"); err != nil {
+		t.Fatalf("CloseDeleted: %v", err)
 	}
 
-	// The room is released and the connected client got a session-end control.
-	waitFor(t, "room released on purge", func() bool { return mgr.RoomCount() == 0 })
-	if !hasControlCode(a, model.CodeDocumentDeleted) {
-		t.Fatal("connected client did not receive session-end/document-deleted on purge")
+	waitFor(t, "room released on the owner-delete close", func() bool { return mgr.RoomCount() == 0 })
+
+	// EVERY member is told, with the one stable typed code, BEFORE its socket
+	// closes. The ordering is the property clients depend on: a close without a
+	// reason is indistinguishable from a network failure, and the client would
+	// reconnect into a document that no longer exists.
+	for name, c := range map[string]*fakeClient{"a": a, "b": b} {
+		end, toldFirst := c.sessionEnd()
+		if end == nil {
+			t.Fatalf("client %s was never ended", name)
+		}
+		if end.Code != model.CodeDocumentDeleted {
+			t.Errorf("client %s session end = %q, want %q", name, end.Code, model.CodeDocumentDeleted)
+		}
+		if !toldFirst {
+			t.Errorf("client %s socket closed BEFORE its document-deleted control; a bare close reads as a network failure and the client retries", name)
+		}
+		if !hasControlCode(c, model.CodeDocumentDeleted) {
+			t.Errorf("client %s did not receive the session-end/document-deleted control", name)
+		}
 	}
 
-	// Metadata + blob are gone (no orphan).
-	if _, err := deps.meta.Load(context.Background(), "purge-live"); err == nil {
-		t.Fatal("metadata row not purged")
+	// The discriminating half: collab touched neither.
+	if _, err := deps.meta.Load(context.Background(), "close-live"); err != nil {
+		t.Fatalf("metadata row was deleted (%v); the row belongs to server, which removed it before publishing", err)
 	}
-	if _, err := deps.storedState(context.Background(), "purge-live"); err == nil {
-		t.Fatal("snapshot blob not purged")
+	if _, err := deps.storedState(context.Background(), "close-live"); err != nil {
+		t.Fatalf("snapshot was deleted (%v); the blob belongs to file-service, and server removed its bucket before publishing", err)
 	}
 }
 
-// TestPurgeAbsentDocumentIsNoOp asserts deleting a document with no live room and
-// no durable rows is a no-op success (idempotency, SC-010).
-func TestPurgeAbsentDocumentIsNoOp(t *testing.T) {
+// TestCloseDeletedDoesNotFlushOnTheWayOut is the other half of "deletes nothing",
+// and it is a separate failure: not deleting is useless if the teardown persists.
+//
+// A room torn down for an owner-delete holds in-memory state the owner just
+// deleted. Flushing it would write a checkpoint back for a document that no
+// longer exists — resurrecting content through the save path rather than failing
+// to remove it. The ordinary shutdown teardown (cmdClose) DOES flush, so this is
+// a real branch, not a tautology.
+//
+// Non-vacuity: pass a flush hook to teardown on the cmdCloseDeleted branch and the
+// revision below advances.
+func TestCloseDeletedDoesNotFlushOnTheWayOut(t *testing.T) {
+	mgr, deps := testManager(t, RoomConfig{
+		SaveDebounce: time.Hour, // no debounced save can fire on its own
+		IdleTimeout:  time.Hour,
+		SendBuffer:   256,
+	})
+
+	const doc model.DocumentID = "close-no-flush"
+	a := newFakeClient(t)
+	a.join(mgr, doc, model.ContentTypeMemo)
+	a.observeUpdates()
+	a.insertText("never-persisted ")
+
+	// Nothing has been written yet: the debounce is an hour away.
+	if _, err := deps.storedState(context.Background(), string(doc)); err == nil {
+		t.Fatal("precondition failed: a snapshot exists before the close, so a flush on teardown would be invisible")
+	}
+
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("CloseDeleted: %v", err)
+	}
+	waitFor(t, "room released", func() bool { return mgr.RoomCount() == 0 })
+
+	if _, err := deps.storedState(context.Background(), string(doc)); err == nil {
+		t.Fatal("the owner-delete teardown flushed; it wrote content back for a document the owner deleted")
+	}
+}
+
+// TestCloseDeletedIsIdempotentAcrossRedeliveries is RED #3, and it carries the
+// cold-path property too. The broker delivers at-least-once and a requeued event is
+// redelivered, so the same document.deleted arrives twice — once against a live
+// room, and again once there is no room at all, which is exactly the cold case.
+//
+// Non-vacuity: it drives the second delivery through the same public entry point
+// rather than asserting a counter, so a close that panicked or errored on an
+// already-closed room fails here.
+func TestCloseDeletedIsIdempotentAcrossRedeliveries(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
-	if err := mgr.Purge(context.Background(), "never-existed"); err != nil {
-		t.Fatalf("purge of absent doc should be a no-op: %v", err)
-	}
-}
 
-// TestPurgeDurableOnlyDocument asserts the cascade purges the durable rows of a
-// document that has no live room (persisted earlier, room since released).
-func TestPurgeDurableOnlyDocument(t *testing.T) {
-	mgr, deps := testManager(t, fastConfig())
+	const doc model.DocumentID = "redelivered"
+	a := newFakeClient(t)
+	a.join(mgr, doc, model.ContentTypeMemo)
 
-	// Seed a metadata row + blob directly (the "persisted, room released" state).
-	if err := deps.putState(context.Background(), "durable-only", []byte("snap")); err != nil {
-		t.Fatalf("seed blob: %v", err)
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("first delivery: %v", err)
 	}
-	if err := deps.meta.Save(context.Background(), model.Metadata{
-		ID: "durable-only", ContentType: model.ContentTypeMemo,
-		ContentPointer: "durable-only",
-	}); err != nil {
-		t.Fatalf("seed metadata: %v", err)
-	}
+	waitFor(t, "room released", func() bool { return mgr.RoomCount() == 0 })
 
-	if err := mgr.Purge(context.Background(), "durable-only"); err != nil {
-		t.Fatalf("purge durable-only: %v", err)
+	// The redelivery lands on a document with no room left.
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("redelivery must be a no-op success, got %v", err)
 	}
-	if _, err := deps.meta.Load(context.Background(), "durable-only"); err == nil {
-		t.Fatal("durable metadata not purged")
-	}
-	if _, err := deps.storedState(context.Background(), "durable-only"); err == nil {
-		t.Fatal("durable blob not purged")
+	if mgr.RoomCount() != 0 {
+		t.Fatal("the redelivery materialized a room for a deleted document")
 	}
 }
 
@@ -111,117 +167,5 @@ func TestPreRegisterWritesMetadata(t *testing.T) {
 	}
 	if got.ContentType != model.ContentTypeWhiteboard || got.OwnerRef != "callout-1" {
 		t.Fatalf("pre-registered row mismatch: %+v", got)
-	}
-}
-
-// TestPurgeLiveRoomSurfacesBlobError asserts a blob-delete failure during the
-// cascade of a live room propagates out of Purge (so the bus/HTTP caller sees a
-// genuine failure, not a false success).
-func TestPurgeLiveRoomSurfacesBlobError(t *testing.T) {
-	open := authopen.New()
-	deps := Deps{
-		Metadata:   metainmem.New(),
-		Checkpoint: deleteFailingStore{CheckpointStore: persistinprocess.New()},
-		Auth:       open,
-		AuthZ:      open,
-	}
-	mgr := NewManager(deps, RoomConfig{
-		SaveDebounce: 10 * time.Millisecond,
-		IdleTimeout:  10 * time.Second,
-		SendBuffer:   64,
-	}, nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "purge-err", model.ContentTypeMemo)
-	a.observeUpdates()
-	a.insertText("x ")
-	waitFor(t, "snapshot persisted", func() bool { return hasControlKind(a, model.ControlSaved) })
-
-	if err := mgr.Purge(context.Background(), "purge-err"); err == nil {
-		t.Fatal("expected purge to surface the blob delete error")
-	}
-}
-
-// TestPurgeDurableSurfacesMetadataLoadError asserts a metadata Load failure (non
-// NotFound) on a durable-only purge propagates out (no silent success).
-// NOTE (FR-018a): a "purgeDurable surfaces the metadata LOAD error" test used to
-// live here. purgeDurable no longer loads the index row before deleting — it
-// deletes the stored state by document id, then the row — so there is no load to
-// fail and the test asserted a code path that no longer exists. The property it
-// defended (a failed cascade surfaces rather than reporting false success) is
-// covered by TestPurgeDurableSurfacesMetadataDeleteError below and by
-// TestPurgeLiveRoomSurfacesBlobError above.
-
-// deleteFailingStore is a CheckpointStore whose delete errors, to drive the
-// cascade error path — a failed cascade must surface rather than report a false
-// success and leave a half-deleted document.
-type deleteFailingStore struct {
-	persistence.CheckpointStore
-}
-
-func (deleteFailingStore) Delete(context.Context, persistence.DeleteRequest) error {
-	return errInjectedBlobDelete
-}
-
-// errInjectedMetaDelete is the sentinel a test metadata store returns from Delete
-// to drive the cascade metadata-delete error path.
-var errInjectedMetaDelete = errors.New("metadata delete failed")
-
-// failingMetaDelete is a MetadataStore whose Delete errors with a non-NotFound
-// error, so the purge cascade must surface it (not swallow it as idempotent).
-type failingMetaDelete struct{ port.MetadataStore }
-
-func (failingMetaDelete) Delete(context.Context, model.DocumentID) error {
-	return errInjectedMetaDelete
-}
-
-// TestPurgeLiveRoomSurfacesMetadataDeleteError asserts that a non-NotFound
-// metadata delete failure during the live-room cascade propagates out rather
-// than being treated as idempotent success (mirrors the blob-delete error path,
-// T015; CR presence.go purge idempotency).
-func TestPurgeLiveRoomSurfacesMetadataDeleteError(t *testing.T) {
-	open := authopen.New()
-	deps := Deps{
-		Metadata:   failingMetaDelete{metainmem.New()},
-		Checkpoint: persistinprocess.New(),
-		Auth:       open,
-		AuthZ:      open,
-	}
-	mgr := NewManager(deps, RoomConfig{
-		SaveDebounce: 10 * time.Millisecond,
-		IdleTimeout:  10 * time.Second,
-		SendBuffer:   64,
-	}, nil, nil)
-
-	a := newFakeClient(t)
-	a.join(mgr, "meta-del-err", model.ContentTypeMemo)
-	a.observeUpdates()
-	a.insertText("x ")
-	waitFor(t, "snapshot persisted", func() bool { return hasControlKind(a, model.ControlSaved) })
-
-	if err := mgr.Purge(context.Background(), "meta-del-err"); err == nil {
-		t.Fatal("expected purge to surface the metadata delete error")
-	}
-}
-
-// TestPurgeDurableSurfacesMetadataDeleteError asserts the no-live-room durable
-// purge also surfaces a non-NotFound metadata delete failure (purgeDurable),
-// rather than swallowing it.
-func TestPurgeDurableSurfacesMetadataDeleteError(t *testing.T) {
-	open := authopen.New()
-	inner := metainmem.New()
-	// Seed a row so purgeDurable's Load succeeds and it proceeds to Delete.
-	if err := inner.Save(context.Background(), model.Metadata{ID: "durable-del-err", ContentType: model.ContentTypeMemo}); err != nil {
-		t.Fatalf("seed metadata: %v", err)
-	}
-	deps := Deps{
-		Metadata:   failingMetaDelete{inner},
-		Checkpoint: persistinprocess.New(),
-		Auth:       open,
-		AuthZ:      open,
-	}
-	mgr := NewManager(deps, fastConfig(), nil, nil)
-	if err := mgr.Purge(context.Background(), "durable-del-err"); err == nil {
-		t.Fatal("expected durable purge to surface the metadata delete error")
 	}
 }

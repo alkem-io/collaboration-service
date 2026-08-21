@@ -45,7 +45,7 @@ import (
 // room and tears down the backends that hold connections.
 type App struct {
 	// Handler is the chi router serving /healthz, /metrics, /collab/{id} (WS),
-	// and the standalone create/delete REST API.
+	// and the optional standalone create endpoint.
 	Handler http.Handler
 	// Manager is the started room registry; the lifecycle consumer and the REST
 	// API drive it. Exposed for the e2e suite to assert room state directly.
@@ -198,7 +198,7 @@ func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Lo
 	queue := lifecycleQueue(cfg)
 	consumer, err := lifecycle.Connect(lifecycle.Config{
 		URL: cfg.RabbitMQ.URL, Queue: queue,
-		// Without an Observer the retry ladder is invisible: events would move to
+		// Without an Observer the dead-letter queue is invisible: events would move to
 		// the DLQ and stay there with nothing to alert on.
 		Observer: httpAdapter.PrometheusLifecycleObserver{},
 	}, manager, logger.Named("lifecycle"))
@@ -225,19 +225,16 @@ func lifecycleQueue(cfg *config.Config) string {
 
 // buildCheckpoint selects the persistence adapter.
 //
-// The return type is persistence.DeletingCheckpointStore, not CheckpointStore:
-// deletion is OPTIONAL in the contract (some media are forbidden to delete — WORM
-// storage, object locks, regulated archival tiers), so a caller that needs
-// erasure must type-assert and fail loudly rather than trust that Delete exists.
-// Asserting it HERE means a store that cannot delete fails startup, instead of
-// surfacing the first time an owner deletes a document and the cascade cannot
-// complete.
+// It returns a plain CheckpointStore. The deletion capability was required here
+// only so the owner-delete cascade could erase a snapshot; `server` now deletes
+// the checkpoint blob before publishing document.deleted, so nothing in this
+// service deletes one and nothing needs to assert it can.
 //
 // Only two shapes exist. file-service is the deployed one; `inline` resolves to
 // the in-process store, which backs the test suite, the local development loop
 // and the zero-dependency smoke test (§III). Any other value is rejected by
 // config.Load and cannot reach here.
-func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.DeletingCheckpointStore, error) {
+func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.CheckpointStore, error) {
 	if cfg.CheckpointStore == config.CheckpointStoreFileService {
 		return persistfileservice.New(persistfileservice.Config{
 			BaseURL:          cfg.FileService.BaseURL,
@@ -333,9 +330,9 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		CollabHandler: collab,
 		Logger:        logger,
 	}
-	// The standalone create/delete REST API is the no-bus lifecycle equivalent
+	// The standalone create endpoint is the no-bus equivalent of document creation
 	// (T016). In Alkemio/rabbitmq mode the server owns document lifecycle over the
-	// bus (the lifecycle consumer), so these unauthenticated endpoints must NOT be
+	// bus (the lifecycle consumer), so this unauthenticated endpoint must NOT be
 	// exposed — leaving CollabAPI nil omits the REST surface entirely.
 	//
 	// When AuthZ is authzeval (AUTHZ_MODE=authzeval, independent of the AuthN

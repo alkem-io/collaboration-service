@@ -223,38 +223,6 @@ func TestLoadServerError(t *testing.T) {
 	}
 }
 
-func TestDeletePublishes(t *testing.T) {
-	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Success: true}}}
-	store := newWithRPC(f)
-	if err := store.Delete(context.Background(), "doc-x"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if f.calls[0].pattern != "collaboration-delete" {
-		t.Errorf("pattern = %q, want collaboration-delete", f.calls[0].pattern)
-	}
-	if dd, ok := f.calls[0].data.(DeleteData); !ok || dd.ID != "doc-x" {
-		t.Errorf("delete data = %+v", f.calls[0].data)
-	}
-}
-
-func TestDeleteServerErrorSurfaces(t *testing.T) {
-	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Error: "boom"}}}
-	store := newWithRPC(f)
-	if err := store.Delete(context.Background(), "d"); err == nil {
-		t.Error("expected Delete to surface the server error")
-	}
-}
-
-func TestDeleteSuccessFalseWithoutErrorSurfaces(t *testing.T) {
-	// A {success:false} reply with no error string must still fail (mirrors Save),
-	// rather than silently dropping the delete.
-	f := &fakeRPC{replies: map[string]any{PatternDelete: DeleteReply{Success: false}}}
-	store := newWithRPC(f)
-	if err := store.Delete(context.Background(), "d"); err == nil {
-		t.Error("expected Delete to fail when the server reports success=false")
-	}
-}
-
 // TestSaveUnsuccessfulWithoutErrorStringSurfaces defends Save's bare
 // !reply.Success branch (store.go:80): a reply that reports failure WITHOUT an
 // error string must still be surfaced as an error — distinct from the
@@ -265,17 +233,6 @@ func TestSaveUnsuccessfulWithoutErrorStringSurfaces(t *testing.T) {
 	store := newWithRPC(f)
 	if err := store.Save(context.Background(), model.Metadata{ID: "d"}); err == nil {
 		t.Error("expected Save to surface a failure even when the server sent no error string")
-	}
-}
-
-// TestDeleteTransportErrorSurfaces defends Delete's transport-error branch
-// (store.go:90): a failed RPC Call (broker down) must surface as an error, so a
-// purge that never reached the server is not mistaken for a completed delete.
-func TestDeleteTransportErrorSurfaces(t *testing.T) {
-	f := &fakeRPC{callErr: errors.New("channel closed")}
-	store := newWithRPC(f)
-	if err := store.Delete(context.Background(), "d"); err == nil {
-		t.Error("expected Delete to surface the transport error")
 	}
 }
 

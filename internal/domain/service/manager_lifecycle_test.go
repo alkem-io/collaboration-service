@@ -79,7 +79,7 @@ func TestJoinDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 }
 
 // TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue is the same race on the purge
-// path: Manager.Purge's cmdPurge can land in a room that tears down without running
+// path: Manager.Purge's cmdCloseDeleted can land in a room that tears down without running
 // it, so the result channel is never written. The fix selects on room.done and
 // falls through to the idempotent direct durable purge instead of blocking forever.
 func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
@@ -88,9 +88,9 @@ func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	room := wedgeRoom(t, m, deps, id)
 
 	purgeErr := make(chan error, 1)
-	go func() { purgeErr <- m.Purge(context.Background(), id) }()
+	go func() { purgeErr <- m.CloseDeleted(context.Background(), id) }()
 
-	waitFor(t, "cmdPurge buffered in the wedged room", func() bool { return len(room.commands) == 1 })
+	waitFor(t, "cmdCloseDeleted buffered in the wedged room", func() bool { return len(room.commands) == 1 })
 	room.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 
 	select {
@@ -99,7 +99,7 @@ func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 			t.Fatalf("Purge should fall through to an idempotent durable purge, got: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Purge hung after the room tore down with its cmdPurge still unprocessed")
+		t.Fatal("Purge hung after the room tore down with its cmdCloseDeleted still unprocessed")
 	}
 }
 
@@ -125,10 +125,6 @@ func (g *gateStore) SaveCheckpoint(ctx context.Context, req persistence.SaveChec
 
 func (g *gateStore) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (persistence.Checkpoint, error) {
 	return g.inner.LoadCheckpoint(ctx, id)
-}
-
-func (g *gateStore) Delete(ctx context.Context, req persistence.DeleteRequest) error {
-	return g.inner.Delete(ctx, req)
 }
 
 func (g *gateStore) FenceMode() persistence.FenceMode { return g.inner.FenceMode() }

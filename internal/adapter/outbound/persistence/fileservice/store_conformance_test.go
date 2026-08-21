@@ -150,12 +150,6 @@ func (s *stubFileService) deleteAll() {
 	s.byHash = map[string]string{}
 }
 
-func (s *stubFileService) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.byID)
-}
-
 // mapResolver is the DocumentID -> file pointer map the real wiring keeps in the
 // Alkemio metadata index. Written once per document, read on load.
 type mapResolver struct {
@@ -226,24 +220,11 @@ func TestCheckpointConformance(t *testing.T) {
 	})
 }
 
-// The core's CheckpointPersistenceDeletion suite is deliberately NOT run against
-// this store, and the reason is now stated upstream rather than inferred here.
+// This store implements no Delete. Nothing in the service deletes a checkpoint:
+// `server` removes the storage bucket before it publishes document.deleted, so
+// the blob is already gone by the time collab reacts. The core's
+// CheckpointPersistenceDeletion suite therefore has no subject here.
 //
-// Its load-after-delete clause requires ErrNotFound. This store returns ErrCorrupt
-// while the index row survives, because it does not own the pointer — that lives
-// in server's metadata row. persistence/store.go (v0.0.6) states the precondition:
-// "a partial owner cannot satisfy Deleter alone ... a component store failing the
-// suite on this rule has a shape mismatch, not a bug."
-//
-// The guarantee is real, it just belongs a layer up: the completed purge cascade
-// drops the row, and a rowless document loads as ErrNotFound. The suite therefore
-// belongs against purgeDurable, not against the blob store.
-//
-// I re-added the invocation once when v0.0.6 fixed the unrelated codec-fixture
-// defect, and it failed on exactly this clause. Recorded so the next person does
-// not repeat it. The four properties it would check are covered directly below
-// and in TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives.
-
 // --- behaviours the contract cannot express, but this medium requires ---
 
 // realUpdate builds a genuine Yjs update carrying text. Opaque bytes will not do
@@ -444,151 +425,6 @@ func TestLoadReportsNotFoundForADocumentWithNoPointer(t *testing.T) {
 	}
 }
 
-// TestDeleteRemovesTheDocumentsFile covers the production erasure path, which had
-// no test at all — Delete sat at 0% while the owner-delete cascade depended on it.
-//
-// The four properties the contract names, against a real HTTP round-trip rather
-// than the in-process store that stands in for this one everywhere else.
-func TestDeleteRemovesTheDocumentsFile(t *testing.T) {
-	store, stub := newStoreForTest(t)
-	ctx := context.Background()
-
-	update := realUpdate(t, "delete-me")
-	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"),
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if stub.count() != 1 {
-		t.Fatalf("precondition: expected one stored file, got %d", stub.count())
-	}
-
-	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if stub.count() != 0 {
-		t.Fatalf("the file survived Delete: %d still stored", stub.count())
-	}
-
-	// IDEMPOTENT. The cascade retries, and the second attempt must not fail the
-	// operation it is completing.
-	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
-		t.Fatalf("second Delete must succeed (the cascade retries): %v", err)
-	}
-}
-
-// TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives pins what the
-// persistence contract REQUIRES for a dangling pointer.
-//
-// This is what persistence.ErrNotFound's own doc requires: a store that resolves a
-// document through a pointer, finds the pointer set and the target gone, has not
-// found "no history". Reporting ErrNotFound there makes the caller treat a
-// document that HAD content as new — here, open it EMPTY — and the next save
-// overwrites the last good state. Silent data loss arriving through the error
-// type. Use ErrCorrupt.
-//
-// That is exactly this store's dangling-row window. purgeDurable erases the blob
-// FIRST and drops the index row second, so a broker failure between the two steps
-// leaves the row outliving the blob. Reporting ErrNotFound there would send
-// restoreInto down its open-empty path, and the next save would make that empty
-// document durable — the deleted document's content replaced by nothing.
-//
-// What genuinely conflicts is Deleter's load-after-delete clause, which requires
-// ErrNotFound in the same situation. Both rules cannot hold for a store that does
-// not own the pointer — ours lives in server's metadata row. Raised upstream and
-// resolved in favour of ErrNotFound's rule, since the data-loss argument is the
-// stronger one; the Deleter clause now states its precondition that the
-// implementation owns everything making the document findable.
-//
-// The consequence for this file: the blob store is not a conforming Deleter ON
-// ITS OWN and should not be measured as one. The load-after-delete guarantee
-// belongs to whatever owns the whole document — the purge cascade, which does
-// provide it end to end, because the completed cascade drops the row and a
-// rowless document loads as ErrNotFound.
-func TestLoadAfterDeleteReportsCorruptWhileTheIndexRowSurvives(t *testing.T) {
-	store, _ := newStoreForTest(t)
-	ctx := context.Background()
-
-	update := realUpdate(t, "delete-then-load")
-	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("sv"),
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-
-	_, err := store.LoadCheckpoint(ctx, "doc")
-	if errors.Is(err, persistence.ErrNotFound) {
-		t.Fatal("load reported ErrNotFound while the index row still carries a pointer; restoreInto treats that as 'never saved' and opens the document EMPTY, so the next save writes an empty document over one whose blob was just erased")
-	}
-	if !errors.Is(err, persistence.ErrCorrupt) {
-		t.Fatalf("load after Delete with the row still present = %v, want ErrCorrupt", err)
-	}
-}
-
-// TestDeleteHonoursACancelledContext pins the last deletion property: a cancelled
-// caller must not have its erasure carried out anyway.
-func TestDeleteHonoursACancelledContext(t *testing.T) {
-	store, stub := newStoreForTest(t)
-
-	update := realUpdate(t, "keep-me")
-	if _, err := store.SaveCheckpoint(context.Background(), persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("sv"),
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc"}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Delete with a cancelled context = %v, want context.Canceled", err)
-	}
-	if stub.count() != 1 {
-		t.Fatalf("a cancelled Delete erased the file anyway: %d stored", stub.count())
-	}
-}
-
-// TestDeleteSucceedsForADocumentThatNeverHadAFile is the other idempotence case:
-// the document has no pointer at all, so there is nothing to erase. A cascade
-// over a document that was created and deleted without ever being saved must not
-// fail on this step.
-func TestDeleteSucceedsForADocumentThatNeverHadAFile(t *testing.T) {
-	store, _ := newStoreForTest(t)
-	if err := store.Delete(context.Background(), persistence.DeleteRequest{DocumentID: "never-saved"}); err != nil {
-		t.Fatalf("Delete on a document with no file: %v", err)
-	}
-}
-
-// TestDeleteRejectsAFenceWithoutTouchingTheNetwork pins the Unfenced contract at
-// the erasure path.
-//
-// This store cannot hold an epoch, so it reports Unfenced and a non-zero fence is
-// ErrUnexpectedFence. The assertion that matters is the SECOND one: the rejection
-// must happen before the pointer is resolved and before any request is sent. A
-// store that returned the right error after issuing the DELETE would satisfy an
-// error-only check while having already erased the document — which is the whole
-// failure mode "a rejected delete leaves the state intact" exists to prevent.
-func TestDeleteRejectsAFenceWithoutTouchingTheNetwork(t *testing.T) {
-	store, stub := newStoreForTest(t)
-	ctx := context.Background()
-
-	update := realUpdate(t, "fenced-delete")
-	if _, err := store.SaveCheckpoint(ctx, persistence.SaveCheckpointRequest{
-		DocumentID: "doc", Encoding: persistence.EncodingV2, Update: update, StateVector: []byte("derived-on-read"),
-	}); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	if err := store.Delete(ctx, persistence.DeleteRequest{DocumentID: "doc", Fence: 9}); !errors.Is(err, persistence.ErrUnexpectedFence) {
-		t.Fatalf("Delete with a fence against an Unfenced store = %v, want ErrUnexpectedFence", err)
-	}
-	if stub.count() != 1 {
-		t.Fatal("a rejected delete erased the file anyway; the fence must be checked before the request is sent")
-	}
-}
-
 // storeAgainst builds a store pointed at an arbitrary handler, for driving the
 // HTTP failure branches a well-behaved stub never produces.
 func storeAgainst(t *testing.T, h http.HandlerFunc, pointers map[backend.DocumentID]string) *Store {
@@ -635,16 +471,6 @@ func TestUnexpectedStatusesAreSurfacedNotSwallowed(t *testing.T) {
 
 		if _, err := store.LoadCheckpoint(context.Background(), "doc"); err == nil {
 			t.Fatal("a 403 on fetch must surface; swallowing it would look like an empty document")
-		}
-	})
-
-	t.Run("delete", func(t *testing.T) {
-		store := storeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "nope", http.StatusInternalServerError)
-		}, map[backend.DocumentID]string{"doc": "file-1"})
-
-		if err := store.Delete(context.Background(), persistence.DeleteRequest{DocumentID: "doc"}); err == nil {
-			t.Fatal("a 500 on delete must surface; the owner-delete cascade would otherwise report success while the content is still there")
 		}
 	})
 }

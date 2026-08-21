@@ -70,7 +70,7 @@ ports. Adapters implement them:
 | `BlobStore` | `.../contracts/persistence-ports.md` (content-blob) |
 | `Auth` | `.../contracts/ws-protocol.md` (handshake AuthN) |
 | `AuthZ` | `.../contracts/ws-protocol.md` (per-document AuthZ, evaluated once per session) |
-| lifecycle queue Q1 | `.../contracts/lifecycle-retry-runbook.md` (frozen args, retry ladder, DLQ replay) |
+| lifecycle main queue | frozen argument table, mirrored by `server` — see `internal/adapter/inbound/lifecycle/topology.go` |
 
 ## Configuration (env vars)
 
@@ -97,9 +97,16 @@ BEFORE the room is materialized, `Join` requires a metadata row; an unknown id i
 refused without loading a checkpoint, opening a room, or writing an index row. The
 metadata store is the existence record and is durable wherever one is configured —
 in the Alkemio topology `collaboration-fetch` resolves against the memo/whiteboard
-rows in `server`'s own database, so the gate survives a restart and needs no
-tombstone of its own. This is what stops a deleted document from being resurrected
-by a reconnect once the owner-delete tombstone (which spans only the cascade) lifts.
+rows in `server`'s own database, so the gate survives a restart. This is what stops
+a deleted document from being resurrected by a RECONNECT.
+
+A second guard covers what that one cannot: a Join already in flight, which read
+the row before `server` deleted it. `Manager` keeps a monotonic **delete epoch**;
+a Join captures it immediately before the existence read, and the acquisition is
+refused if any delete landed in between. The two are complementary — the existence
+gate catches later connections, the epoch catches in-flight ones — and a refused
+in-flight Join is transient (`1011`), so the client reconnects into a fresh
+existence read.
 
 The refusal is deliberately **indistinguishable from a denial** — same close status,
 same reason — so the service cannot be used to enumerate which document ids exist.
@@ -123,8 +130,9 @@ branches on these literals, so changing one is a cross-repo change.
 **Authorization is per WebSocket session.** READ and UPDATE are evaluated once, at
 connection open and BEFORE the room is materialized, and the resulting capability
 holds until that socket closes. There are no per-frame checks and no lease. A
-revocation therefore takes effect on the client's next connection, not immediately —
-see the runbook. A denied session closes `1008`; an authorization backend outage
+revocation therefore takes effect on the client's next connection, not immediately
+(tracked as BASIC-015 in the KISS remediation ledger). A denied session closes
+`1008`; an authorization backend outage
 closes `1011`, so clients keep retrying.
 
 ## Development Workflow
@@ -160,27 +168,29 @@ carries it, not waiting for the code. Beyond that, a mixed fleet
 diverges: an old pod accepts poison and publishes it over the hub, a new pod refuses
 that peer update, and the two hold different documents for the same id permanently.
 Ordinary overlapping rolling replacement is not allowed — drain the old pods and cut
-the service generation over as a boundary. See the runbook.
+the service generation over as a boundary.
 
-**Broker requirement.** The lifecycle retry topology needs **RabbitMQ >= 3.13.2**
-and the service refuses to start below it: on 3.9.13 a quorum queue accepts the TTL
-and dead-letter arguments, echoes them back, and expires nothing. CI and
-dev-orchestration now run **4.0.5**, so the floor is satisfied.
+**Lifecycle queue topology — a cross-repo contract.** One durable quorum main
+queue plus one diagnostic quorum DLQ. A transient failure is `Nack(requeue=true)`
+and the broker redelivers; an envelope this service can never act on is
+`Nack(requeue=false)` and the main queue's DLX records it. There is no retry
+ladder, no replay tooling, and no broker-version floor — all three existed to
+support delay tiers that no longer exist.
 
-4.0 sets a default `delivery-limit` of 20 on quorum queues where 3.x was unlimited,
-which would silently drop an event redelivered past it on a queue with no
-dead-letter exchange — measured: the 21st delivery loses it. Q1 and the DLQ
-therefore declare `x-delivery-limit: int32(-1)`; the retry tiers deliberately do
-not. Q1's arguments are mirrored by `server`: the same set, with the same values.
+Both queues declare `x-delivery-limit: int32(-1)`. RabbitMQ 4.0 defaults quorum
+queues to 20 where 3.x was unlimited, and at the limit a message on a queue with
+no dead-letter route is DROPPED (measured on 4.0.5: the 21st delivery). On the
+main queue every requeue is another delivery. On the DLQ nothing consumes, but the
+management UI's "Get messages" with Requeue=yes issues `basic.get`, which counts —
+so repeated operator inspection could destroy the record being inspected.
 
-Every environment also needs its existing queue state checked before deploying:
-queue arguments are immutable after declaration, so a queue that already exists
-with different ones cannot be reconfigured, only deleted and recreated.
-Preconditions and the check are in
-[`specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md`](./specs/003-go-yjs-core-port/contracts/lifecycle-retry-runbook.md).
-Do not lower the floor to make a local environment work: it does not buy
-compatibility, it buys a service that looks healthy while silently dropping
-deletions and revocations.
+**`server` declares the main queue too**, with the same arguments (server
+`eb12d945` carries the matching dead-letter pair). An inequivalent redeclaration
+fails `PRECONDITION_FAILED` and the declaring party does not start, and queue
+arguments are immutable — a mismatch is fixed by deleting and recreating the
+queue, not by redeploying. Change that table only in lockstep with `server`, as a
+planned cutover. Neither side's test can see the other's code, so keeping the two
+tables identical is a manual obligation.
 
 ## Full Constitution
 

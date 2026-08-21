@@ -12,7 +12,7 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// blockingManager hangs in Purge until the per-delivery context is cancelled,
+// blockingManager hangs in CloseDeleted until the per-delivery context is cancelled,
 // simulating a wedged backend call. It records whether the context's deadline
 // (not an external cancel) is what released it.
 type blockingManager struct {
@@ -21,7 +21,7 @@ type blockingManager struct {
 	ctxErr   error
 }
 
-func (b *blockingManager) Purge(ctx context.Context, _ model.DocumentID) error {
+func (b *blockingManager) CloseDeleted(ctx context.Context, _ model.DocumentID) error {
 	<-ctx.Done() // block until the consumer-imposed deadline cancels us.
 	b.mu.Lock()
 	b.released = true
@@ -30,20 +30,18 @@ func (b *blockingManager) Purge(ctx context.Context, _ model.DocumentID) error {
 	return ctx.Err()
 }
 
-func (b *blockingManager) PreRegister(_ context.Context, _ model.Metadata) error { return nil }
-
 // TestHandleDeliveryBoundsAStuckHandler defends the per-delivery timeout context
 // (conn.go handleDelivery). The consumer drains deliveries serially on a single
 // goroutine, so a handler that blocks forever head-of-line-blocks every later
 // lifecycle event. handleDelivery wraps handle in a WithTimeout(handlerTimeout)
-// context, so a wedged Purge is cancelled and returns (surfacing as retryLater)
+// context, so a wedged close is cancelled and returns (surfacing as requeue)
 // rather than freezing the consumer.
 //
 // Non-vacuity: revert handleDelivery's body to `return c.handle(context.Background(),
 // body)` (the pre-fix unbounded context) and this test hangs — the watchdog fires
 // "handleDelivery did not return: a stuck handler is head-of-line-blocking the
 // consumer (unbounded context)" — because context.Background() never cancels, so
-// blockingManager.Purge blocks forever.
+// blockingManager.CloseDeleted blocks forever.
 func TestHandleDeliveryBoundsAStuckHandler(t *testing.T) {
 	mgr := &blockingManager{}
 	c := &Consumer{mgr: mgr, logger: zap.NewNop(), handlerTimeout: 50 * time.Millisecond}
@@ -59,8 +57,8 @@ func TestHandleDeliveryBoundsAStuckHandler(t *testing.T) {
 		elapsed := time.Since(start)
 		// The deadline must be what released the handler, and it must surface as a
 		// requeue (a cancelled cascade is a transient failure worth redelivering).
-		if action != retryLater {
-			t.Fatalf("handleDelivery on a timed-out handler = %v, want retryLater", action)
+		if action != requeue {
+			t.Fatalf("handleDelivery on a timed-out handler = %v, want requeue", action)
 		}
 		mgr.mu.Lock()
 		released, ctxErr := mgr.released, mgr.ctxErr

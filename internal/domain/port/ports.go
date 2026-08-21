@@ -25,6 +25,9 @@ import (
 //
 // Maps to: contracts/persistence-ports.md (MetadataStore port) and
 // data-model.md (document metadata/index).
+// It is READ/UPSERT only. There is no Delete: `server` owns the row and removes
+// it itself before publishing document.deleted, so a delete here would be a
+// second writer racing the owner for a row it does not own.
 type MetadataStore interface {
 	// Load returns the index row for a document, or model.ErrNotFound if no
 	// row exists.
@@ -32,9 +35,6 @@ type MetadataStore interface {
 	// Save upserts the index row and bumps its version. It is called on first
 	// save and on every persisted snapshot.
 	Save(ctx context.Context, meta model.Metadata) error
-	// Delete removes the index row on the owner-delete cascade. Idempotent:
-	// deleting an absent row is a no-op (lifecycle-events.md idempotency).
-	Delete(ctx context.Context, id model.DocumentID) error
 }
 
 // Auth resolves the connecting principal at the WebSocket handshake from the ONE

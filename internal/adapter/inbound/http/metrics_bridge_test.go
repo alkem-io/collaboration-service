@@ -100,43 +100,35 @@ func histogramCount(t *testing.T, name string) int {
 }
 
 // TestLifecycleObserverBridgeMovesItsSeries asserts the two lifecycle signals
-// reach the collectors and land on distinct label sets.
+// reach the collectors, and that depth is a LEVEL rather than a running total.
 //
-// The label split is the point. A single undifferentiated "a transfer happened"
-// counter would answer neither question the ladder poses: a transfer to the 30s
-// tier is a backend that just failed and has ~35 minutes of runway, while a
-// transfer to the DLQ is a deletion or revocation that will now never be applied
-// without a human. Collapsing them means either alerting on everything or noticing
-// nothing.
+// Depth is the signal the dead-letter COUNTER cannot give: a counter only goes
+// up, so the increment that put events in the DLQ scrolls out of the alert window
+// while the events stay there. If depth accumulated instead of replacing, a queue
+// someone had drained would still read as backed up and the alert would never
+// clear.
 func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
 	InitMetrics()
 	o := PrometheusLifecycleObserver{}
 
-	o.EventTransferred("lifecycle-q.retry.30s", true)
-	o.EventTransferred("lifecycle-q.dlq", true)
-	o.EventTransferred("lifecycle-q.retry.5m", false)
+	o.EventDeadLettered("document.deleted")
 	o.QueueReadyDepth("lifecycle-q.dlq", 7)
-	o.QueueReadyDepth("lifecycle-q.retry.30m", 2)
+	o.QueueReadyDepth("lifecycle-q", 2)
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rr.Body.String()
 
 	for _, want := range []string{
-		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.retry.30s"} 1`,
-		`collaboration_lifecycle_transfers_total{outcome="confirmed",queue="lifecycle-q.dlq"} 1`,
-		`collaboration_lifecycle_transfers_total{outcome="unconfirmed",queue="lifecycle-q.retry.5m"} 1`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted"} 1`,
 		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.dlq"} 7`,
-		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.retry.30m"} 2`,
+		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q"} 2`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)
 		}
 	}
 
-	// Depth is a LEVEL, not a running total: a later poll replaces the reading.
-	// If it accumulated, a queue that drained would still read as backed up and
-	// the DLQ alert would never clear.
 	o.QueueReadyDepth("lifecycle-q.dlq", 3)
 	rr = httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -145,25 +137,32 @@ func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
 	}
 }
 
-// TestDeadLetterBridgeSeparatesReplayCounts asserts the replay count reaches
-// Prometheus as a distinct label value, which is the whole point: an event a
-// person has already replayed is a different alert from one that just failed.
-func TestDeadLetterBridgeSeparatesReplayCounts(t *testing.T) {
+// TestDeadLetterBridgeSeparatesPatterns asserts the pattern reaches Prometheus
+// as a distinct label value.
+//
+// The pattern is what makes the counter actionable. The DLQ now holds ONLY
+// envelopes this service can never act on, so every increment is a
+// producer/consumer contract mismatch — and the pattern says WHICH contract:
+// "document.deleted" means a payload shape drifted, while an unrecognised pattern
+// means the producer is emitting something we never agreed to consume.
+func TestDeadLetterBridgeSeparatesPatterns(t *testing.T) {
 	InitMetrics()
 	o := PrometheusLifecycleObserver{}
 
-	o.EventDeadLettered("document.deleted", 0)
-	o.EventDeadLettered("document.deleted", 2)
-	o.EventDeadLettered("unrecognised.pattern", 0)
+	// Distinct label values per test: the collector is package-level and
+	// InitMetrics does not reset it, so a shared pattern would carry another
+	// test's increments in and the count assertion would be order-dependent.
+	o.EventDeadLettered("separates.shape.drift")
+	o.EventDeadLettered("separates.shape.drift")
+	o.EventDeadLettered("separates.unrecognised")
 
 	rr := httptest.NewRecorder()
 	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rr.Body.String()
 
 	for _, want := range []string{
-		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="0"} 1`,
-		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted",replays="2"} 1`,
-		`collaboration_lifecycle_dead_lettered_total{pattern="unrecognised.pattern",replays="0"} 1`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="separates.shape.drift"} 2`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="separates.unrecognised"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q", want)
