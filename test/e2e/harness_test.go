@@ -115,10 +115,10 @@ func (c *wsClient) lock()   { c.mu <- struct{}{} }
 func (c *wsClient) unlock() { <-c.mu }
 
 // dial connects a wsClient to base for documentID with the given content type
-// and starts its read pump (token-less, for open-auth mode). It initiates
+// and starts its read pump (actor-less, for open-auth mode). It initiates
 // SyncStep1 so the client receives the server's state.
 func dial(t *testing.T, base, documentID, contentType string) *wsClient {
-	return dialWithToken(t, base, documentID, contentType, "")
+	return dialAsActor(t, base, documentID, contentType, "")
 }
 
 // e2eCreated remembers which (pod, document) pairs have been created, so two
@@ -166,22 +166,27 @@ func ensureDocument(t *testing.T, wsBase, documentID, contentType string) {
 	}
 }
 
-// dialWithToken is dial with an Authorization handshake token, so authzeval-mode
-// tests can connect as a specific actor (the token is the gateway-authenticated
-// actor id). An empty token sends no Authorization header.
-func dialWithToken(t *testing.T, base, documentID, contentType, token string) *wsClient {
+// e2eActorIDHeader is the dedicated, gateway-owned header the e2e configs name
+// as AUTH_TOKEN_HEADER. It matches the Alkemio deployment. It deliberately is
+// NOT "Authorization": `header` mode trusts the value verbatim as the actor id,
+// so a client-controllable header is refused at startup.
+const e2eActorIDHeader = "X-Alkemio-Actor-Id"
+
+// dialAsActor is dial with the gateway-stamped actor id, so authzeval-mode tests
+// can connect as a specific actor. An empty actorID sends no header at all,
+// which is the open-mode (anonymous) shape.
+func dialAsActor(t *testing.T, base, documentID, contentType, actorID string) *wsClient {
 	t.Helper()
 	var opts *websocket.DialOptions
-	if token != "" {
-		opts = &websocket.DialOptions{HTTPHeader: map[string][]string{"Authorization": {token}}}
+	if actorID != "" {
+		opts = &websocket.DialOptions{HTTPHeader: map[string][]string{e2eActorIDHeader: {actorID}}}
 	}
 	return dialWithDialOptions(t, base, documentID, contentType, opts)
 }
 
 // dialWithDialOptions is the shared dial body: it connects a wsClient with the
-// given websocket.DialOptions (arbitrary handshake headers — Authorization /
-// Cookie), starts its read pump, and initiates SyncStep1. dialWithToken and the
-// oidc-mode header dials build on it.
+// given websocket.DialOptions (arbitrary handshake headers), starts its read
+// pump, and initiates SyncStep1. dial and dialAsActor build on it.
 func dialWithDialOptions(t *testing.T, base, documentID, contentType string, opts *websocket.DialOptions) *wsClient {
 	t.Helper()
 	ensureDocument(t, base, documentID, contentType)

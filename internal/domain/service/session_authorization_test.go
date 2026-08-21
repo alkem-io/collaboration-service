@@ -45,7 +45,7 @@ type scriptedAuthZ struct {
 	decide func(p model.Privilege, nth int) (model.AuthDecision, error)
 }
 
-func (s *scriptedAuthZ) Authenticate(context.Context, model.HandshakeCredentials) (model.Identity, error) {
+func (s *scriptedAuthZ) Authenticate(context.Context, string) (model.Identity, error) {
 	return model.Identity{}, nil
 }
 

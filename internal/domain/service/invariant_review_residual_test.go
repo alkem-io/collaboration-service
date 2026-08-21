@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
+
+	"github.com/google/uuid"
 )
 
 // This file ratchets the residual findings surfaced by the full adversarial review
@@ -43,14 +45,23 @@ func TestInvTeardownBalancesConnGauge(t *testing.T) {
 }
 
 // TestInvReadOnlyReasonAnonymousSentinel — finding [2]. An anonymous viewer must
-// report read-only reason "not-authenticated", not "no-update-access". In oidc mode
-// an anonymous connection resolves to model.AnonymousIdentity(), whose ActorID is
-// the nil-UUID sentinel (NON-nil) — so a bare `ActorID == nil` test misclassifies
-// it. NON-VACUOUS: drop the nil-UUID comparison and the first
-// assertion fails.
+// report read-only reason "not-authenticated", not "no-update-access".
+//
+// TWO DISTINCT ANONYMOUS SHAPES, and that is the whole point. Open mode yields a
+// NIL ActorID. The gateway, for an un-credentialed caller, stamps the NIL-UUID
+// sentinel (server: ANONYMOUS_ACTOR_ID), which parses to a NON-nil pointer to
+// uuid.Nil — so a bare `ActorID == nil` test misclassifies it as an authenticated
+// actor and reports no-update-access.
+//
+// The sentinel is constructed HERE rather than via a helper: the helper existed
+// only for the removed direct-validation adapter, while the VALUE still arrives
+// from the gateway on every anonymous production handshake.
+//
+// NON-VACUOUS: drop the nil-UUID comparison and the first assertion fails.
 func TestInvReadOnlyReasonAnonymousSentinel(t *testing.T) {
-	// oidc anonymous (nil-UUID sentinel, non-nil).
-	if got := readOnlyReasonForIdentity(model.AnonymousIdentity()); got != model.ReasonNotAuthenticated {
+	// Gateway-stamped anonymous: pointer to uuid.Nil, NON-nil.
+	anonymous := uuid.Nil
+	if got := readOnlyReasonForIdentity(model.Identity{ActorID: &anonymous}); got != model.ReasonNotAuthenticated {
 		t.Fatalf("anonymous sentinel identity → %q, want %q", got, model.ReasonNotAuthenticated)
 	}
 	// open mode (nil ActorID).

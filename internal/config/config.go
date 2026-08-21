@@ -58,10 +58,6 @@ const (
 	// AuthModeHeader trusts the actor id stamped in the gateway header
 	// (option (a), gateway-terminated; the Alkemio prod default).
 	AuthModeHeader AuthMode = "header"
-	// AuthModeOIDC validates the handshake credential itself (option (b),
-	// direct OIDC validation: BFF cookie session via Redis + Hydra RS256 bearer
-	// via JWKS), mirroring the server's forward-auth controller.
-	AuthModeOIDC AuthMode = "oidc"
 	// AuthModeOpen authenticates everyone anonymously — the zero-dependency
 	// standalone default.
 	AuthModeOpen AuthMode = "open"
@@ -108,9 +104,6 @@ type Config struct {
 	FileService FileServiceConfig
 	// AuthZEval holds the authzeval settings (AUTHZ_MODE=authzeval).
 	AuthZEval AuthZEvalConfig
-	// OIDC holds the direct-validation settings (AUTH_MODE=oidc): the BFF
-	// cookie-session Redis store and the Hydra JWKS bearer validator.
-	OIDC OIDCConfig
 	// Limits holds the configurable enforcement bounds + presence cadences
 	// (FR-014/FR-024, epic R9 defaults, OPEN-4).
 	Limits LimitsConfig
@@ -199,18 +192,15 @@ type FileServiceConfig struct {
 
 // AuthConfig holds the handshake auth settings common to both auth modes.
 type AuthConfig struct {
-	// TokenHeader is the request header the WS handshake reads the Alkemio
-	// identity token from (AUTH_TOKEN_HEADER, default "Authorization"). The
-	// Alkemio deployment terminates auth at the gateway and forwards the resolved
-	// actor id in a header (e.g. X-Alkemio-Actor-Id), so it sets this to that
-	// header; standalone/open mode keeps the bearer-style Authorization default.
-	TokenHeader string
+	// ActorIDHeader names the request header the WS handshake reads the
+	// gateway-stamped actor id from. It carries an actor UUID, not a token: the
+	// `header` adapter trusts the value verbatim AS the actor id.
+	//
+	// There is NO default: `header` mode requires it explicitly, and `open` mode
+	// ignores the credential entirely, so an unset value simply yields an empty
+	// credential.
+	ActorIDHeader string
 }
-
-// DefaultAuthTokenHeader is the request header the WS handshake reads the
-// identity token from when AUTH_TOKEN_HEADER is unset — the bearer-style default
-// the standalone/open mode uses.
-const DefaultAuthTokenHeader = "Authorization"
 
 // AuthZEvalConfig configures the authzeval auth backend.
 type AuthZEvalConfig struct {
@@ -219,41 +209,6 @@ type AuthZEvalConfig struct {
 	BreakerTimeoutSeconds   int
 	BreakerHalfOpenMaxReqs  int
 }
-
-// OIDCConfig configures the direct-validation handshake-AuthN adapter
-// (AUTH_MODE=oidc). The env var names mirror the server's OIDC config (OPEN-7):
-// HYDRA_JWKS_URL / HYDRA_ISSUER_URL / BEARER_AUD_ALLOW_LIST / OIDC_SESSION_COOKIE_NAME.
-// Each path is INERT when its config is absent: no JWKS URL ⇒ bearer path off;
-// no session-Redis URL ⇒ cookie path off. At least one path MUST be enabled.
-type OIDCConfig struct {
-	// SessionRedisURL is the redis:// store the BFF cookie session is looked up in
-	// (SESSION_REDIS_URL, defaulting to REDIS_URL). Empty disables the cookie path.
-	SessionRedisURL string
-	// SessionCookieName is the BFF session cookie the bare sid is read from
-	// (OIDC_SESSION_COOKIE_NAME, default alkemio_session; env-suffixed per
-	// environment, e.g. alkemio_session_sandbox).
-	SessionCookieName string
-	// JWKSURL is the Hydra JWKS endpoint used for RS256 bearer signature
-	// validation (HYDRA_JWKS_URL). Empty disables the bearer path.
-	JWKSURL string
-	// IssuerURL is the expected Hydra token issuer (HYDRA_ISSUER_URL); enforced
-	// when set on the bearer path.
-	IssuerURL string
-	// BearerAudAllowList is the set of acceptable `aud` values on a bearer JWT
-	// (BEARER_AUD_ALLOW_LIST, comma-separated). Empty accepts any audience.
-	BearerAudAllowList []string
-	// ClockSkewSeconds is the JWT clock tolerance (OIDC_CLOCK_SKEW_SECONDS,
-	// default 30s, mirroring the server's jose clockTolerance).
-	ClockSkewSeconds int
-}
-
-// DefaultOIDCSessionCookieName is the BFF session cookie name when
-// OIDC_SESSION_COOKIE_NAME is unset — mirrors the server's oidc.cookie.name
-// default. Per-env overlays suffix it (alkemio_session_sandbox, …).
-const DefaultOIDCSessionCookieName = "alkemio_session"
-
-// defaultOIDCClockSkewSeconds mirrors the server's 30s jose clockTolerance.
-const defaultOIDCClockSkewSeconds = 30
 
 // Load assembles the Config from environment variables, applying the
 // standalone-friendly defaults (single-pod, inline blob, open auth) and
@@ -299,7 +254,10 @@ func Load() (*Config, error) {
 		AuthMode:        authMode,
 		AuthZMode:       authZMode,
 		Auth: AuthConfig{
-			TokenHeader: getenv("AUTH_TOKEN_HEADER", DefaultAuthTokenHeader),
+			// AUTH_TOKEN_HEADER is the deployed env name and is kept as-is; it
+			// supplies the actor-id header NAME. ("Token" is legacy — bearer/token
+			// AuthN was removed with the direct-validation adapter.)
+			ActorIDHeader: os.Getenv("AUTH_TOKEN_HEADER"),
 		},
 	}
 
@@ -498,18 +456,15 @@ func loadCheckpointStoreConfig(cfg *Config) error {
 	return nil
 }
 
-// loadAuthConfig fills + fail-fast-validates the AuthN (oidc) and AuthZ
-// (authzeval) backend settings for whichever modes were selected. The open
-// AuthN and open AuthZ paths need nothing; the header path validates the
-// actor-id header is gateway-owned (loadHeaderAuthConfig).
+// loadAuthConfig fills + fail-fast-validates the AuthN (header) and AuthZ
+// (authzeval) backend settings for whichever modes were selected. The open AuthN
+// and open AuthZ paths need nothing; the header path validates the actor-id
+// header is gateway-owned (loadHeaderAuthConfig).
 func loadAuthConfig(cfg *Config) error {
 	if err := loadHeaderAuthConfig(cfg); err != nil {
 		return err
 	}
-	if err := loadAuthZEvalConfig(cfg); err != nil {
-		return err
-	}
-	return loadOIDCConfig(cfg)
+	return loadAuthZEvalConfig(cfg)
 }
 
 // loadHeaderAuthConfig fail-fast-validates the gateway-terminated `header` AuthN
@@ -519,16 +474,22 @@ func loadAuthConfig(cfg *Config) error {
 // default ("Authorization") is client-controllable — accepting it would let any
 // client stamp its own actor id and impersonate anyone — so header mode requires
 // AUTH_TOKEN_HEADER to be set to something other than "Authorization" (e.g.
-// X-Alkemio-Actor-Id, the gateway-resolved header). Open mode is unaffected (the
-// open adapter ignores the header); oidc mode reads cookie/bearer, not this header.
+// X-Alkemio-Actor-Id, the gateway-resolved header), and requires it to be SET —
+// there is no default to fall back to. Open mode is unaffected: the open adapter
+// ignores the header, so an unset name is correct there.
 func loadHeaderAuthConfig(cfg *Config) error {
 	if cfg.AuthMode != AuthModeHeader {
 		return nil
 	}
-	if strings.EqualFold(cfg.Auth.TokenHeader, DefaultAuthTokenHeader) {
+	if cfg.Auth.ActorIDHeader == "" {
+		return fmt.Errorf(
+			"AUTH_MODE=header requires AUTH_TOKEN_HEADER to name the dedicated gateway-owned header carrying the actor id (e.g. X-Alkemio-Actor-Id); there is no default",
+		)
+	}
+	if strings.EqualFold(cfg.Auth.ActorIDHeader, "Authorization") {
 		return fmt.Errorf(
 			"AUTH_MODE=header requires AUTH_TOKEN_HEADER to be a dedicated gateway-owned header (e.g. X-Alkemio-Actor-Id), not the client-controllable %q: the header adapter trusts it as the actor id",
-			DefaultAuthTokenHeader,
+			"Authorization",
 		)
 	}
 	return nil
@@ -564,58 +525,6 @@ func loadAuthZEvalConfig(cfg *Config) error {
 		return fmt.Errorf("AUTHZ_MODE=authzeval requires AUTH_SERVICE_URL")
 	}
 	return nil
-}
-
-// loadOIDCConfig populates the direct-validation settings when AUTH_MODE=oidc.
-// The session-Redis URL defaults to REDIS_URL (OPEN-7); the JWKS/issuer/audience/
-// cookie-name env names mirror the server's OIDC config. Each path is inert when
-// its config is absent, but at least one MUST be enabled — an oidc adapter that
-// can validate nothing is a misconfiguration (§XV).
-func loadOIDCConfig(cfg *Config) error {
-	if cfg.AuthMode != AuthModeOIDC {
-		return nil
-	}
-	clockSkew, err := getenvInt("OIDC_CLOCK_SKEW_SECONDS", defaultOIDCClockSkewSeconds)
-	if err != nil {
-		return err
-	}
-	cfg.OIDC = OIDCConfig{
-		// SESSION_REDIS_URL defaults to the fan-out REDIS_URL (single-Redis
-		// deployments need no extra config); an isolated session store points it
-		// elsewhere. Empty ⇒ cookie path disabled.
-		SessionRedisURL:    getenv("SESSION_REDIS_URL", os.Getenv("REDIS_URL")),
-		SessionCookieName:  getenv("OIDC_SESSION_COOKIE_NAME", DefaultOIDCSessionCookieName),
-		JWKSURL:            os.Getenv("HYDRA_JWKS_URL"),
-		IssuerURL:          os.Getenv("HYDRA_ISSUER_URL"),
-		BearerAudAllowList: splitAndTrim(os.Getenv("BEARER_AUD_ALLOW_LIST")),
-		ClockSkewSeconds:   clockSkew,
-	}
-	if cfg.OIDC.JWKSURL == "" && cfg.OIDC.SessionRedisURL == "" {
-		return fmt.Errorf("AUTH_MODE=oidc requires at least one credential path: HYDRA_JWKS_URL (bearer) and/or SESSION_REDIS_URL|REDIS_URL (cookie session)")
-	}
-	if cfg.OIDC.ClockSkewSeconds < 0 {
-		return fmt.Errorf("OIDC_CLOCK_SKEW_SECONDS must be >= 0")
-	}
-	return nil
-}
-
-// splitAndTrim splits a comma-separated list, trims surrounding whitespace from
-// each item, and drops empties. Returns nil for an empty/blank input.
-func splitAndTrim(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // rabbitURL assembles the amqp:// URL from RABBITMQ_* (the legacy convention),
@@ -691,15 +600,15 @@ func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
 // (AUTHZ_MODE) together (OPEN-5):
 //
 //   - When AUTHZ_MODE is unset it is DERIVED from the AuthN mode: open→open,
-//     header/oidc→authzeval.
+//     header→authzeval.
 //   - An explicit AUTHZ_MODE always wins (AuthN and AuthZ select independently).
 func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
 	var authN AuthMode
 	switch AuthMode(authRaw) {
-	case AuthModeHeader, AuthModeOIDC, AuthModeOpen:
+	case AuthModeHeader, AuthModeOpen:
 		authN = AuthMode(authRaw)
 	default:
-		return "", "", fmt.Errorf("AUTH_MODE must be one of header, oidc, open (got %q)", authRaw)
+		return "", "", fmt.Errorf("AUTH_MODE must be one of header, open (got %q)", authRaw)
 	}
 
 	// Explicit AUTHZ_MODE wins over the derivation.
@@ -715,7 +624,7 @@ func parseAuthModes(authRaw, authZRaw string) (AuthMode, AuthZMode, error) {
 }
 
 // deriveAuthZMode maps an AuthN mode to its default AuthZ mode when AUTHZ_MODE is
-// unset: open AuthN bypasses AuthZ (open); header/oidc delegate to authzeval.
+// unset: open AuthN bypasses AuthZ (open); header delegates to authzeval.
 func deriveAuthZMode(authN AuthMode) AuthZMode {
 	if authN == AuthModeOpen {
 		return AuthZModeOpen
@@ -733,7 +642,7 @@ func getenv(key, fallback string) string {
 // getenvInt reads an integer env var, falling back to a default when unset. A
 // SET-but-malformed value is a configuration error (fail-fast, §XV): these
 // helpers back hard limits and safety-sensitive adapter settings (MAX_DOC_BYTES,
-// SAVE_DEBOUNCE_MILLIS, OIDC_CLOCK_SKEW_SECONDS, the breaker tunables), so a typo
+// SAVE_DEBOUNCE_MILLIS, the breaker tunables), so a typo
 // must not silently fall back to a default and quietly change runtime behavior.
 func getenvInt(key string, fallback int) (int, error) {
 	v := os.Getenv(key)

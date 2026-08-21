@@ -37,7 +37,7 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
   file-service's.
 - **Auth (pluggable)**: handshake AuthN and per-document AuthZ are selected
   INDEPENDENTLY — `open` (standalone) / `header` (gateway-terminated, the prod
-  default) / `oidc` (direct validation) for AuthN; `open` / `authzeval`
+  default) for AuthN; `open` / `authzeval`
   (authorization-evaluation-service, h2c HTTP/2 or NATS) for AuthZ
 
 ## Architecture
@@ -86,9 +86,10 @@ zero-dependency run costs one explicit line per selector:
 - `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is rejected at startup)
 - `METADATA_STORE` — `inmemory` (default; non-durable, tests/local) | `rabbitmq`
 - `CHECKPOINT_STORE` — **required**; `inline` (non-durable, tests/local) | `file-service` (durable)
-- `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
-  `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the
-  client-controllable `Authorization` default is rejected at startup.
+- `AUTH_MODE` — `header` | `open`. In `header` mode the actor id is read from
+  `AUTH_TOKEN_HEADER`, which MUST be named explicitly and MUST be gateway-owned.
+  There is no default header name: startup rejects both an unset `AUTH_TOKEN_HEADER`
+  and the client-controllable `Authorization`.
 - `AUTHZ_MODE` — `authzeval` | `open` (derived from `AUTH_MODE` when unset)
 
 **A document must EXIST before it can be joined.** After authorization succeeds and

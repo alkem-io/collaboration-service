@@ -1069,8 +1069,9 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 // read-only because it has no-update-access. This preserves the granularity of
 // today's read-only UX (the memo-footer readOnlyCode). An anonymous viewer
 // surfaces two ways — a nil ActorID (open mode, AuthZ bypassed) OR a pointer to
-// uuid.Nil for an uncredentialed/named-guest oidc connection — so both map to
-// not-authenticated, else an anonymous oidc viewer wrongly reports no-update-access.
+// uuid.Nil, which is what the GATEWAY stamps for an un-credentialed caller
+// (server: ANONYMOUS_ACTOR_ID) — so both map to not-authenticated, else an
+// anonymous viewer wrongly reports no-update-access.
 func readOnlyReasonForIdentity(identity model.Identity) model.ReadOnlyReason {
 	if identity.ActorID == nil || *identity.ActorID == uuid.Nil {
 		return model.ReasonNotAuthenticated

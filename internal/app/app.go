@@ -17,7 +17,6 @@ import (
 
 	"github.com/antst/go-yjs/backend/hub"
 	"github.com/google/uuid"
-	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/antst/go-yjs/backend/persistence"
@@ -27,7 +26,6 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/ws"
 	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/authzeval"
 	authheader "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/header"
-	authoidc "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/oidc"
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	hubredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/hub/redis"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
@@ -127,11 +125,7 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 		return service.Deps{}, nil, err
 	}
 
-	auth, err := buildAuthN(cfg, &closers)
-	if err != nil {
-		cleanup()
-		return service.Deps{}, nil, err
-	}
+	auth := buildAuthN(cfg)
 	authz := buildAuthZ(cfg, metadata)
 
 	return service.Deps{
@@ -255,60 +249,18 @@ func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persisten
 }
 
 // buildAuthN selects the handshake-AuthN adapter from cfg.AuthMode, independently
-// of AuthZ (Wave 5, T018.7). The oidc adapter constructs its credential-path
-// dependencies (a session-Redis client + a JWKS cache), registering the Redis
-// client's closer; each path is left inert when its config is absent.
-func buildAuthN(cfg *config.Config, closers *[]func()) (port.Auth, error) {
-	switch cfg.AuthMode {
-	case config.AuthModeHeader:
-		return authheader.New(), nil
-	case config.AuthModeOIDC:
-		return buildOIDCAuth(cfg, closers)
-	default: // config.AuthModeOpen
-		return authopen.New(), nil
+// of AuthZ (Wave 5, T018.7).
+//
+// Two adapters: `header` trusts a gateway-stamped actor id (the Alkemio topology,
+// where Traefik forward-auth calls server and server stamps the header), and
+// `open` authenticates everyone anonymously for the in-process development and
+// test path. There is no third: direct credential validation in this service
+// duplicated identity resolution that the gateway already performs.
+func buildAuthN(cfg *config.Config) port.Auth {
+	if cfg.AuthMode == config.AuthModeHeader {
+		return authheader.New()
 	}
-}
-
-// buildOIDCAuth constructs the direct-validation oidc adapter: the BFF
-// cookie-session path (a Redis client over SESSION_REDIS_URL) and the Hydra
-// RS256 bearer path (a background-refreshed JWKS cache over HYDRA_JWKS_URL). Each
-// path is left nil — and therefore inert — when its config is absent (config.Load
-// has already guaranteed at least one is set).
-func buildOIDCAuth(cfg *config.Config, closers *[]func()) (port.Auth, error) {
-	oc := authoidc.Config{}
-
-	if cfg.OIDC.SessionRedisURL != "" {
-		opts, err := goredis.ParseURL(cfg.OIDC.SessionRedisURL)
-		if err != nil {
-			return nil, fmt.Errorf("oidc session redis: parse SESSION_REDIS_URL: %w", err)
-		}
-		client := goredis.NewClient(opts)
-		*closers = append(*closers, func() { _ = client.Close() })
-		oc.Session = authoidc.NewSessionStore(client)
-	}
-
-	if cfg.OIDC.JWKSURL != "" {
-		// The cache refreshes the JWKS in the background; bind that goroutine to a
-		// cancelable context owned by App so Close tears it down (this composition
-		// root is reused by tests and any in-process boot/shutdown, so an
-		// uncancelled context.Background would leak a refresher per New). Lookups
-		// still honour the per-request ctx in Authenticate.
-		jwksCtx, cancel := context.WithCancel(context.Background())
-		validator, err := authoidc.NewBearerValidator(jwksCtx, authoidc.BearerConfig{
-			JWKSURL:   cfg.OIDC.JWKSURL,
-			Issuer:    cfg.OIDC.IssuerURL,
-			Audiences: cfg.OIDC.BearerAudAllowList,
-			ClockSkew: time.Duration(cfg.OIDC.ClockSkewSeconds) * time.Second,
-		})
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("oidc bearer validator: %w", err)
-		}
-		*closers = append(*closers, cancel)
-		oc.Bearer = validator
-	}
-
-	return authoidc.New(oc), nil
+	return authopen.New()
 }
 
 // buildAuthZ selects the per-document-AuthZ adapter from cfg.AuthZMode,
@@ -368,13 +320,9 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		Logger:  logger.Named("ws"),
 		// The `header` AuthN adapter reads the gateway-stamped actor id from this
 		// header. The Alkemio deployment terminates auth at the gateway and forwards
-		// the resolved actor id (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id); standalone/
-		// open mode keeps the bearer-style Authorization default. The `oidc` adapter
-		// ignores it and reads the cookie/bearer/guest credentials instead.
-		TokenHeader: cfg.Auth.TokenHeader,
-		// The `oidc` adapter reads the bare BFF session id from this cookie
-		// (OIDC_SESSION_COOKIE_NAME, default alkemio_session); header/open ignore it.
-		CookieName: cfg.OIDC.SessionCookieName,
+		// the resolved actor id (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id). There is no
+		// default name; `open` mode leaves it empty and ignores the credential.
+		ActorIDHeader: cfg.Auth.ActorIDHeader,
 		// A single inbound WS message must accommodate a full-doc SyncStep2 (the v2
 		// snapshot, up to MaxDocBytes) plus framing; the 32 KiB coder/websocket
 		// default would close the socket on any real document and loop the client.

@@ -37,24 +37,30 @@ type MetadataStore interface {
 	Delete(ctx context.Context, id model.DocumentID) error
 }
 
-// Auth resolves the connecting principal at the WebSocket handshake from the
-// domain-typed credential set (model.HandshakeCredentials: gateway actor-id
-// header / BFF cookie session / Hydra bearer / guest name). It is authentication
-// only — the per-document grant is AuthZ's job. The selected adapter decides
-// which credentials it inspects and in what priority (the WS adapter only reads
-// them off the transport), keeping the port infra-free (§I). The 'open' adapter
-// authenticates everyone as an anonymous identity for standalone use.
+// Auth resolves the connecting principal at the WebSocket handshake from the ONE
+// credential the transport carries: the value of the configured gateway actor-id
+// header. It is authentication only — the per-document grant is AuthZ's job.
+//
+// A raw string, not a credential struct. There is exactly one credential and two
+// adapters, one of which ignores it; a set-of-credentials type described a
+// direct-validation adapter that has been removed.
 //
 // Maps to: contracts/ws-protocol.md ("AuthN at the handshake").
 type Auth interface {
-	// Authenticate resolves the identity carried by the handshake credentials. A
-	// non-nil error means the handshake MUST be rejected with 401 — a credential
-	// was PRESENTED but is invalid (malformed/expired/signature-rejected/
-	// tombstoned), or a required dependency was unreachable; it MUST NOT be
-	// downgraded to anonymous (constitution §V: missing ≠ failed). A MISSING
-	// credential is not a failure: the oidc adapter resolves it to the anonymous
-	// sentinel and lets AuthZ decide.
-	Authenticate(ctx context.Context, creds model.HandshakeCredentials) (model.Identity, error)
+	// Authenticate resolves the identity carried by the handshake credential. A
+	// non-nil error means the handshake MUST be rejected with 401.
+	//
+	// WHETHER ABSENCE IS A FAILURE IS MODE-DEPENDENT, and the two modes differ on
+	// purpose:
+	//   - `header`: an EMPTY credential means the gateway did not run, which is a
+	//     failed handshake, never an anonymous downgrade. The gateway always
+	//     stamps something — the actor id, or the nil-UUID sentinel for an
+	//     un-credentialed caller — so absence is infrastructure failure.
+	//   - `open`: absence is expected; everyone is anonymous and AuthZ is bypassed.
+	// A credential that is PRESENT but invalid is always a failure (constitution
+	// §V: missing != failed cuts both ways — never treat an invalid credential as
+	// anonymous).
+	Authenticate(ctx context.Context, actorIDCredential string) (model.Identity, error)
 }
 
 // AuthZ evaluates per-document authorization for an authenticated identity via

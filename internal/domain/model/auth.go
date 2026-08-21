@@ -3,7 +3,7 @@ package model
 import "github.com/google/uuid"
 
 // Identity is the authenticated principal resolved from the WebSocket handshake
-// (Alkemio token/cookie via Oathkeeper/Kratos). In 'open' standalone mode the
+// (in Alkemio, the actor id the gateway resolved and stamped). In 'open' mode the
 // Auth adapter returns an identity with a nil ActorID.
 type Identity struct {
 	// ActorID is the Alkemio actor id (never "userId" — fleet convention).

@@ -29,11 +29,11 @@ func New() *Auth { return &Auth{} }
 // Authenticate trusts the gateway-stamped actor id carried in the actor-id
 // header. An empty header means the gateway did not run; the handshake is
 // rejected (401), never anonymous-downgraded (§V; FR-021).
-func (a *Auth) Authenticate(_ context.Context, creds model.HandshakeCredentials) (model.Identity, error) {
-	if creds.ActorIDHeader == "" {
+func (a *Auth) Authenticate(_ context.Context, actorIDCredential string) (model.Identity, error) {
+	if actorIDCredential == "" {
 		return model.Identity{}, fmt.Errorf("missing gateway actor-id header")
 	}
-	identity, err := model.IdentityFromActorID(creds.ActorIDHeader)
+	identity, err := model.IdentityFromActorID(actorIDCredential)
 	if err != nil {
 		return model.Identity{}, fmt.Errorf("gateway actor-id header: %w", err)
 	}

@@ -35,19 +35,16 @@ type Handler struct {
 	// InsecureSkipVerify to dial the httptest server cross-origin; production
 	// leaves origin checking on.
 	AcceptOptions *websocket.AcceptOptions
-	// TokenHeader is the request header the `header` AuthN adapter reads the
-	// gateway-stamped actor id from. Empty selects the default
-	// (defaultTokenHeader). The Alkemio deployment terminates auth at the gateway
-	// and forwards the resolved actor id in a header (e.g. X-Alkemio-Actor-Id),
-	// while standalone/open mode keeps a bearer-style Authorization header; this
-	// field lets the deployment point the handshake at whichever header carries
-	// the identity (AUTH_TOKEN_HEADER). The `oidc` adapter ignores it (it reads
-	// the cookie/bearer/guest credentials instead).
-	TokenHeader string
-	// CookieName is the BFF session cookie the bare session id is read from for
-	// the `oidc` adapter (OIDC_SESSION_COOKIE_NAME, default alkemio_session). Empty
-	// selects the default. The `header`/`open` adapters ignore the cookie.
-	CookieName string
+	// ActorIDHeader is the request header the `header` AuthN adapter reads the
+	// gateway-stamped actor id from (AUTH_TOKEN_HEADER, e.g. X-Alkemio-Actor-Id).
+	//
+	// EMPTY MEANS EMPTY — there is no default. `header` mode requires config.Load
+	// to have supplied a dedicated gateway-owned name, and `open` mode ignores the
+	// credential entirely, so an unset name yields an empty credential and open
+	// resolves anonymous. A bearer-style "Authorization" default existed only to
+	// carry credentials into a direct-validation adapter that has been removed,
+	// and header mode rejects that name outright as client-controllable.
+	ActorIDHeader string
 	// ReadLimitBytes caps a single inbound WebSocket message. It must exceed
 	// MaxDocBytes because a SyncStep2 carries the full v2 snapshot and a single
 	// update can add nearly that much (e.g. pasting an image); the 32 KiB
@@ -57,17 +54,6 @@ type Handler struct {
 	// unset).
 	ReadLimitBytes int64
 }
-
-// defaultTokenHeader carries the Alkemio actor-id surrogate when no header is
-// configured. The open adapter reads a bearer-style header so the Auth port is
-// exercised end to end; the Alkemio deployment overrides this (via the Handler's
-// TokenHeader) with the gateway's resolved actor-id header.
-const defaultTokenHeader = "Authorization"
-
-// defaultCookieName is the BFF session cookie the oidc adapter reads the bare
-// session id from when CookieName is unset (mirrors the server's oidc.cookie.name
-// default).
-const defaultCookieName = "alkemio_session"
 
 // readHeadroomBytes is the slack added to MaxDocBytes when sizing the per-message
 // WebSocket read limit. A SyncStep2 carries the full v2 snapshot (≈MaxDocBytes)
@@ -87,41 +73,18 @@ func ReadLimitFor(maxDocBytes int) int64 {
 	return int64(maxDocBytes) + readHeadroomBytes
 }
 
-// tokenHeader returns the configured actor-id header, or the default when unset.
-func (h *Handler) tokenHeader() string {
-	if h.TokenHeader != "" {
-		return h.TokenHeader
+// credential reads the one handshake credential off the request and hands it to
+// the Auth port (T018.3). The WS adapter only TRANSPORTS it; the selected adapter
+// decides what it means, so the Auth port stays infra-free (§I).
+//
+// An unconfigured ActorIDHeader yields "", which is correct for both modes: `open`
+// ignores it, and `header` never reaches here with one unset because config.Load
+// refuses to start without a dedicated header name.
+func (h *Handler) credential(r *http.Request) string {
+	if h.ActorIDHeader == "" {
+		return ""
 	}
-	return defaultTokenHeader
-}
-
-// cookieName returns the configured BFF session cookie name, or the default.
-func (h *Handler) cookieName() string {
-	if h.CookieName != "" {
-		return h.CookieName
-	}
-	return defaultCookieName
-}
-
-// credentials reads the full handshake credential set off the request and hands
-// it to the Auth port (T018.3). The WS adapter only TRANSPORTS the credentials —
-// the selected adapter decides which it inspects and in what priority, so the
-// Auth port stays infra-free (§I). The bearer is read ONLY from Authorization;
-// there is no ?access_token= query fallback (DROPPED, OPEN-7).
-func (h *Handler) credentials(r *http.Request) model.HandshakeCredentials {
-	creds := model.HandshakeCredentials{
-		ActorIDHeader: r.Header.Get(h.tokenHeader()),
-		BearerToken:   r.Header.Get("Authorization"),
-		GuestName:     r.URL.Query().Get("guestName"),
-	}
-	// The session cookie carries the bare sid (the server signs the cookie with
-	// express-session, but in the WS-handshake mirror the BFF presents the bare
-	// sid that matches the Redis key suffix). A missing cookie leaves CookieSID
-	// empty — the oidc adapter then skips the cookie path.
-	if c, err := r.Cookie(h.cookieName()); err == nil {
-		creds.CookieSID = c.Value
-	}
-	return creds
+	return r.Header.Get(h.ActorIDHeader)
 }
 
 // ServeHTTP authenticates the handshake, upgrades to WebSocket, joins the room
@@ -134,12 +97,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	identity, err := h.Auth.Authenticate(r.Context(), h.credentials(r))
+	identity, err := h.Auth.Authenticate(r.Context(), h.credential(r))
 	if err != nil {
 		// AuthN failure at the handshake → 401: a credential was PRESENTED but is
 		// invalid, or a dependency was unreachable (contracts/ws-protocol.md, §V).
-		// A MISSING credential is not a failure — the oidc/open adapters resolve it
-		// to anonymous and never reach here.
+		// Whether ABSENCE is a failure is the adapter's call: `header` treats an
+		// empty credential as the gateway not having run (401), while `open`
+		// resolves it to anonymous and never reaches here.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

@@ -234,5 +234,5 @@ func newH2CClient() *http.Client {
 }
 
 // compile-time assertion that Adapter satisfies the per-document AuthZ port.
-// (Handshake AuthN now lives in the sibling `header`/`oidc`/`open` adapters.)
+// (Handshake AuthN now lives in the sibling `header`/`open` adapters.)
 var _ port.AuthZ = (*Adapter)(nil)

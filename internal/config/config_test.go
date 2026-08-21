@@ -25,8 +25,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AuthMode != AuthModeOpen {
 		t.Errorf("default AuthMode = %q, want open", cfg.AuthMode)
 	}
-	if cfg.Auth.TokenHeader != DefaultAuthTokenHeader {
-		t.Errorf("default Auth.TokenHeader = %q, want %q", cfg.Auth.TokenHeader, DefaultAuthTokenHeader)
+	// EMPTY by default, deliberately. Open mode ignores the credential, so there is
+	// nothing to name; header mode must state its dedicated gateway-owned header
+	// explicitly and fails to load without one. A bearer-style "Authorization"
+	// default existed only to feed a direct-validation adapter that was removed.
+	if cfg.Auth.ActorIDHeader != "" {
+		t.Errorf("default Auth.ActorIDHeader = %q, want empty", cfg.Auth.ActorIDHeader)
 	}
 }
 
@@ -92,10 +96,11 @@ func TestExplicitLocalSelectorsRemainSupported(t *testing.T) {
 	}
 }
 
-// TestAuthTokenHeaderOverride asserts AUTH_TOKEN_HEADER overrides the handshake
-// header the WS adapter reads the identity token from — the seam the Alkemio
+// TestAuthTokenHeaderOverride asserts AUTH_TOKEN_HEADER names the handshake
+// header the WS adapter reads the actor id from — the seam the Alkemio
 // deployment uses to point the handshake at the gateway's resolved actor-id
-// header (X-Alkemio-Actor-Id) while standalone/open mode keeps Authorization.
+// header (X-Alkemio-Actor-Id). The env name is legacy: it supplies a header
+// NAME, and the header carries an actor UUID, not a token.
 func TestAuthTokenHeaderOverride(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("AUTH_MODE", "")
@@ -105,8 +110,8 @@ func TestAuthTokenHeaderOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(): unexpected error %v", err)
 	}
-	if cfg.Auth.TokenHeader != "X-Alkemio-Actor-Id" {
-		t.Errorf("Auth.TokenHeader = %q, want %q", cfg.Auth.TokenHeader, "X-Alkemio-Actor-Id")
+	if cfg.Auth.ActorIDHeader != "X-Alkemio-Actor-Id" {
+		t.Errorf("Auth.ActorIDHeader = %q, want %q", cfg.Auth.ActorIDHeader, "X-Alkemio-Actor-Id")
 	}
 }
 
@@ -458,46 +463,6 @@ func TestLimitsRejectNegative(t *testing.T) {
 	}
 }
 
-// TestNumericEnvRejectsMalformed asserts a SET-but-unparseable numeric env var
-// fails fast rather than silently falling back to its default — a typo in a hard
-// limit or safety-sensitive setting must not quietly change runtime behavior.
-func TestNumericEnvRejectsMalformed(t *testing.T) {
-	cases := []struct {
-		key, val string
-		// extra env required for the loader that reads the key to run at all.
-		extra map[string]string
-	}{
-		{key: "MAX_DOC_BYTES", val: "not-a-number"},
-		{key: "SAVE_DEBOUNCE_MILLIS", val: "12.5"},
-		{key: "OIDC_CLOCK_SKEW_SECONDS", val: "abc", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
-			"AUTH_MODE": "oidc", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
-			"AUTH_SERVICE_URL": "http://auth:6060",
-			"HYDRA_JWKS_URL":   "http://hydra/.well-known/jwks.json",
-		}},
-		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
-			"CHECKPOINT_STORE":               "file-service",
-			"FILE_SERVICE_URL":               "http://files:4000",
-			"FILE_SERVICE_STORAGE_BUCKET_ID": "bucket-1",
-		}},
-		{key: "AUTH_BREAKER_TIMEOUT_SECONDS", val: "soon", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
-			"AUTH_MODE": "header", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
-			"AUTHZ_MODE": "authzeval", "AUTH_SERVICE_URL": "http://auth:6060",
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.key, func(t *testing.T) {
-			pinKnownGood(t)
-			for k, v := range tc.extra {
-				t.Setenv(k, v)
-			}
-			t.Setenv(tc.key, tc.val)
-			if _, err := Load(); err == nil {
-				t.Fatalf("%s=%q: expected a fail-fast parse error, got nil", tc.key, tc.val)
-			}
-		})
-	}
-}
-
 // --- Wave 5 (T018.1): AuthN/AuthZ mode selection ---
 
 // pinKnownGood pins every non-auth selector to a known-good value so an
@@ -547,43 +512,6 @@ func TestHeaderModeDerivesAuthZEval(t *testing.T) {
 	}
 }
 
-// TestOIDCModeDerivesAuthZEval asserts AUTH_MODE=oidc derives AUTHZ_MODE=authzeval
-// when unset (oidc is an Alkemio AuthN strategy, so per-doc authZ still delegates).
-func TestOIDCModeDerivesAuthZEval(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "")
-	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
-	t.Setenv("HYDRA_JWKS_URL", "http://hydra/.well-known/jwks.json")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.AuthMode != AuthModeOIDC {
-		t.Errorf("AuthMode = %q, want oidc", cfg.AuthMode)
-	}
-	if cfg.AuthZMode != AuthZModeEval {
-		t.Errorf("AuthZMode = %q, want derived authzeval", cfg.AuthZMode)
-	}
-}
-
-// TestAuthZModeOverrideIndependentOfAuthN asserts AUTHZ_MODE is honoured
-// independently — oidc AuthN with an explicit open AuthZ (defense-in-depth
-// AuthN without delegating authZ) is a valid combination.
-func TestAuthZModeOverrideIndependentOfAuthN(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "http://hydra/.well-known/jwks.json")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.AuthMode != AuthModeOIDC || cfg.AuthZMode != AuthZModeOpen {
-		t.Errorf("AuthMode/AuthZMode = %q/%q, want oidc/open", cfg.AuthMode, cfg.AuthZMode)
-	}
-}
-
 // TestAuthModeRejectsUnknown asserts an unrecognised AUTH_MODE fails fast.
 func TestAuthModeRejectsUnknown(t *testing.T) {
 	pinKnownGood(t)
@@ -614,165 +542,6 @@ func TestAuthZEvalRequiresServiceURLViaAuthZMode(t *testing.T) {
 	t.Setenv("AUTH_SERVICE_URL", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("AUTHZ_MODE=authzeval without AUTH_SERVICE_URL: expected error")
-	}
-}
-
-// TestHeaderModeRejectsBearerHeader asserts AUTH_MODE=header fails fast unless a
-// dedicated gateway-owned actor-id header is configured: leaving AUTH_TOKEN_HEADER
-// at the client-controllable default ("Authorization") would let any client stamp
-// its own actor id, so it is rejected (the header adapter trusts the value).
-func TestHeaderModeRejectsBearerHeader(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "header")
-	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
-	// AUTH_TOKEN_HEADER unset → defaults to Authorization → must be rejected.
-	if _, err := Load(); err == nil {
-		t.Fatal("AUTH_MODE=header with default Authorization token header: expected error")
-	}
-	// Explicitly setting it to Authorization (any case) is likewise rejected.
-	t.Setenv("AUTH_TOKEN_HEADER", "authorization")
-	if _, err := Load(); err == nil {
-		t.Fatal("AUTH_MODE=header with AUTH_TOKEN_HEADER=authorization: expected error")
-	}
-	// A dedicated gateway header is accepted.
-	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
-	if _, err := Load(); err != nil {
-		t.Fatalf("AUTH_MODE=header with a gateway header: unexpected error %v", err)
-	}
-}
-
-// TestOIDCRequiresAtLeastOnePath asserts oidc AuthN with NEITHER a JWKS URL nor a
-// session-Redis URL is rejected — an oidc adapter that can validate nothing is a
-// misconfiguration (both paths inert ⇒ every credential is unvalidatable).
-func TestOIDCRequiresAtLeastOnePath(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "")
-	t.Setenv("SESSION_REDIS_URL", "")
-	t.Setenv("REDIS_URL", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("AUTH_MODE=oidc with neither JWKS nor session Redis: expected error")
-	}
-}
-
-// TestOIDCBearerOnlyValid asserts oidc with only a JWKS URL configured loads
-// (bearer-only degrade) and mirrors the server's OIDC env names + defaults.
-func TestOIDCBearerOnlyValid(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "http://hydra/.well-known/jwks.json")
-	t.Setenv("HYDRA_ISSUER_URL", "http://hydra/")
-	t.Setenv("BEARER_AUD_ALLOW_LIST", "alkemio-web, synapse-client")
-	t.Setenv("SESSION_REDIS_URL", "")
-	t.Setenv("REDIS_URL", "")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.OIDC.JWKSURL != "http://hydra/.well-known/jwks.json" {
-		t.Errorf("OIDC.JWKSURL = %q", cfg.OIDC.JWKSURL)
-	}
-	if cfg.OIDC.IssuerURL != "http://hydra/" {
-		t.Errorf("OIDC.IssuerURL = %q", cfg.OIDC.IssuerURL)
-	}
-	// Allow-list is comma-split and whitespace-trimmed.
-	if len(cfg.OIDC.BearerAudAllowList) != 2 ||
-		cfg.OIDC.BearerAudAllowList[0] != "alkemio-web" ||
-		cfg.OIDC.BearerAudAllowList[1] != "synapse-client" {
-		t.Errorf("OIDC.BearerAudAllowList = %#v", cfg.OIDC.BearerAudAllowList)
-	}
-	// Cookie path off (no session Redis); cookie name still defaulted.
-	if cfg.OIDC.SessionRedisURL != "" {
-		t.Errorf("SessionRedisURL = %q, want empty (cookie path off)", cfg.OIDC.SessionRedisURL)
-	}
-	if cfg.OIDC.SessionCookieName != DefaultOIDCSessionCookieName {
-		t.Errorf("SessionCookieName = %q, want default %q", cfg.OIDC.SessionCookieName, DefaultOIDCSessionCookieName)
-	}
-}
-
-// TestOIDCSessionRedisDefaultsToRedisURL asserts SESSION_REDIS_URL defaults to
-// REDIS_URL when unset (OPEN-7) — a single-Redis deployment needs no extra config.
-func TestOIDCSessionRedisDefaultsToRedisURL(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "")
-	t.Setenv("SESSION_REDIS_URL", "")
-	t.Setenv("REDIS_URL", "redis://shared:6379")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.OIDC.SessionRedisURL != "redis://shared:6379" {
-		t.Errorf("SessionRedisURL = %q, want fallback to REDIS_URL", cfg.OIDC.SessionRedisURL)
-	}
-}
-
-// TestOIDCSessionRedisOverridesRedisURL asserts an explicit SESSION_REDIS_URL
-// takes precedence over REDIS_URL (isolated session store).
-func TestOIDCSessionRedisOverridesRedisURL(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "")
-	t.Setenv("SESSION_REDIS_URL", "redis://sessions:6379")
-	t.Setenv("REDIS_URL", "redis://fanout:6379")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.OIDC.SessionRedisURL != "redis://sessions:6379" {
-		t.Errorf("SessionRedisURL = %q, want explicit override", cfg.OIDC.SessionRedisURL)
-	}
-}
-
-// TestOIDCCookieNameOverride asserts OIDC_SESSION_COOKIE_NAME overrides the
-// default (env-suffixed cookie per environment), mirroring the server.
-func TestOIDCCookieNameOverride(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "")
-	t.Setenv("REDIS_URL", "redis://shared:6379")
-	t.Setenv("OIDC_SESSION_COOKIE_NAME", "alkemio_session_sandbox")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.OIDC.SessionCookieName != "alkemio_session_sandbox" {
-		t.Errorf("SessionCookieName = %q", cfg.OIDC.SessionCookieName)
-	}
-}
-
-// TestOIDCRejectsNegativeClockSkew asserts a negative OIDC_CLOCK_SKEW_SECONDS
-// fails fast (a negative tolerance is a misconfiguration).
-func TestOIDCRejectsNegativeClockSkew(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "http://hydra/.well-known/jwks.json")
-	t.Setenv("OIDC_CLOCK_SKEW_SECONDS", "-5")
-	if _, err := Load(); err == nil {
-		t.Fatal("OIDC_CLOCK_SKEW_SECONDS=-5: expected error, got nil")
-	}
-}
-
-// TestOIDCAudAllowListAllBlankIsEmpty asserts a BEARER_AUD_ALLOW_LIST that is all
-// separators/whitespace yields a nil allow-list (splitAndTrim drops empties).
-func TestOIDCAudAllowListAllBlankIsEmpty(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("AUTH_MODE", "oidc")
-	t.Setenv("AUTHZ_MODE", "open")
-	t.Setenv("HYDRA_JWKS_URL", "http://hydra/.well-known/jwks.json")
-	t.Setenv("BEARER_AUD_ALLOW_LIST", " , ,  ,")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.OIDC.BearerAudAllowList) != 0 {
-		t.Errorf("BearerAudAllowList = %#v, want empty", cfg.OIDC.BearerAudAllowList)
 	}
 }
 
@@ -990,5 +759,127 @@ func TestSupportedTopologiesStillLoad(t *testing.T) {
 				t.Fatalf("%s must still load: %v", c.name, err)
 			}
 		})
+	}
+}
+
+// TestNumericEnvRejectsMalformed asserts a SET-but-unparseable numeric env var
+// fails fast rather than silently falling back to its default — a typo in a hard
+// limit or safety-sensitive setting must not quietly change runtime behavior.
+func TestNumericEnvRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		key, val string
+		// extra env required for the loader that reads the key to run at all.
+		extra map[string]string
+	}{
+		{key: "MAX_DOC_BYTES", val: "not-a-number"},
+		{key: "SAVE_DEBOUNCE_MILLIS", val: "12.5"},
+		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
+			"CHECKPOINT_STORE":               "file-service",
+			"FILE_SERVICE_URL":               "http://files:4000",
+			"FILE_SERVICE_STORAGE_BUCKET_ID": "bucket-1",
+		}},
+		{key: "AUTH_BREAKER_TIMEOUT_SECONDS", val: "soon", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
+			"AUTH_MODE": "header", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
+			"AUTHZ_MODE": "authzeval", "AUTH_SERVICE_URL": "http://auth:6060",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			pinKnownGood(t)
+			for k, v := range tc.extra {
+				t.Setenv(k, v)
+			}
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q: expected a fail-fast parse error, got nil", tc.key, tc.val)
+			}
+		})
+	}
+}
+
+// TestAuthZModeOverrideIndependentOfAuthN asserts AUTHZ_MODE is honoured
+// independently of AUTH_MODE: gateway-terminated AuthN with an explicit OPEN
+// AuthZ is a valid combination, so the two selectors must not be coupled.
+func TestAuthZModeOverrideIndependentOfAuthN(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTHZ_MODE", "open")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthMode != AuthModeHeader || cfg.AuthZMode != AuthZModeOpen {
+		t.Errorf("AuthMode/AuthZMode = %q/%q, want header/open", cfg.AuthMode, cfg.AuthZMode)
+	}
+}
+
+// TestOIDCModeIsRejected asserts the withdrawn direct-validation mode is refused
+// by config parsing rather than silently accepted and ignored. An operator whose
+// manifest still says oidc must be told at startup, not authenticated by a mode
+// that no longer exists.
+func TestOIDCModeIsRejected(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=oidc must be rejected; the mode was removed")
+	}
+}
+
+// TestHeaderModeRequiresADedicatedHeader pins BOTH refusals that keep the header
+// adapter from trusting something a client can set.
+//
+// The adapter takes AUTH_TOKEN_HEADER's value AS the actor id, so the header must
+// be gateway-owned. Unset is refused because there is no longer a default to fall
+// back to — an implicit default here would silently pick a header nobody chose.
+// "Authorization" is refused by name because it is client-controllable: accepting
+// it would let any caller stamp its own actor id and impersonate anyone.
+func TestHeaderModeRequiresADedicatedHeader(t *testing.T) {
+	for _, tc := range []struct{ name, header string }{
+		{"unset", ""},
+		{"the client-controllable Authorization", "Authorization"},
+		{"Authorization in any casing", "aUtHoRiZaTiOn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinKnownGood(t)
+			t.Setenv("AUTH_MODE", "header")
+			t.Setenv("AUTH_TOKEN_HEADER", tc.header)
+			t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+			if _, err := Load(); err == nil {
+				t.Fatalf("AUTH_TOKEN_HEADER=%q must be refused in header mode", tc.header)
+			}
+		})
+	}
+
+	// The positive half: a dedicated gateway-owned header IS accepted. Without
+	// it, "refuse everything in header mode" would satisfy the rows above.
+	t.Run("a dedicated gateway header is accepted", func(t *testing.T) {
+		pinKnownGood(t)
+		t.Setenv("AUTH_MODE", "header")
+		t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+		t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("header mode with a dedicated header must load: %v", err)
+		}
+		if cfg.Auth.ActorIDHeader != "X-Alkemio-Actor-Id" {
+			t.Errorf("Auth.ActorIDHeader = %q, want X-Alkemio-Actor-Id", cfg.Auth.ActorIDHeader)
+		}
+	})
+}
+
+// TestOpenModeNeedsNoTokenHeader is the companion: open mode ignores the
+// credential entirely, so an unset header name is correct rather than an error.
+// Without this, the header-mode requirement above could be implemented as a
+// global one and nothing would notice.
+func TestOpenModeNeedsNoTokenHeader(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "open")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("open mode with no AUTH_TOKEN_HEADER must load: %v", err)
+	}
+	if cfg.Auth.ActorIDHeader != "" {
+		t.Errorf("Auth.ActorIDHeader = %q, want empty", cfg.Auth.ActorIDHeader)
 	}
 }

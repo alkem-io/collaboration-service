@@ -8,21 +8,18 @@ import (
 )
 
 // TestAuthenticateIsAnonymousForAnyCredential asserts open mode resolves every
-// handshake — credentialed or not — to the anonymous identity with an empty
-// ActorID (AuthZ is bypassed entirely in open mode).
+// handshake — with or without a gateway header — to an anonymous identity whose
+// ActorID is NIL, distinct from the gateway-stamped uuid.Nil sentinel. AuthZ is
+// bypassed entirely in open mode.
 func TestAuthenticateIsAnonymousForAnyCredential(t *testing.T) {
 	a := New()
-	for _, creds := range []model.HandshakeCredentials{
-		{},
-		{ActorIDHeader: "actor"},
-		{BearerToken: "Bearer x", CookieSID: "sid", GuestName: "Ada"},
-	} {
-		id, err := a.Authenticate(context.Background(), creds)
+	for _, credential := range []string{"", "actor", "00000000-0000-0000-0000-000000000000"} {
+		id, err := a.Authenticate(context.Background(), credential)
 		if err != nil {
-			t.Fatalf("Authenticate(%#v): unexpected error %v", creds, err)
+			t.Fatalf("Authenticate(%q): unexpected error %v", credential, err)
 		}
 		if id.ActorID != nil {
-			t.Errorf("Authenticate(%#v).ActorID = %v, want nil (open mode)", creds, id.ActorID)
+			t.Errorf("Authenticate(%q).ActorID = %v, want nil (open mode)", credential, id.ActorID)
 		}
 	}
 }

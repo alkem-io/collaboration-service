@@ -15,6 +15,18 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
+// Actor id fixtures. Every production producer of an actor id supplies a UUID —
+// the gateway stamps ctx.actorID or the nil-UUID sentinel (server:
+// core/auth/oidc/forward-auth.controller.ts) — and the handshake validates that,
+// so these are UUIDs rather than names.
+//
+// They lived alongside the direct-validation e2e suite until that adapter was
+// removed; only the two the authz suite actually uses were kept.
+const (
+	actorEditor = "11111111-1111-1111-1111-111111111111"
+	actorViewer = "22222222-2222-2222-2222-222222222222"
+)
+
 // evalRequest mirrors the auth-evaluation-service request body the authzeval
 // adapter sends: {actorId, privilege, authorizationPolicyId}.
 type evalRequest struct {
@@ -59,11 +71,15 @@ func startAuthEvalStub(t *testing.T, decide func(evalRequest) bool) string {
 // row the PolicyResolver can load).
 func authzevalConfig(authURL string) *config.Config {
 	cfg := standaloneConfig()
-	// header AuthN (the gateway-stamped actor id arrives in the Authorization
-	// handshake header here) + authzeval AuthZ — the Wave-5 split of the former
-	// single AUTH_MODE that bundled both (since removed). The `header` adapter reads cfg.Auth.TokenHeader,
-	// which standaloneConfig leaves empty ⇒ the Authorization default.
+	// header AuthN (the gateway-stamped actor id arrives in the dedicated
+	// e2eActorIDHeader) + authzeval AuthZ — the Wave-5 split of the former single
+	// AUTH_MODE that bundled both (since removed).
+	//
+	// ActorIDHeader must be named explicitly: `header` mode has no default, and
+	// standaloneConfig leaves it empty, so an unnamed header would authenticate
+	// nobody and every dial would 401.
 	cfg.AuthMode = config.AuthModeHeader
+	cfg.Auth.ActorIDHeader = e2eActorIDHeader
 	cfg.AuthZMode = config.AuthZModeEval
 	cfg.AuthZEval = config.AuthZEvalConfig{
 		ServiceURL:              authURL,
@@ -119,8 +135,8 @@ func TestAuthzEvalViewerCannotMutateCollaboratorCan(t *testing.T) {
 	const docID = "e2e-authz-memo"
 	preRegister(t, httpBase, docID, "memo")
 
-	editor := dialWithToken(t, wsBase, docID, "memo", actorEditor)
-	viewer := dialWithToken(t, wsBase, docID, "memo", actorViewer)
+	editor := dialAsActor(t, wsBase, docID, "memo", actorEditor)
+	viewer := dialAsActor(t, wsBase, docID, "memo", actorViewer)
 	time.Sleep(150 * time.Millisecond)
 
 	// The editor (collaborator) writes — both clients converge on it.
