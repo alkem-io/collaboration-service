@@ -139,7 +139,7 @@ type roomMember struct {
 // awareness state, and it serializes every mutation through a single run-loop
 // goroutine so the Y.Doc has exactly one writer. A room is lazily materialized
 // on first connect (loading the latest snapshot), fans each client's updates out
-// to the others, debounces snapshot persistence, and is released — persisting a
+// to the others, throttles snapshot persistence, and is released — persisting a
 // final snapshot — when the last client leaves or after an idle timeout.
 type Room struct {
 	id      model.DocumentID
@@ -179,7 +179,7 @@ type Room struct {
 	nextID  connID
 
 	// dirty is set when the doc changed since the last persisted snapshot;
-	// it drives the debounce timer and the final save-on-release.
+	// it drives the save timer and the final save-on-release.
 	dirty bool
 	// docBytes is the live doc's last known encoded-v2 size, used by
 	// applyWouldExceedMaxDocBytes as a cheap sound bound so the O(docsize) budget
@@ -353,7 +353,7 @@ func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
 // Values come from configuration; the defaults are standalone-friendly.
 type RoomConfig struct {
 	// SaveDebounce is the time from the first dirty mutation until a snapshot
-	// is persisted (R7; memo/whiteboard ~500ms default, configurable). The timer
+	// is persisted (R7; 2000ms default, configurable). The timer
 	// is armed once per clean→dirty cycle (on the first edit after a save) and
 	// fires once, bounding the staleness window regardless of edit frequency.
 	SaveDebounce time.Duration
@@ -461,7 +461,7 @@ func DefaultLimits() Limits {
 // limit/presence defaults (epic R9, OPEN-4) layered on.
 func DefaultRoomConfig() RoomConfig {
 	return RoomConfig{
-		SaveDebounce:           500 * time.Millisecond,
+		SaveDebounce:           2 * time.Second,
 		IdleTimeout:            30 * time.Second,
 		SendBuffer:             64,
 		Limits:                 DefaultLimits(),
@@ -824,7 +824,7 @@ func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc) error {
 }
 
 // run is the room's single goroutine. It owns the Y.Doc and the member registry,
-// draining commands until closed and managed by the debounce/idle timers plus the
+// draining commands until closed and managed by the save/idle timers plus the
 // Wave-3 presence tickers (inactivity sweep, contribution-window flush). All
 // Y.Doc, awareness, and member mutation happens here, making the room the lone
 // writer.
@@ -927,8 +927,8 @@ func newOptionalTicker(every time.Duration) (*time.Timer, time.Duration) {
 	return time.NewTimer(every), every
 }
 
-// handleMessageCmd applies an inbound client frame and re-arms the timers: the save
-// debounce if it mutated the doc, and the idle timer if a rate/size-limit self-
+// handleMessageCmd applies an inbound client frame and arms the save timer on a
+// clean-to-dirty transition, and the idle timer if a rate/size-limit self-
 // disconnect inside handleMessage dropped the last member (002 FR-011 — so an
 // emptied room is released, not leaked). Extracted from dispatch to keep its
 // branching low.
@@ -1154,7 +1154,7 @@ func (r *Room) dropMember(id connID) bool {
 
 // handleMessage dispatches one framed wire message from a connection. It returns
 // true when the message mutated the persistent document (a sync update), so the
-// caller can (re)arm the save debounce. Sync messages are applied to the
+// caller can arm the save timer. Sync messages are applied to the
 // authoritative doc — whose update observer fans the delta to the other members.
 // Awareness and ephemeral messages are fanned out but never touch the snapshot
 // (FR-008).
@@ -1269,7 +1269,7 @@ func (r *Room) trackAwarenessID(src connID, payload []byte) {
 // members but does NOT re-publish it to the bus (no ping-pong). An ephemeral
 // payload (awareness or the custom ephemeral channel) is fanned to local members
 // verbatim and never persisted. It returns whether the document was mutated so
-// the run loop can arm the save debounce — only the originating pod persists, but
+// the run loop can arm the save timer — only the originating pod persists, but
 // every pod that applied the update keeps its in-memory doc dirty for its own
 // final snapshot, so a pod can survive the originator vanishing.
 func (r *Room) handlePeer(payload []byte, ephemeral bool) (mutated bool) {
@@ -1498,8 +1498,8 @@ func (r *Room) applyPeerEphemeral(frame []byte) {
 // reply sent only to the requesting connection (the offline→reconnect catch-up,
 // US5). Applied structs (SyncStep2 / Update) flow through the doc's update
 // observer, which both marks the room dirty and fans the delta to the other
-// members. It returns whether the document was mutated so the run loop can arm
-// the save debounce.
+// members. It returns whether the document became dirty so the run loop can arm
+// the save timer.
 func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// Re-frame the sync payload as a MessageSync envelope for dispatchSync.
 	var framed bytes.Buffer
@@ -1740,10 +1740,10 @@ func (r *Room) sendMember(m roomMember, frame []byte) {
 	}
 }
 
-// persist debounces a full v2 snapshot to the blob store and upserts the index
+// persist writes a throttled full v2 snapshot to the blob store and upserts the index
 // (R7). It is a no-op when nothing changed since the last save. On success it
 // emits a `saved` control message to the room; on failure a `save-error`, and
-// the room keeps serving from memory (the crash-loss window is one debounce
+// the room keeps serving from memory (the crash-loss window is one save
 // interval, data-model.md).
 func (r *Room) persist(ctx context.Context) {
 	if !r.dirty {
@@ -1830,8 +1830,10 @@ func (r *Room) persist(ctx context.Context) {
 // notify the Manager → mark Closed. beginTeardown is the idempotent guard: only the
 // first caller runs the sequence; the rest return immediately (no double close, no
 // re-notify). Runs on the run-loop goroutine.
-// armSaveTimer (re)arms the save debounce, unless debouncing is disabled — in
-// which case the save-on-release path persists instead.
+// armSaveTimer arms the trailing save throttle, unless periodic saving is
+// disabled — in which case the save-on-release path persists instead. Normal
+// edits call it only on a clean-to-dirty transition, so later edits in the same
+// window do not reset the timer.
 func (r *Room) armSaveTimer(saveTimer *time.Timer) {
 	if r.cfg.SaveDebounce <= 0 {
 		return
@@ -1849,8 +1851,8 @@ func (r *Room) armSaveTimer(saveTimer *time.Timer) {
 // already struggling — but it stays bounded well under the escalation threshold's
 // worth of attempts, so escalation remains reachable in finite time.
 //
-// It is a no-op when the flush succeeded (nothing to retry) and when debouncing
-// is disabled (SaveDebounce <= 0 means persist only on release/close, and a retry
+// It is a no-op when the flush succeeded (nothing to retry) and when periodic
+// saving is disabled (SaveDebounce <= 0 means persist only on release/close, and a retry
 // timer would quietly reintroduce the periodic save the operator turned off).
 func (r *Room) armRetryTimer(saveTimer *time.Timer) {
 	if !r.dirty || r.flushFailures == 0 || r.cfg.SaveDebounce <= 0 {

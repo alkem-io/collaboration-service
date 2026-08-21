@@ -249,6 +249,12 @@ func TestEnqueueRejectedWhenRoomDone(t *testing.T) {
 
 // --- room.go: newRoom ---
 
+func TestDefaultRoomConfigSaveCadenceMatchesLegacyWhiteboard(t *testing.T) {
+	if got := DefaultRoomConfig().SaveDebounce; got != 2*time.Second {
+		t.Fatalf("SaveDebounce = %v, want 2s", got)
+	}
+}
+
 // TestNewRoomNilMetricsAndContributorDefault asserts newRoom installs the nop
 // metrics and nop contributor defaults when both are nil, so a room built without
 // them does not panic on a lifecycle/contribution hook.

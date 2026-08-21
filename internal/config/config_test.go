@@ -447,7 +447,7 @@ func TestLimitsDefaults(t *testing.T) {
 	if cfg.Limits.CollaboratorInactivitySeconds != 120 || cfg.Limits.ContributionWindowSeconds != 60 {
 		t.Errorf("presence cadence defaults = %+v", cfg.Limits)
 	}
-	if cfg.Limits.IdleReleaseSeconds != 30 || cfg.Limits.SaveDebounceMillis != 500 {
+	if cfg.Limits.IdleReleaseSeconds != 30 || cfg.Limits.SaveDebounceMillis != 2000 {
 		t.Errorf("room cadence defaults = %+v", cfg.Limits)
 	}
 }

@@ -114,7 +114,8 @@ none, so it must be commented where the 409 is handled.
 ## D2 — Flush batching lives **above** the `Store`
 
 **Decision**: the service merges a flush window and calls `Append` **once** per window.
-The interval is operator configuration (~500ms–10s range, documented default), armed
+The interval is operator configuration (~500ms–10s range, 2s default matching the
+legacy whiteboard), armed
 only when the document changed; shutdown flush is unconditional.
 
 **Rationale**: `Append` returning nil means the bytes crossed the durability boundary.

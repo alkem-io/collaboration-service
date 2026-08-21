@@ -80,5 +80,5 @@ is unreachable; a fallback would reintroduce the adapters being deleted.
 Each flush rewrites the whole document, so sustained volume ≈
 `document size ÷ flush interval × actively-edited documents`. This relationship MUST be
 documented wherever the interval is configured, and the shipped default MUST be
-justified against the configured document-size limit (FR-010a). At the configured document-size
-limit and a 500ms interval, one document alone is ~64 MiB/s.
+justified against the configured document-size limit (FR-010a). At the 30 MiB
+document-size limit and the 2s default, one document alone is ~15 MiB/s.

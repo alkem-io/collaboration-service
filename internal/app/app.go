@@ -367,9 +367,9 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 	roomCfg.CollaboratorInactivity = time.Duration(cfg.Limits.CollaboratorInactivitySeconds) * time.Second
 	roomCfg.ContributionWindow = time.Duration(cfg.Limits.ContributionWindowSeconds) * time.Second
 	roomCfg.IdleTimeout = time.Duration(cfg.Limits.IdleReleaseSeconds) * time.Second
-	// Apply unconditionally: 0 is a meaningful value (disables the periodic save
-	// debounce — persist only on idle-release/close), so guarding on >0 would make
-	// SAVE_DEBOUNCE_MILLIS=0 silently fall back to the 500ms default.
+	// Apply unconditionally: 0 is a meaningful value (disables periodic saves —
+	// persist only on idle-release/close), so guarding on >0 would make
+	// SAVE_DEBOUNCE_MILLIS=0 silently fall back to the 2000ms default.
 	roomCfg.SaveDebounce = time.Duration(cfg.Limits.SaveDebounceMillis) * time.Millisecond
 	manager := service.NewManager(deps, roomCfg, httpAdapter.PrometheusMetrics{}, logger.Named("rooms"))
 

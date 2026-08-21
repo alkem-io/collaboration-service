@@ -146,9 +146,9 @@ type LimitsConfig struct {
 	// IdleReleaseSeconds releases an empty room this long after its last member
 	// leaves (IDLE_RELEASE_SECONDS, default 30s; 0 releases immediately).
 	IdleReleaseSeconds int
-	// SaveDebounceMillis is the quiet period after the last edit before a snapshot
-	// is persisted (SAVE_DEBOUNCE_MILLIS, default 500ms; 0 disables the periodic
-	// debounce so a snapshot is persisted only on idle-release/close).
+	// SaveDebounceMillis is the interval from the first unsaved edit until a
+	// snapshot is persisted (SAVE_DEBOUNCE_MILLIS, default 2000ms). Further edits
+	// do not reset it. 0 disables periodic saves, leaving idle-release/close.
 	SaveDebounceMillis int
 	// FlushFailureThreshold is how many CONSECUTIVE failed flushes a document
 	// tolerates before durability escalation tears the room down and discards the
@@ -340,9 +340,9 @@ const (
 	defaultUpdateRatePerSec          = 50
 	defaultCollaboratorInactivitySec = 120
 	defaultContributionWindowSec     = 60
-	defaultIdleReleaseSec            = 30  // matches service.DefaultRoomConfig().IdleTimeout
-	defaultSaveDebounceMillis        = 500 // matches service.DefaultRoomConfig().SaveDebounce
-	defaultFlushFailureThreshold     = 5   // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold
+	defaultIdleReleaseSec            = 30   // matches service.DefaultRoomConfig().IdleTimeout
+	defaultSaveDebounceMillis        = 2000 // matches service.DefaultRoomConfig().SaveDebounce
+	defaultFlushFailureThreshold     = 5    // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold
 )
 
 // loadLimitsConfig reads the Wave-3 enforcement/presence tunables, applying the
