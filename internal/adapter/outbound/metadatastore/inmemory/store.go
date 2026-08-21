@@ -1,8 +1,7 @@
-// Package inmemory is a standalone, in-process MetadataStore: it keeps the
-// document index in a map so the service runs without RabbitMQ/Postgres. The
-// rabbitmq adapter (server save/fetch bus, Alkemio default) and the postgres
-// adapter (standalone) land with task T005; this skeleton stub keeps the
-// metadata-store layout real and lets the service boot zero-dependency.
+// Package inmemory is an in-process MetadataStore: it keeps the document index
+// in a map so the service runs without RabbitMQ. It serves the in-process
+// development and test path and is NOT durable — the Alkemio topology uses the
+// rabbitmq adapter (server save/fetch bus), which is the system of record.
 package inmemory
 
 import (
@@ -39,8 +38,7 @@ func (s *Store) Load(_ context.Context, id model.DocumentID) (model.Metadata, er
 // Save upserts the index row, bumping its version and updated-at timestamp.
 //
 // On conflict it preserves the existing value of every column the incoming
-// Metadata leaves BLANK, mirroring the postgres adapter's
-// COALESCE(NULLIF(EXCLUDED.x,”), existing) upsert — one canonical save behavior
+// Metadata leaves BLANK — one canonical save behavior
 // across backends. This matters because two callers Save partial rows:
 //   - a per-snapshot persist (Room.persist) carries content_pointer but
 //     historically blank lifecycle fields; and
@@ -73,8 +71,7 @@ func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 
 // coalesceBlank fills the blank fields of an incoming upsert from the existing
 // row, so a Save that carries only a subset of the columns does not clobber the
-// rest to their zero value. It mirrors the postgres upsert's
-// COALESCE(NULLIF(EXCLUDED.x,”), existing) per preserved column. Version,
+// rest to their zero value. Version,
 // CreatedAt, and UpdatedAt are managed by Save and intentionally excluded.
 func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	if in.ContentType == "" {

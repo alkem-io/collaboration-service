@@ -582,7 +582,7 @@ func (m *Manager) Close() {
 
 	// ONE deadline bounds the WHOLE shutdown — both the cmdClose signal AND the
 	// drain. App.Close drains closers last-in-first-out — Manager.Close first, THEN
-	// the durable backends (postgres/rabbitmq/redis) — so returning early would let
+	// the durable backends (rabbitmq/redis) — so returning early would let
 	// those backends close out from under a room's in-flight save-on-shutdown persist,
 	// losing the last debounce window of edits (the very edits the final snapshot
 	// exists to save). cmdClose persists, then finish() closes r.done, so r.done is

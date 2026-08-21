@@ -273,30 +273,6 @@ func TestRabbitMQEscapesCredentials(t *testing.T) {
 	}
 }
 
-func TestPostgresRequiresDSNParts(t *testing.T) {
-	t.Setenv("METADATA_STORE", "postgres")
-	if _, err := Load(); err == nil {
-		t.Fatal("METADATA_STORE=postgres without ALKEMIO_DATABASE_*: expected error")
-	}
-}
-
-func TestPostgresAssemblesDSN(t *testing.T) {
-	pinKnownGood(t)
-	t.Setenv("METADATA_STORE", "postgres")
-	t.Setenv("ALKEMIO_DATABASE_HOST", "db")
-	t.Setenv("ALKEMIO_DATABASE_NAME", "collab")
-	t.Setenv("ALKEMIO_DATABASE_USERNAME", "u")
-	t.Setenv("ALKEMIO_DATABASE_PASSWORD", "p")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	want := fmt.Sprintf("postgres://%s:%s@db:5432/collab?sslmode=disable", "u", "p")
-	if cfg.Postgres.DSN != want {
-		t.Errorf("Postgres.DSN = %q, want %q", cfg.Postgres.DSN, want)
-	}
-}
-
 func TestFileServiceRequiresSettings(t *testing.T) {
 	t.Setenv("CHECKPOINT_STORE", "file-service")
 	if _, err := Load(); err == nil {
@@ -860,21 +836,6 @@ func TestURLOverridesTakePrecedenceOverComponentParts(t *testing.T) {
 			t.Fatalf("RabbitMQ URL = %q; the explicit URL must win over the component parts, or the service connects to the wrong broker while the operator believes otherwise", cfg.RabbitMQ.URL)
 		}
 	})
-
-	t.Run("DATABASE_URL", func(t *testing.T) {
-		const dbURL = "postgres://user:" + "pw" + "@db.example:5432/collab" //nolint:gosec // G101: test fixture, not a credential
-		t.Setenv("DATABASE_URL", dbURL)
-		t.Setenv("ALKEMIO_DATABASE_HOST", "ignored-host")
-		t.Setenv("METADATA_STORE", "postgres")
-
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if cfg.Postgres.DSN != dbURL {
-			t.Fatalf("Postgres DSN = %q; the explicit URL must win over the component parts", cfg.Postgres.DSN)
-		}
-	})
 }
 
 // TestPortAndIntegerParsingRejectNonsense covers the numeric guards.
@@ -938,11 +899,6 @@ func TestSelectedBackendsRequireTheirSettings(t *testing.T) {
 				"RABBITMQ_QUEUE": "shared", "LIFECYCLE_QUEUE": "shared",
 			},
 			wantErr: "LIFECYCLE_QUEUE",
-		},
-		{
-			name:    "postgres metadata store without connection details",
-			env:     map[string]string{"METADATA_STORE": "postgres", "ALKEMIO_DATABASE_HOST": ""},
-			wantErr: "METADATA_STORE=postgres",
 		},
 		{
 			name:    "file-service checkpoint store without its URL",

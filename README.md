@@ -37,7 +37,7 @@ internal/
     │   └── http/               # /healthz, /metrics
     └── outbound/
         ├── hub/redis/
-        ├── metadatastore/{inmemory,rabbitmq,postgres}/
+        ├── metadatastore/{inmemory,rabbitmq}/
         ├── persistence/{inprocess,fileservice,metapointer}/
         └── auth/{open,authzeval}/
 ```

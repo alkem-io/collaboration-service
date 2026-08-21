@@ -31,7 +31,6 @@ import (
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
 	hubredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/hub/redis"
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
-	metapostgres "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/postgres"
 	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/rabbitmq"
 	persistfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/fileservice"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
@@ -97,7 +96,7 @@ func (a *App) Close() {
 
 // buildDeps selects a concrete adapter per outbound port from configuration and
 // assembles the domain dependency set (T004.4/T005.6/T006.4). It returns a
-// cleanup that closes the backends that hold connections (redis/rabbitmq/postgres)
+// cleanup that closes the backends that hold connections (redis/rabbitmq)
 // on shutdown. The standalone defaults (inmemory / inline / open) keep the
 // service a single zero-dependency binary (SC-012); any other selection wires the
 // matching durable adapter, failing fast if its config is incomplete.
@@ -181,16 +180,6 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 		// The rabbitmq store also satisfies port.Contributor (collaboration-
 		// contribution event), so analytics ride the same bus.
 		return store, store, nil
-	case config.MetadataStorePostgres:
-		if err := metapostgres.Migrate(cfg.Postgres.DSN); err != nil {
-			return nil, nil, fmt.Errorf("postgres migrate: %w", err)
-		}
-		store, pool, err := metapostgres.Connect(context.Background(), cfg.Postgres.DSN)
-		if err != nil {
-			return nil, nil, fmt.Errorf("postgres metadata store: %w", err)
-		}
-		*closers = append(*closers, pool.Close)
-		return store, nil, nil
 	default:
 		// Standalone in-process store: the zero-dep path (SC-012).
 		return metainmem.New(), nil, nil

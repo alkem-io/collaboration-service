@@ -31,9 +31,10 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
 - **Logging**: Zap (structured, JSON)
 - **Metrics**: Prometheus (`/metrics`)
 - **Architecture**: Hexagonal (ports and adapters)
-- **Persistence (pluggable)**: metadata store (RabbitMQ→server / Postgres),
-  content store (in-process / file-service) — pgx v5 + sqlc + golang-migrate
-  for the Postgres path
+- **Persistence (pluggable)**: metadata store (RabbitMQ→server), content store
+  (in-process / file-service). The service opens NO database of its own: the
+  document index is `server`'s, reached by RPC over RabbitMQ, and blobs are
+  file-service's.
 - **Auth (pluggable)**: handshake AuthN and per-document AuthZ are selected
   INDEPENDENTLY — `open` (standalone) / `header` (gateway-terminated, the prod
   default) / `oidc` (direct validation) for AuthN; `open` / `authzeval`
@@ -56,7 +57,7 @@ ports. Adapters implement them:
   **Multi-pod with a durable store is REJECTED at startup**: no ownership
   mechanism, so two pods flushing the same document overwrite each other. Use a
   single pod (`HUB_MODE=inmemory`) with the durable store.
-- `metadatastore/{inmemory,rabbitmq,postgres}` — `MetadataStore` (document index)
+- `metadatastore/{inmemory,rabbitmq}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
 
@@ -83,7 +84,7 @@ zero-dependency run costs one explicit line per selector:
 
 - `PORT` (default 4006)
 - `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is rejected at startup)
-- `METADATA_STORE` — `inmemory` (default; non-durable, tests/local) | `rabbitmq` | `postgres`
+- `METADATA_STORE` — `inmemory` (default; non-durable, tests/local) | `rabbitmq`
 - `CHECKPOINT_STORE` — **required**; `inline` (non-durable, tests/local) | `file-service` (durable)
 - `AUTH_MODE` — `header` | `oidc` | `open`. In `header` mode the actor id is read from
   `AUTH_TOKEN_HEADER`, which MUST be a gateway-owned header — the

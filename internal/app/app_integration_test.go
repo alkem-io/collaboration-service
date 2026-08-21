@@ -1,24 +1,20 @@
 //go:build integration
 
 // Integration tests for the composition root against real durable backends, so
-// the adapter-selection branches that the hermetic e2e suite cannot reach
-// (postgres metadata store, local blob store, and — when a bus is available —
-// the rabbitmq metadata store + lifecycle consumer) are exercised through the
-// REAL app.New wiring. Run with: go test -tags=integration ./...
+// the adapter-selection branches the hermetic e2e suite cannot reach (the
+// rabbitmq metadata store + lifecycle consumer) are exercised through the REAL
+// app.New wiring. Run with: go test -tags=integration ./...
 //
 // Required env (skipped when unset):
 //
-//	POSTGRES_TEST_DSN=postgres://user:pass@localhost:5432/collab_test?sslmode=disable
-//	RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/   (optional)
+//	RABBITMQ_TEST_URL=amqp://guest:guest@localhost:5672/
 package app
 
 import (
 	"bytes"
 	"context"
-	"net/http/httptest"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,68 +26,6 @@ import (
 
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
-
-// TestNewPostgresRoundTrip boots the full service through app.New with the
-// Postgres metadata store selected, then drives a real WebSocket edit +
-// persistence + reload round-trip — covering buildMetadata's postgres branch,
-// buildCheckpoint and New's happy path end to end.
-//
-// SCOPE, deliberately narrowed. This test used to select the local-disk blob
-// store and describe itself as proving the durable path. That adapter was removed
-// with the old blob port, so the selection now resolves to the IN-PROCESS
-// checkpoint store — which survives a reconnect within one process but not a
-// restart. Left as it was, the test would still pass and still read as a
-// durability proof, which is worse than not having it: the reload below only
-// re-materializes the room in the same process. Cross-restart durability belongs
-// to the file-service store and is covered in that adapter's own package.
-func TestNewPostgresRoundTrip(t *testing.T) {
-	dsn := os.Getenv("POSTGRES_TEST_DSN")
-	if dsn == "" {
-		t.Skip("POSTGRES_TEST_DSN not set")
-	}
-
-	cfg := &config.Config{
-		Port:            0,
-		HubMode:         config.HubInMemory,
-		MetadataStore:   config.MetadataStorePostgres,
-		CheckpointStore: config.CheckpointStoreInline,
-		AuthMode:        config.AuthModeOpen,
-		Postgres:        config.PostgresConfig{DSN: dsn},
-		Limits: config.LimitsConfig{
-			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
-			UpdateRatePerSec: 50, UpdateBurst: 50,
-			CollaboratorInactivitySeconds: 120, ContributionWindowSeconds: 60,
-		},
-	}
-
-	application, err := New(cfg, zap.NewNop())
-	if err != nil {
-		t.Fatalf("app.New (postgres): %v", err)
-	}
-	t.Cleanup(application.Close)
-
-	srv := httptest.NewServer(application.Handler)
-	t.Cleanup(srv.Close)
-	wsBase := "ws" + strings.TrimPrefix(srv.URL, "http")
-
-	docID := "app-int-" + time.Now().Format("150405.000")
-	a := integDial(t, wsBase, docID)
-	time.Sleep(80 * time.Millisecond)
-	a.insert("postgres-roundtrip ")
-
-	// Let the debounce persist to the checkpoint store + the postgres index, then
-	// close so the room idle-releases (final snapshot).
-	time.Sleep(700 * time.Millisecond)
-	a.close()
-	time.Sleep(250 * time.Millisecond)
-
-	// A fresh client re-materializes the room from the postgres index + the stored
-	// checkpoint.
-	b := integDial(t, wsBase, docID)
-	if !integEventually(func() bool { return strings.Contains(b.text(), "postgres-roundtrip") }) {
-		t.Fatalf("reload via the postgres index did not converge: %q", b.text())
-	}
-}
 
 // TestNewRabbitMQModeWires boots app.New in the Alkemio (rabbitmq) topology so
 // buildMetadata's rabbitmq branch and startLifecycle (lifecycle.Connect) run

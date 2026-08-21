@@ -38,8 +38,6 @@ const (
 	MetadataStoreInMemory MetadataStoreMode = "inmemory"
 	// MetadataStoreRabbitMQ rides the existing server save/fetch bus (Alkemio).
 	MetadataStoreRabbitMQ MetadataStoreMode = "rabbitmq"
-	// MetadataStorePostgres persists the index in Postgres (standalone).
-	MetadataStorePostgres MetadataStoreMode = "postgres"
 )
 
 // CheckpointStoreMode selects the checkpoint-store adapter (CHECKPOINT_STORE).
@@ -106,8 +104,6 @@ type Config struct {
 	Redis RedisConfig
 	// RabbitMQ holds the metadata-bus settings (METADATA_STORE=rabbitmq).
 	RabbitMQ RabbitMQConfig
-	// Postgres holds the metadata-DB settings (METADATA_STORE=postgres).
-	Postgres PostgresConfig
 	// FileService holds the file-service blob settings (CHECKPOINT_STORE=file-service).
 	FileService FileServiceConfig
 	// AuthZEval holds the authzeval settings (AUTHZ_MODE=authzeval).
@@ -190,12 +186,6 @@ type RabbitMQConfig struct {
 // binds when LIFECYCLE_QUEUE is unset — distinct from the metadata-store RPC queue so
 // the two consumers never share (and round-robin-steal) a queue.
 const DefaultLifecycleQueue = "alkemio-collaboration-lifecycle"
-
-// PostgresConfig configures the standalone metadata DB.
-type PostgresConfig struct {
-	// DSN is the postgres:// connection string (assembled from ALKEMIO_DATABASE_*).
-	DSN string
-}
 
 // FileServiceConfig configures the file-service blob backend.
 type FileServiceConfig struct {
@@ -449,8 +439,9 @@ func loadHubConfig(cfg *Config) error {
 }
 
 func loadMetadataStoreConfig(cfg *Config) error {
-	switch cfg.MetadataStore {
-	case MetadataStoreRabbitMQ:
+	// Only rabbitmq carries adapter settings; `inmemory` (the in-process store)
+	// has none. Mirrors loadCheckpointStoreConfig's shape.
+	if cfg.MetadataStore == MetadataStoreRabbitMQ {
 		cfg.RabbitMQ.URL = rabbitURL()
 		cfg.RabbitMQ.Queue = getenv("RABBITMQ_QUEUE", "")
 		if cfg.RabbitMQ.Queue == "" {
@@ -463,11 +454,6 @@ func loadMetadataStoreConfig(cfg *Config) error {
 		cfg.RabbitMQ.LifecycleQueue = getenv("LIFECYCLE_QUEUE", DefaultLifecycleQueue)
 		if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
 			return fmt.Errorf("LIFECYCLE_QUEUE must differ from RABBITMQ_QUEUE (%q) — a shared queue round-robin-steals metadata-store RPCs", cfg.RabbitMQ.Queue)
-		}
-	case MetadataStorePostgres:
-		cfg.Postgres.DSN = postgresDSN()
-		if cfg.Postgres.DSN == "" {
-			return fmt.Errorf("METADATA_STORE=postgres requires ALKEMIO_DATABASE_* (host/name/user)")
 		}
 	}
 	return nil
@@ -648,33 +634,6 @@ func rabbitURL() string {
 	return u.String()
 }
 
-// postgresDSN assembles a postgres DSN from ALKEMIO_DATABASE_* (matching the
-// .env.example convention), or returns DATABASE_URL verbatim when set.
-func postgresDSN() string {
-	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
-		return dsn
-	}
-	host := os.Getenv("ALKEMIO_DATABASE_HOST")
-	name := os.Getenv("ALKEMIO_DATABASE_NAME")
-	user := os.Getenv("ALKEMIO_DATABASE_USERNAME")
-	if host == "" || name == "" || user == "" {
-		return ""
-	}
-	port := getenv("ALKEMIO_DATABASE_PORT", "5432")
-	pass := os.Getenv("ALKEMIO_DATABASE_PASSWORD")
-	sslmode := getenv("ALKEMIO_DATABASE_SSLMODE", "disable")
-	// Build via net/url so credentials with reserved characters are escaped and
-	// the DSN stays well-formed for pgx.ParseConfig.
-	u := url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(user, pass),
-		Host:     net.JoinHostPort(host, port),
-		Path:     "/" + name,
-		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
-	}
-	return u.String()
-}
-
 // parseHubMode resolves HUB_MODE. It is MANDATORY — see parseCheckpointStore for the
 // reasoning, which applies here for the same reason in a weaker form: an absent
 // HUB_MODE silently running single-pod is a correctness problem for a deployment
@@ -692,10 +651,10 @@ func parseHubMode(v string) (HubMode, error) {
 
 func parseMetadataStore(v string) (MetadataStoreMode, error) {
 	switch MetadataStoreMode(v) {
-	case MetadataStoreInMemory, MetadataStoreRabbitMQ, MetadataStorePostgres:
+	case MetadataStoreInMemory, MetadataStoreRabbitMQ:
 		return MetadataStoreMode(v), nil
 	default:
-		return "", fmt.Errorf("METADATA_STORE must be one of inmemory, rabbitmq, postgres (got %q)", v)
+		return "", fmt.Errorf("METADATA_STORE must be one of inmemory, rabbitmq (got %q)", v)
 	}
 }
 

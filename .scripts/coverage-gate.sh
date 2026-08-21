@@ -5,7 +5,7 @@
 # complementary lanes:
 #   - unit         (default build) — domain + adapter logic with in-process fakes
 #   - integration  (-tags integration) — adapter live paths against real backends
-#                  (redis/postgres/rabbitmq) + the app.New durable wiring
+#                  (redis/rabbitmq) + the app.New durable wiring
 #   - e2e          (-tags e2e) — the full service through app.New over real
 #                  WebSockets, incl. the JS-client y-protocols interop harness
 #
@@ -30,7 +30,7 @@
 # Usage:
 #   .scripts/coverage-gate.sh [threshold]
 # Env (optional; integration lane backends — unset ⇒ those tests skip):
-#   POSTGRES_TEST_DSN, RABBITMQ_TEST_URL
+#   RABBITMQ_TEST_URL
 
 set -euo pipefail
 

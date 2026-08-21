@@ -34,7 +34,7 @@ type Deps struct {
 	// the port). A nil Hub defaults to the core's shipped in-process hub, which
 	// is the correct single-pod behaviour: no peer exists, so nothing crosses.
 	Hub hub.Hub
-	// Metadata persists the queryable document index (RabbitMQ/Postgres).
+	// Metadata persists the queryable document index (RabbitMQ→server).
 	Metadata port.MetadataStore
 	// Checkpoint persists the document's current state — one whole-document
 	// snapshot per document, replaced on every save. It is the CRDT core's own

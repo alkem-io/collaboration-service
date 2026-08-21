@@ -1,6 +1,6 @@
 name: CI — Integration & Coverage Gate
 
-# Brings the build-tagged integration suites (redis / postgres / rabbitmq)
+# Brings the build-tagged integration suites (redis / rabbitmq)
 # and the e2e suite (incl. the real yjs + y-protocols JS-client interop harness)
 # into CI against live backends, then enforces the ≥95% combined coverage gate
 # (T017.5, SC-008/SC-011). The fast lint · race · build lane stays in ci-test.yml
@@ -20,18 +20,6 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: collab
-          POSTGRES_PASSWORD: secret
-          POSTGRES_DB: collab_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U collab -d collab_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-
       rabbitmq:
         # Pinned to the exact broker infrastructure-operations deploys, so CI
         # proves the topology against the version that actually runs it rather
@@ -59,7 +47,6 @@ jobs:
 
     env:
       # Integration-suite backend wiring (the build-tagged tests skip when unset).
-      POSTGRES_TEST_DSN: postgres://collab:secret@localhost:5432/collab_test?sslmode=disable
       RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
       RABBITMQ_MANAGEMENT_URL: http://guest:guest@localhost:15672
 

@@ -48,17 +48,6 @@ func TestBuildMetadataSurfacesBackendMisconfiguration(t *testing.T) {
 			t.Fatalf("a failed metadata store registered %d closers", len(closers))
 		}
 	})
-
-	t.Run("postgres", func(t *testing.T) {
-		var closers []func()
-		cfg := &config.Config{
-			MetadataStore: config.MetadataStorePostgres,
-			Postgres:      config.PostgresConfig{DSN: "postgres://\x00bad"},
-		}
-		if _, _, err := buildMetadata(cfg, &closers); err == nil {
-			t.Fatal("an unusable Postgres DSN must fail startup")
-		}
-	})
 }
 
 // TestBuildMetadataDefaultsToInMemory covers the standalone branch and its
@@ -82,7 +71,7 @@ func TestStartLifecycleIsSkippedOffTheBus(t *testing.T) {
 	var closers []func()
 	mgr := service.NewManager(service.Deps{}, service.RoomConfig{}, nil, zap.NewNop())
 
-	for _, mode := range []config.MetadataStoreMode{config.MetadataStoreInMemory, config.MetadataStorePostgres} {
+	for _, mode := range []config.MetadataStoreMode{config.MetadataStoreInMemory} {
 		if err := startLifecycle(&config.Config{MetadataStore: mode}, mgr, zap.NewNop(), &closers); err != nil {
 			t.Fatalf("startLifecycle(%v) must be a no-op off the bus: %v", mode, err)
 		}
