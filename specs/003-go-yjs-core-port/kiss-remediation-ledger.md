@@ -37,7 +37,7 @@ not exercised early enough.
 | BASIC-006 | OPEN — RCA REQUIRED | The server lifecycle publisher was observed looping with an invalid/empty message pattern on a fresh stack, despite an empty outbox. Delete workflow was not exercised. | Trace the actual producer and Rabbit call before editing. Fix only the owning seam; do not add retry machinery around an invalid message. | Create and delete through the UI; prove the collaboration document is purged and no publisher loop remains. |
 | BASIC-007 | OPEN — PROVEN | Quickstart configuration was ahead of the actual service contract (`AUTH_MODE=authzeval`; unsafe Redis+file-service combination), requiring local uncommitted corrections to boot the canonical stack. | Make canonical quickstart use the service's real split auth/authz and supported single-pod topology. Remove misleading combinations rather than translating them. | Clean Docker reset and canonical bring-up with no local compose edits. |
 | BASIC-008 | OPEN — PROVEN | `publishedBy` still has an empty-string UUID sink on a sibling path (`publisher?.id || ''`). The bootstrap sink was fixed after a real fresh-DB failure; the sibling remains. | Convert absent actor to `undefined` at the sink; cover the reachable producer before changing it. This should ultimately disappear into the UUID boundary cleanup. | Focused producer RED and fresh-DB bootstrap. |
-| BASIC-009 | OPEN — RCA | Two independent browser contexts using the same actor opened the same whiteboard; both client sockets then clean-closed with code 1000 and both editors unmounted. The service admitted both connections and did not issue the close. | Treat same-user multi-tab as a valid workflow. Trace the exact client/provider close initiator before editing; do not add a same-actor exception or reconnect band-aid. | Same actor in two tabs remains connected and converges; then repeat with two distinct canonical identities. |
+| BASIC-009 | REJECTED — DRIVER ARTIFACT | An initial two-context probe reported both client sockets clean-closing with code 1000. Instrumentation proved the probe itself pressed Escape after every draw; Escape correctly closed the whiteboard dialog, which called `UnifiedCollabProvider.destroy` → `teardownSocket` → `ws.close(1000)`. A discriminating no-Escape hold kept both same-actor contexts mounted and connected for 27 s with zero closes. | No product change. Remove the dialog-level Escape shortcut from the draw helper and use a canvas action that does not close the editor. | Two-context convergence rerun without Escape. Evidence: `/tmp/006-e2e-canonical/rca009/` and `/tmp/006-e2e-canonical/esc/`. |
 
 ## Stringly typed UUID remediation
 
@@ -68,7 +68,7 @@ not exercised early enough.
 | ID | Status | Gate |
 |---|---|---|
 | E2E-001 | VERIFIED | One-user UI create/open/draw, stable long hold with pointer movement, close, full reload, and file-service checkpoint persistence. |
-| E2E-002 | BLOCKED | Two independent same-actor contexts clean-closed both sockets before edits, so convergence was not tested. BASIC-009 must receive a read-only RCA and fix first; afterwards run both same-actor multi-tab and two-distinct-identity variants. |
+| E2E-002 | RUNNING | Two independent contexts on one whiteboard, now using a corrected driver that never presses the dialog-level Escape shortcut: edit from each, live convergence, stable sockets, and full reload persistence. Repeat with two distinct canonical identities when available. |
 | E2E-003 | PENDING | Image upload through UI, peer visibility, reload/cold-load, and stored Yjs inspection proving locators only—no `data:` bytes. |
 | E2E-004 | PENDING | Memo two-context live convergence and reload/cold-load persistence. |
 | E2E-005 | PENDING | Whiteboard content replacement through template/framing while a room is live (BASIC-005). |
@@ -92,4 +92,5 @@ These are tracked so they are not lost, but they must not pre-empt the gates abo
 - Pointer reconnect RCA: `/tmp/006-e2e-canonical/ratelimit/`
 - Canonical create/reload run: `/tmp/006-e2e-canonical/r1/`
 - Same-actor two-context failure: `/tmp/006-e2e-canonical/2ctx/`
+- Driver-artifact RCA: `/tmp/006-e2e-canonical/rca009/` and `/tmp/006-e2e-canonical/esc/`
 - Checkpoint timestamps: `/tmp/gate-puts.txt`
