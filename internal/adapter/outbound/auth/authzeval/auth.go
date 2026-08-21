@@ -165,7 +165,7 @@ func (a *Adapter) Evaluate(ctx context.Context, identity model.Identity, id mode
 	}
 
 	return a.breaker.Execute(func() (model.AuthDecision, error) {
-		return a.doEvaluate(ctx, identity.ActorID, string(privilege), policyID)
+		return a.doEvaluate(ctx, identity.ActorIDString(), string(privilege), policyID)
 	})
 }
 

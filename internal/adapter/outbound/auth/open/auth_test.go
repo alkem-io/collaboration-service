@@ -21,8 +21,8 @@ func TestAuthenticateIsAnonymousForAnyCredential(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Authenticate(%#v): unexpected error %v", creds, err)
 		}
-		if id.ActorID != "" {
-			t.Errorf("Authenticate(%#v).ActorID = %q, want empty (anonymous)", creds, id.ActorID)
+		if id.ActorID != nil {
+			t.Errorf("Authenticate(%#v).ActorID = %v, want nil (open mode)", creds, id.ActorID)
 		}
 	}
 }

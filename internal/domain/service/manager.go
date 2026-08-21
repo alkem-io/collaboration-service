@@ -199,7 +199,7 @@ func (m *Manager) SendBuffer() int {
 }
 
 // JoinRequest is the set of inputs a connection brings when it joins a room: the
-// document id and seed content type, the authenticated identity (empty actor id
+// document id and seed content type, the authenticated identity (nil actor id
 // in open/standalone mode), and the outbound connection port. Bundling them in a
 // struct keeps the call site readable as the Wave-3 presence/authZ inputs grew.
 type JoinRequest struct {
@@ -208,7 +208,7 @@ type JoinRequest struct {
 	// Content seeds a freshly created room's convention (T010); the stored
 	// content type wins for a persisted document.
 	Content model.ContentType
-	// Identity is the authenticated principal (open mode → empty ActorID).
+	// Identity is the authenticated principal (open mode → nil ActorID).
 	Identity model.Identity
 	// Conn is the room's outbound port to this client.
 	Conn Conn

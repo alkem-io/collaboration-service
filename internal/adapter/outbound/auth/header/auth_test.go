@@ -11,12 +11,22 @@ import (
 // header is trusted verbatim (the gateway already validated the credential).
 func TestNonEmptyHeaderResolvesActorID(t *testing.T) {
 	a := New()
-	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{ActorIDHeader: "actor-123"})
+	want := "11111111-1111-1111-1111-111111111111"
+	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{ActorIDHeader: want})
 	if err != nil {
 		t.Fatalf("Authenticate: unexpected error %v", err)
 	}
-	if id.ActorID != "actor-123" {
-		t.Errorf("ActorID = %q, want actor-123", id.ActorID)
+	if id.ActorID == nil || id.ActorID.String() != want {
+		t.Errorf("ActorID = %v, want %s", id.ActorID, want)
+	}
+}
+
+// TestMalformedHeaderIsRejected proves a presented actor id cannot cross the
+// authentication boundary as an unvalidated string.
+func TestMalformedHeaderIsRejected(t *testing.T) {
+	a := New()
+	if _, err := a.Authenticate(context.Background(), model.HandshakeCredentials{ActorIDHeader: "actor-123"}); err == nil {
+		t.Fatal("malformed gateway actor-id header should be rejected")
 	}
 }
 

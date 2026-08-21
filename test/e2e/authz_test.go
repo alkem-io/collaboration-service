@@ -110,7 +110,7 @@ func TestAuthzEvalViewerCannotMutateCollaboratorCan(t *testing.T) {
 		if req.Privilege == "read" {
 			return true // everyone may read
 		}
-		return req.ActorID == "editor" // only the editor may update-content
+		return req.ActorID == actorEditor // only the editor may update-content
 	})
 
 	httpBase := testAppHTTP(t, authzevalConfig(authURL))
@@ -119,8 +119,8 @@ func TestAuthzEvalViewerCannotMutateCollaboratorCan(t *testing.T) {
 	const docID = "e2e-authz-memo"
 	preRegister(t, httpBase, docID, "memo")
 
-	editor := dialWithToken(t, wsBase, docID, "memo", "editor")
-	viewer := dialWithToken(t, wsBase, docID, "memo", "viewer")
+	editor := dialWithToken(t, wsBase, docID, "memo", actorEditor)
+	viewer := dialWithToken(t, wsBase, docID, "memo", actorViewer)
 	time.Sleep(150 * time.Millisecond)
 
 	// The editor (collaborator) writes — both clients converge on it.

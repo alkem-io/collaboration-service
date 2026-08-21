@@ -21,6 +21,29 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
+// Actor id fixtures. Every production producer of an actor id supplies a UUID —
+// the gateway stamps `ctx.actorID` or the nil-UUID sentinel
+// (server: core/auth/oidc/forward-auth.controller.ts), and the cookie/bearer
+// paths resolve entity ids, which are `@PrimaryGeneratedColumn('uuid')`. The
+// handshake now validates that, so these fixtures are UUIDs rather than names.
+//
+// It matters most for the NEGATIVE tests: with a non-UUID id, a tombstoned or
+// expired session would 401 because the id was malformed, not because the
+// session was rejected — passing for the wrong reason.
+const (
+	actorEditor = "11111111-1111-1111-1111-111111111111"
+	actorViewer = "22222222-2222-2222-2222-222222222222"
+	actorAlice  = "33333333-3333-3333-3333-333333333333"
+	actorBob    = "44444444-4444-4444-4444-444444444444"
+	actorEd     = "55555555-5555-5555-5555-555555555555"
+	actorGhost  = "66666666-6666-6666-6666-666666666666"
+	actorX      = "77777777-7777-7777-7777-777777777777"
+	actorY      = "88888888-8888-8888-8888-888888888888"
+	actorCarol  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	actorDave   = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	actorForged = "99999999-9999-9999-9999-999999999999"
+)
+
 // --- oidc e2e harness: stub BFF-Redis (miniredis) + stub Hydra JWKS ---
 
 // oidcEnv is the per-test oidc fixture: a miniredis BFF session store, an httptest
@@ -165,8 +188,8 @@ func dialMemoWithHeaders(t *testing.T, base, documentID string, headers map[stri
 // distinct cookie-resolved actors converge on a shared memo (SC-013).
 func TestOIDCCookieAuthenticatesEndToEnd(t *testing.T) {
 	env := startOIDCEnv(t)
-	env.seedSession(t, "sid-alice", "alice", nil)
-	env.seedSession(t, "sid-bob", "bob", nil)
+	env.seedSession(t, "sid-alice", actorAlice, nil)
+	env.seedSession(t, "sid-bob", actorBob, nil)
 
 	httpBase := testAppHTTP(t, env.config())
 	wsBase := "ws" + strings.TrimPrefix(httpBase, "http")
@@ -192,8 +215,8 @@ func TestOIDCBearerAuthenticatesEndToEnd(t *testing.T) {
 	wsBase := "ws" + strings.TrimPrefix(httpBase, "http")
 
 	const docID = "e2e-oidc-bearer"
-	a := dialMemoWithHeaders(t, wsBase, docID, map[string]string{"Authorization": "Bearer " + env.bearer(t, "carol", nil)})
-	b := dialMemoWithHeaders(t, wsBase, docID, map[string]string{"Authorization": "Bearer " + env.bearer(t, "dave", nil)})
+	a := dialMemoWithHeaders(t, wsBase, docID, map[string]string{"Authorization": "Bearer " + env.bearer(t, actorCarol, nil)})
+	b := dialMemoWithHeaders(t, wsBase, docID, map[string]string{"Authorization": "Bearer " + env.bearer(t, actorDave, nil)})
 	time.Sleep(150 * time.Millisecond)
 
 	a.insertMemo("from-carol ")
@@ -214,7 +237,7 @@ func TestOIDCMissingCredentialResolvesToSentinel(t *testing.T) {
 	// A no-credential client converges with a cookie-authenticated one — the
 	// anonymous sentinel is a resolvable principal, not a 401.
 	anon := dial(t, wsBase, docID, "memo")
-	env.seedSession(t, "sid-ed", "ed", nil)
+	env.seedSession(t, "sid-ed", actorEd, nil)
 	ed := dialMemoWithHeaders(t, wsBase, docID, map[string]string{"Cookie": "alkemio_session=sid-ed"})
 	time.Sleep(150 * time.Millisecond)
 
@@ -241,7 +264,7 @@ func TestOIDCGuestNameIsNamedAnonymous(t *testing.T) {
 // session) is rejected at the handshake with 401 (§V; FR-023; SC-013).
 func TestOIDCTombstonedSessionIs401(t *testing.T) {
 	env := startOIDCEnv(t)
-	env.seedSession(t, "sid-dead", "ghost", func(p map[string]any) {
+	env.seedSession(t, "sid-dead", actorGhost, func(p map[string]any) {
 		p["terminated_at"] = time.Now().Unix() // tombstone
 	})
 	httpBase := testAppHTTP(t, env.config())
@@ -255,7 +278,7 @@ func TestOIDCTombstonedSessionIs401(t *testing.T) {
 // 401 at the handshake.
 func TestOIDCExpiredSessionIs401(t *testing.T) {
 	env := startOIDCEnv(t)
-	env.seedSession(t, "sid-old", "ghost", func(p map[string]any) {
+	env.seedSession(t, "sid-old", actorGhost, func(p map[string]any) {
 		p["absolute_expires_at"] = time.Now().Add(-time.Hour).Unix()
 	})
 	httpBase := testAppHTTP(t, env.config())
@@ -278,7 +301,7 @@ func TestOIDCForgedBearerIs401(t *testing.T) {
 	_ = forged.Set(jwk.KeyIDKey, "e2e-kid")
 	_ = forged.Set(jwk.AlgorithmKey, jwa.RS256())
 	tok, _ := jwt.NewBuilder().Issuer("https://hydra.e2e/").Audience([]string{"alkemio-web"}).
-		Expiration(time.Now().Add(time.Hour)).Claim("alkemio_actor_id", "x").Build()
+		Expiration(time.Now().Add(time.Hour)).Claim("alkemio_actor_id", actorForged).Build()
 	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256(), forged))
 	if err != nil {
 		t.Fatalf("sign forged: %v", err)
@@ -308,8 +331,8 @@ func TestHeaderModeTrustsOnlyAStampedActorID(t *testing.T) {
 	// With the gateway-stamped header (defaults to Authorization), it authenticates
 	// and converges — exactly the prior behaviour.
 	const docID = "e2e-header-ok"
-	a := dialWithToken(t, wsBase, docID, "memo", "actor-x")
-	b := dialWithToken(t, wsBase, docID, "memo", "actor-y")
+	a := dialWithToken(t, wsBase, docID, "memo", actorX)
+	b := dialWithToken(t, wsBase, docID, "memo", actorY)
 	time.Sleep(150 * time.Millisecond)
 	a.insertMemo("header-text ")
 	if !eventually(func() bool { return contains(b.memoText(), "header-text") }) {

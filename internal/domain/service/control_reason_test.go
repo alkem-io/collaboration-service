@@ -40,7 +40,7 @@ func TestJoinViewerReadOnlyReasonNoUpdateAccess(t *testing.T) {
 	deps := authZDeps(t, fixedAuthZ{read: allow, update: deny})
 	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
 
-	viewer := newFakeClientWithIdentity(t, "actor-7")
+	viewer := newFakeClientWithIdentity(t, "77777777-7777-7777-7777-777777777777")
 	viewer.join(mgr, "ro-no-update", model.ContentTypeMemo)
 
 	waitFor(t, "read-only-state on join", func() bool {
@@ -54,13 +54,13 @@ func TestJoinViewerReadOnlyReasonNoUpdateAccess(t *testing.T) {
 }
 
 // TestJoinViewerReadOnlyReasonNotAuthenticated asserts an anonymous connection
-// (empty ActorID) granted read but denied update-content joins read-only with the
+// (nil ActorID) granted read but denied update-content joins read-only with the
 // `not-authenticated` reason (OPEN-1).
 func TestJoinViewerReadOnlyReasonNotAuthenticated(t *testing.T) {
 	deps := authZDeps(t, fixedAuthZ{read: allow, update: deny})
 	mgr := NewManager(deps.Deps, fastConfig(), nil, nil)
 
-	viewer := newFakeClient(t) // anonymous: empty ActorID
+	viewer := newFakeClient(t) // open mode: nil ActorID
 	viewer.join(mgr, "ro-anon", model.ContentTypeMemo)
 
 	waitFor(t, "read-only-state on join", func() bool {
@@ -81,7 +81,7 @@ func TestInactivityDowngradeReason(t *testing.T) {
 	cfg.CollaboratorInactivity = 30 * time.Millisecond
 	mgr, _ := testManager(t, cfg)
 
-	a := newFakeClientWithIdentity(t, "actor-idle")
+	a := newFakeClientWithIdentity(t, "88888888-8888-8888-8888-888888888888")
 	a.join(mgr, "downgrade-reason", model.ContentTypeMemo)
 	a.observeUpdates()
 	a.insertText("active ") // one mutation, then go idle
@@ -114,7 +114,7 @@ func TestReadOnlyReasonForIdentity(t *testing.T) {
 	if got := readOnlyReasonForIdentity(model.Identity{}); got != model.ReasonNotAuthenticated {
 		t.Errorf("anonymous reason = %q, want %q", got, model.ReasonNotAuthenticated)
 	}
-	if got := readOnlyReasonForIdentity(model.Identity{ActorID: "x"}); got != model.ReasonNoUpdateAccess {
+	if got := readOnlyReasonForIdentity(testIdentity("x")); got != model.ReasonNoUpdateAccess {
 		t.Errorf("authenticated reason = %q, want %q", got, model.ReasonNoUpdateAccess)
 	}
 }

@@ -15,6 +15,7 @@ package oidc
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -59,7 +60,11 @@ func (a *Adapter) Authenticate(ctx context.Context, creds model.HandshakeCredent
 		actorID, err := a.session.Resolve(ctx, creds.CookieSID)
 		switch {
 		case err == nil:
-			return model.Identity{ActorID: actorID}, nil
+			identity, parseErr := model.IdentityFromActorID(actorID)
+			if parseErr != nil {
+				return model.Identity{}, fmt.Errorf("oidc cookie actor id: %w", parseErr)
+			}
+			return identity, nil
 		case errors.Is(err, errSessionNotFound):
 			// Cookie present but no live session — not a failure; fall through.
 		default:
@@ -75,7 +80,11 @@ func (a *Adapter) Authenticate(ctx context.Context, creds model.HandshakeCredent
 			// Presented-but-invalid bearer → 401 (FR-023; stricter than forward-auth).
 			return model.Identity{}, err
 		}
-		return model.Identity{ActorID: actorID}, nil
+		identity, parseErr := model.IdentityFromActorID(actorID)
+		if parseErr != nil {
+			return model.Identity{}, fmt.Errorf("oidc bearer actor id: %w", parseErr)
+		}
+		return identity, nil
 	}
 
 	// 3. Guest (?guestName=) → named anonymous: the principal is the anonymous

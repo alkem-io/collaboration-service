@@ -33,7 +33,11 @@ func (a *Auth) Authenticate(_ context.Context, creds model.HandshakeCredentials)
 	if creds.ActorIDHeader == "" {
 		return model.Identity{}, fmt.Errorf("missing gateway actor-id header")
 	}
-	return model.Identity{ActorID: creds.ActorIDHeader}, nil
+	identity, err := model.IdentityFromActorID(creds.ActorIDHeader)
+	if err != nil {
+		return model.Identity{}, fmt.Errorf("gateway actor-id header: %w", err)
+	}
+	return identity, nil
 }
 
 // compile-time assertion that Auth satisfies the handshake-AuthN port.

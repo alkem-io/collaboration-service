@@ -83,6 +83,9 @@ type command struct {
 	done chan joinResult
 	// done2 returns the result of a cmdPurge run on the room loop (T015).
 	done2 chan error
+	// contribution completion is produced by the one bounded off-loop periodic
+	// emit and reconciled on the room loop.
+	contribution *contributionFlight
 }
 
 type cmdKind uint8
@@ -96,7 +99,13 @@ const (
 	// cmdPurge runs the owner-delete cascade on the run loop: disconnect clients
 	// (session-end/document-deleted), purge metadata + blob, and release the room (T015).
 	cmdPurge
+	cmdContributionDone
 )
+
+type contributionFlight struct {
+	actors map[uuid.UUID]struct{}
+	done   chan error
+}
 
 // peerUpdate is a fan-out payload received from another pod. It is delivered to the
 // run loop via the bounded peerUpdates queue (NOT enqueue), so the subscribe
@@ -124,7 +133,7 @@ type joinResult struct {
 type roomMember struct {
 	id           connID
 	conn         Conn
-	actorID      string
+	actorID      *uuid.UUID
 	mode         model.CollaboratorMode
 	lastActivity time.Time
 	bucket       *tokenBucket
@@ -220,7 +229,11 @@ type Room struct {
 
 	// contributors is the set of actor ids that mutated the document in the
 	// current contribution window; flushed and reset on the window tick (T013).
-	contributors map[string]struct{}
+	contributors map[uuid.UUID]struct{}
+	// contributionFlight is the one periodic batch currently being emitted off
+	// the room loop. While it is non-nil, new actors stay in contributors for the
+	// next window.
+	contributionFlight *contributionFlight
 
 	// onReleased is invoked once, on the run loop, after the room has drained
 	// and persisted, so the Manager can drop it from its registry.
@@ -527,7 +540,7 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		done:         make(chan struct{}),
 		members:      make(map[connID]roomMember),
 		maxConns:     cfg.Limits.MaxConnsPerRoom,
-		contributors: make(map[string]struct{}),
+		contributors: make(map[uuid.UUID]struct{}),
 		ctx:          roomCtx,
 		cancel:       cancel,
 	}
@@ -909,7 +922,7 @@ func (r *Room) run() {
 			sweepTimer.Reset(sweepEvery)
 
 		case <-contribTimer.C:
-			r.flushContributionNow()
+			r.startContributionFlush()
 			contribTimer.Reset(contribEvery)
 		}
 	}
@@ -990,6 +1003,8 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 			r.persistNow()
 		})
 		return false
+	case cmdContributionDone:
+		r.finishContributionFlush(cmd.contribution)
 	}
 	return true
 }
@@ -1053,12 +1068,11 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 // not-authenticated; an authenticated actor that was denied update-content is
 // read-only because it has no-update-access. This preserves the granularity of
 // today's read-only UX (the memo-footer readOnlyCode). An anonymous viewer
-// surfaces two ways — an empty ActorID (open mode, AuthZ bypassed) OR the nil-UUID
-// sentinel (oidc mode maps a missing credential to model.AnonymousIdentity(),
-// whose ActorID is ANONYMOUS_ACTOR_ID, which is NON-empty) — so both must map to
+// surfaces two ways — a nil ActorID (open mode, AuthZ bypassed) OR a pointer to
+// uuid.Nil for an uncredentialed/named-guest oidc connection — so both map to
 // not-authenticated, else an anonymous oidc viewer wrongly reports no-update-access.
 func readOnlyReasonForIdentity(identity model.Identity) model.ReadOnlyReason {
-	if identity.ActorID == "" || identity.ActorID == model.ANONYMOUS_ACTOR_ID {
+	if identity.ActorID == nil || *identity.ActorID == uuid.Nil {
 		return model.ReasonNotAuthenticated
 	}
 	return model.ReasonNoUpdateAccess
@@ -1573,8 +1587,10 @@ func (r *Room) recordActivity(src connID) {
 	}
 	m.lastActivity = time.Now()
 	r.members[src] = m
-	if m.actorID != "" {
-		r.contributors[m.actorID] = struct{}{}
+	// Collect only when the feature is on — see contributionEnabled. An actor id
+	// recorded with the window disabled would never be emitted, only accumulated.
+	if m.actorID != nil && r.contributionEnabled() {
+		r.contributors[*m.actorID] = struct{}{}
 	}
 }
 
@@ -1979,6 +1995,53 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 		delete(r.members, id)
 		r.metrics.ConnClosed()
 	}
+
+	// ANALYTICS LAST, and deliberately so. Everything above is critical: the
+	// durable flush, and telling every member why its session ended. Contribution
+	// emission is best-effort by contract (FR-014) and talks to the same bus that
+	// may be the reason the shutdown is slow, so it must never be able to delay
+	// durability or a client's terminal control.
+	//
+	// It ran BEFORE the flush in an earlier revision of this slice. That put a
+	// best-effort analytics call — up to a full backend timeout of it — ahead of
+	// the final snapshot, inside a shutdown whose WHOLE drain is budgeted at about
+	// one backend timeout (Manager.Close). A wedged bus would then burn the budget
+	// and the drain would be abandoned before persisting, losing exactly the edits
+	// the shutdown flush exists to save.
+	//
+	// Still before the context cancel below, so the emit runs with a live roomCtx.
+	//
+	// NOT on the owner-delete path — and this is a KNOWN CONTRACT GAP, not a
+	// settled design, so it is written down as one.
+	//
+	// What is established: purgeNow has already deleted the metadata row by the
+	// time this runs, and `server`'s contribution consumer resolves the id against
+	// the memo/whiteboard rows (collaboration-integration.service.ts). A deleted
+	// document misses BOTH lookups, so the event would be discarded and logged as
+	// "collaboration-contribution for unknown document". Emitting from here is a
+	// bus round trip whose only outcome is a warn per delete.
+	//
+	// What is NOT established: that losing it is acceptable. The final partial
+	// window — contributions since the last periodic tick — IS dropped when a
+	// document is deleted, and the requirement is that teardown flushes the
+	// current contributor map. That the current arrangement cannot emit it
+	// USEFULLY is not the same as saying it should not be emitted at all.
+	//
+	// The loss is a consequence of ORDERING, not impossibility: the delete happens
+	// inside flush() just above, so there is a point in this same funnel where the
+	// entity still exists. Moving the emit there, or changing the consumer to
+	// accept a contribution for a just-deleted document, are both live options and
+	// both span repos. Pending disposition; do not read this branch as final.
+	//
+	// Any in-flight periodic emit is left alone either way: its goroutine
+	// completes on its own bounded context and exits on r.done.
+	if end.Code != model.CodeDocumentDeleted {
+		r.settleContributionFlight()
+		// The current window may never have reached a periodic tick. Flush it once;
+		// an empty set is a no-op.
+		r.flushContributionNow()
+	}
+
 	// Cancel the room-lifetime context (roomCtx) BEFORE tearing down the subscription:
 	// it unblocks any decoupled peer-update write parked on roomCtx.Done(), so cancelSub
 	// — which may WAIT for the subscribe goroutine (e.g. redis pubsub.Close) — cannot

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
 
@@ -112,7 +114,7 @@ func TestNopMetricsCallable(t *testing.T) {
 	m.ContributingActors(3)
 
 	// The standalone default Contributor drops the event (no bus).
-	if err := (noopContributor{}).Contribution(context.Background(), "doc", []string{"a"}); err != nil {
+	if err := (noopContributor{}).Contribution(context.Background(), "doc", []uuid.UUID{uuid.MustParse("11111111-1111-1111-1111-111111111111")}); err != nil {
 		t.Fatalf("noop contributor returned an error: %v", err)
 	}
 }

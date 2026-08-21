@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
@@ -115,10 +117,10 @@ func (s *Store) Delete(ctx context.Context, id model.DocumentID) error {
 // per-window set of contributing actor ids (FR-014). It satisfies
 // port.Contributor so the room can carry the north-star metric forward to the
 // server's analytics over the same bus (contracts/unified-metadata-rmq.md).
-func (s *Store) Contribution(ctx context.Context, id model.DocumentID, actorIDs []string) error {
+func (s *Store) Contribution(ctx context.Context, id model.DocumentID, actorIDs []uuid.UUID) error {
 	users := make([]User, 0, len(actorIDs))
 	for _, a := range actorIDs {
-		users = append(users, User{ID: a})
+		users = append(users, User{ID: a.String()})
 	}
 	if err := s.rpc.Emit(ctx, PatternContribution, ContributionData{ID: string(id), Users: users}); err != nil {
 		return fmt.Errorf("collaboration-contribution: %w", err)

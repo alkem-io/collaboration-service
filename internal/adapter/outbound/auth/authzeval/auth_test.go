@@ -10,8 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
+
+func testIdentity(name string) model.Identity {
+	id := uuid.NewSHA1(uuid.NameSpaceOID, []byte(name))
+	return model.Identity{ActorID: &id}
+}
 
 // startH2CServer starts an httptest server speaking h2c (HTTP/2 cleartext),
 // matching the auth-evaluation-service transport and the file-service client
@@ -60,7 +67,8 @@ func TestEvaluateGrantedPrivilege(t *testing.T) {
 
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"doc-1": "pol-7"}})
 
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "actor-1"}, "doc-1", model.PrivilegeUpdateContent)
+	identity := testIdentity("actor-1")
+	dec, err := adapter.Evaluate(context.Background(), identity, "doc-1", model.PrivilegeUpdateContent)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -69,7 +77,7 @@ func TestEvaluateGrantedPrivilege(t *testing.T) {
 	}
 	// OPEN-1: the adapter resolves the document's policy id and sends the right
 	// privilege string.
-	if gotReq.ActorID != "actor-1" || gotReq.Privilege != "update-content" || gotReq.AuthorizationPolicyID != "pol-7" {
+	if gotReq.ActorID != identity.ActorIDString() || gotReq.Privilege != "update-content" || gotReq.AuthorizationPolicyID != "pol-7" {
 		t.Errorf("eval request = %+v", gotReq)
 	}
 }
@@ -84,7 +92,7 @@ func TestEvaluateTrimsTrailingSlashOnServiceURL(t *testing.T) {
 		writeEval(w, true, "")
 	}))
 	adapter := New(Config{ServiceURL: srv.URL + "/"}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err != nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if gotPath != "/internal/auth/evaluate" {
@@ -98,7 +106,7 @@ func TestEvaluateCleanDenial(t *testing.T) {
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"doc-1": "pol-1"}})
 
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "doc-1", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "doc-1", model.PrivilegeRead)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -114,7 +122,7 @@ func TestEvaluateReadPrivilegeString(t *testing.T) {
 		writeEval(w, true, "")
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err != nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if gotReq.Privilege != "read" {
@@ -130,7 +138,7 @@ func TestEvaluateTransportFailureFailsClosed(t *testing.T) {
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
 
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead)
 	if err == nil {
 		t.Fatal("expected an error on transport failure (fail closed)")
 	}
@@ -147,7 +155,7 @@ func TestEvaluatePolicyResolveFailureFailsClosed(t *testing.T) {
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{err: errors.New("metadata store down")})
 
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err == nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err == nil {
 		t.Error("expected an error when the policy id cannot be resolved")
 	}
 }
@@ -175,7 +183,7 @@ func TestEvaluateUnknownDocumentIsACleanDenial(t *testing.T) {
 		writeEval(w, true, "")
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{}})
-	decision, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "absent", model.PrivilegeRead)
+	decision, err := adapter.Evaluate(context.Background(), testIdentity("a"), "absent", model.PrivilegeRead)
 	if err != nil {
 		t.Fatalf("unknown document must be a clean denial, got error: %v", err)
 	}
@@ -199,7 +207,7 @@ func TestEvaluateNilResolverFailsClosed(t *testing.T) {
 	}()
 	// New stores the resolver verbatim, so a nil PolicyResolver ⇒ a.policies == nil.
 	adapter := New(Config{ServiceURL: "http://127.0.0.1:0"}, nil)
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead)
 	if err == nil {
 		t.Fatal("expected a fail-closed error with a nil policy resolver, got nil")
 	}
@@ -224,7 +232,7 @@ func TestEvaluateOpenBreakerFailsClosed(t *testing.T) {
 	}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
 
 	ctx := context.Background()
-	id := model.Identity{ActorID: "a"}
+	id := testIdentity("a")
 	for i := 0; i < 5; i++ {
 		if _, err := adapter.Evaluate(ctx, id, "d", model.PrivilegeRead); err == nil {
 			t.Fatalf("call %d: expected error", i)
@@ -252,7 +260,7 @@ func TestEvaluateServiceDegraded503FailsClosed(t *testing.T) {
 		})
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead)
 	if err == nil {
 		t.Fatal("expected an error on a 503 degraded response")
 	}
@@ -266,7 +274,7 @@ func TestEvaluateBadResponseBodyFailsClosed(t *testing.T) {
 		_, _ = w.Write([]byte("not json"))
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err == nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err == nil {
 		t.Error("expected an error on a malformed auth response")
 	}
 }
@@ -274,7 +282,7 @@ func TestEvaluateBadResponseBodyFailsClosed(t *testing.T) {
 func TestEvaluateTransportDialErrorFailsClosed(t *testing.T) {
 	// An unreachable auth service: the request fails at the transport layer.
 	adapter := New(Config{ServiceURL: "http://127.0.0.1:0"}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err == nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err == nil {
 		t.Error("expected a transport error to an unreachable auth service")
 	}
 }
@@ -293,7 +301,7 @@ func TestEvaluateEmptyPolicyIDFailsClosed(t *testing.T) {
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": ""}})
 
-	if _, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead); err == nil {
+	if _, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead); err == nil {
 		t.Error("expected an error for a document whose policy id resolves to empty")
 	}
 	if reached.Load() {
@@ -308,7 +316,7 @@ func TestEvaluateEmptyPolicyIDFailsClosed(t *testing.T) {
 // clean allow.
 func TestEvaluateBadServiceURLFailsClosed(t *testing.T) {
 	adapter := New(Config{ServiceURL: "http://bad\x7fhost:1234"}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead)
 	if err == nil {
 		t.Error("expected an error building a request to a malformed ServiceURL")
 	}
@@ -326,7 +334,7 @@ func TestEvaluate503WithoutStructuredBodyFailsClosed(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable) // empty body
 	}))
 	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"d": "p"}})
-	dec, err := adapter.Evaluate(context.Background(), model.Identity{ActorID: "a"}, "d", model.PrivilegeRead)
+	dec, err := adapter.Evaluate(context.Background(), testIdentity("a"), "d", model.PrivilegeRead)
 	if err == nil {
 		t.Error("expected an error on a 503 with no structured error body")
 	}

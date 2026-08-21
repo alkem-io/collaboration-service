@@ -1,5 +1,7 @@
 package model
 
+import "github.com/google/uuid"
+
 // HandshakeCredentials is the domain-typed credential set read off the WebSocket
 // handshake and handed to the Auth port. It carries every credential the
 // configured AuthN adapter might inspect — the WS adapter populates it from the
@@ -41,17 +43,11 @@ func (c HandshakeCredentials) Empty() bool {
 	return c.ActorIDHeader == "" && c.CookieSID == "" && c.BearerToken == "" && c.GuestName == ""
 }
 
-// ANONYMOUS_ACTOR_ID is the nil-UUID anonymous sentinel, mirroring the server's
-// oidc/constants.ts. The authorization-evaluation-service resolves it to
-// GLOBAL_ANONYMOUS, so a public-read document stays reachable for an
-// un-credentialed caller. It is a RESOLVABLE anonymous principal — distinct from
-// open-mode's empty ActorID, which only occurs where AuthZ is bypassed entirely.
-//
-//nolint:revive,staticcheck // SCREAMING_SNAKE mirrors the server constant name verbatim for traceability.
-const ANONYMOUS_ACTOR_ID = "00000000-0000-0000-0000-000000000000"
-
 // AnonymousIdentity is the resolved sentinel identity a missing credential maps
 // to in oidc mode (and a named-anonymous guest's authorization principal).
 func AnonymousIdentity() Identity {
-	return Identity{ActorID: ANONYMOUS_ACTOR_ID}
+	// uuid.Nil mirrors the server's anonymous actor sentinel. It is a resolvable
+	// principal, distinct from open mode's nil ActorID.
+	id := uuid.Nil
+	return Identity{ActorID: &id}
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	ycrdt "github.com/antst/go-yjs/crdt"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -115,10 +117,11 @@ func TestFlushContributionEmptyWindow(t *testing.T) {
 func TestFlushContributionToleratesEmitError(t *testing.T) {
 	room := newBareRoom(t)
 	room.deps.Contributor = erroringContributor{}
-	room.contributors["actor-1"] = struct{}{}
+	actor := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	room.contributors[actor] = struct{}{}
 	room.flushContribution(context.Background()) // must not panic/propagate
-	if len(room.contributors) != 0 {
-		t.Fatal("contribution window was not reset after a flush")
+	if _, retained := room.contributors[actor]; !retained {
+		t.Fatal("failed contribution emit did not retain the actor for retry")
 	}
 }
 
@@ -144,7 +147,7 @@ func TestTrackAwarenessIDOnlyFirstFrame(t *testing.T) {
 // erroringContributor fails every Contribution emit.
 type erroringContributor struct{}
 
-func (erroringContributor) Contribution(context.Context, model.DocumentID, []string) error {
+func (erroringContributor) Contribution(context.Context, model.DocumentID, []uuid.UUID) error {
 	return errors.New("bus down")
 }
 

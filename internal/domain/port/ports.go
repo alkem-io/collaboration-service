@@ -13,6 +13,8 @@ package port
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -82,7 +84,8 @@ type AuthZ interface {
 // Maps to: contracts/unified-metadata-rmq.md (`collaboration-contribution`).
 type Contributor interface {
 	// Contribution publishes the contributing actor ids for a document window
-	// (fire-and-forget). An error is logged and dropped — a missed analytics
-	// event MUST NOT break live collaboration.
-	Contribution(ctx context.Context, id model.DocumentID, actorIDs []string) error
+	// (fire-and-forget). An error is returned to the room so the detached actor
+	// set can be retained for the next periodic attempt; it never breaks live
+	// collaboration.
+	Contribution(ctx context.Context, id model.DocumentID, actorIDs []uuid.UUID) error
 }

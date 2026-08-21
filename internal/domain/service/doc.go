@@ -15,6 +15,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
 	"github.com/antst/go-yjs/backend/persistence"
@@ -87,6 +89,6 @@ func (d Deps) deleter() (persistence.Deleter, error) {
 type noopContributor struct{}
 
 // Contribution discards the contributing actor ids — no bus to publish to.
-func (noopContributor) Contribution(context.Context, model.DocumentID, []string) error {
+func (noopContributor) Contribution(context.Context, model.DocumentID, []uuid.UUID) error {
 	return nil
 }

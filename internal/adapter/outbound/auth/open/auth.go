@@ -20,7 +20,7 @@ type Auth struct{}
 func New() *Auth { return &Auth{} }
 
 // Authenticate accepts any (including no) credential as an anonymous identity
-// with an empty ActorID — open mode bypasses AuthZ entirely.
+// with a nil ActorID — open mode bypasses AuthZ entirely.
 func (a *Auth) Authenticate(_ context.Context, _ model.HandshakeCredentials) (model.Identity, error) {
 	return model.Identity{}, nil
 }

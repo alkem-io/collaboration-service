@@ -11,6 +11,7 @@ import (
 
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -46,7 +47,7 @@ func newBareRoom(t *testing.T) *Room {
 		commands:     make(chan command, 8),
 		done:         make(chan struct{}),
 		members:      make(map[connID]roomMember),
-		contributors: make(map[string]struct{}),
+		contributors: make(map[uuid.UUID]struct{}),
 	}
 	r.awareness = ycrdt.NewAwareness(r.doc)
 	applyConvention(r.doc, model.ContentTypeMemo)

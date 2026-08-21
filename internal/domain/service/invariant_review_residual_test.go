@@ -45,20 +45,20 @@ func TestInvTeardownBalancesConnGauge(t *testing.T) {
 // TestInvReadOnlyReasonAnonymousSentinel — finding [2]. An anonymous viewer must
 // report read-only reason "not-authenticated", not "no-update-access". In oidc mode
 // an anonymous connection resolves to model.AnonymousIdentity(), whose ActorID is
-// the nil-UUID sentinel (NON-empty) — so a bare `ActorID == ""` test misclassifies
-// it. NON-VACUOUS: drop the `|| ActorID == ANONYMOUS_ACTOR_ID` clause and the first
+// the nil-UUID sentinel (NON-nil) — so a bare `ActorID == nil` test misclassifies
+// it. NON-VACUOUS: drop the nil-UUID comparison and the first
 // assertion fails.
 func TestInvReadOnlyReasonAnonymousSentinel(t *testing.T) {
-	// oidc anonymous (nil-UUID sentinel, non-empty).
+	// oidc anonymous (nil-UUID sentinel, non-nil).
 	if got := readOnlyReasonForIdentity(model.AnonymousIdentity()); got != model.ReasonNotAuthenticated {
 		t.Fatalf("anonymous sentinel identity → %q, want %q", got, model.ReasonNotAuthenticated)
 	}
-	// open mode (empty ActorID).
+	// open mode (nil ActorID).
 	if got := readOnlyReasonForIdentity(model.Identity{}); got != model.ReasonNotAuthenticated {
-		t.Fatalf("empty ActorID → %q, want %q", got, model.ReasonNotAuthenticated)
+		t.Fatalf("nil ActorID → %q, want %q", got, model.ReasonNotAuthenticated)
 	}
 	// A real, resolved actor that was denied update-content.
-	if got := readOnlyReasonForIdentity(model.Identity{ActorID: "11111111-1111-1111-1111-111111111111"}); got != model.ReasonNoUpdateAccess {
+	if got := readOnlyReasonForIdentity(testIdentity("authenticated")); got != model.ReasonNoUpdateAccess {
 		t.Fatalf("resolved actor identity → %q, want %q", got, model.ReasonNoUpdateAccess)
 	}
 }
@@ -114,7 +114,7 @@ func TestInvJoinDropDuringBroadcastReArmsIdle(t *testing.T) {
 	cmd := command{
 		kind:     cmdJoin,
 		conn:     &failingConn{},
-		identity: model.Identity{ActorID: "a"},
+		identity: testIdentity("a"),
 		done:     make(chan joinResult, 1),
 	}
 	room.dispatch(cmd, func() {}, func() { armed = true }, time.NewTimer(time.Hour))

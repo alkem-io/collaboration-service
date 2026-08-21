@@ -6,12 +6,32 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jwt"
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
+
+const (
+	cookieActorID = "11111111-1111-1111-1111-111111111111"
+	bearerActorID = "22222222-2222-2222-2222-222222222222"
+)
+
+func assertActorID(t *testing.T, id model.Identity, want string) {
+	t.Helper()
+	if id.ActorID == nil || id.ActorID.String() != want {
+		t.Errorf("ActorID = %v, want %s", id.ActorID, want)
+	}
+}
+
+func assertAnonymousActorID(t *testing.T, id model.Identity) {
+	t.Helper()
+	if id.ActorID == nil || *id.ActorID != uuid.Nil {
+		t.Errorf("ActorID = %v, want anonymous sentinel", id.ActorID)
+	}
+}
 
 // jwksHarness wraps a signing key + static provider for the bearer path; it reuses
 // the helpers in hydra_jwks_test.go.
@@ -61,7 +81,7 @@ func newBothPathsAdapter(t *testing.T) (*Adapter, *miniredis.Miniredis, *jwksHar
 // actor id (cookie has priority over bearer/guest).
 func TestCookiePathResolvesActorID(t *testing.T) {
 	a, mr, _ := newBothPathsAdapter(t)
-	actor := "cookie-actor"
+	actor := cookieActorID
 	seedSession(t, mr, "sid-ok", alkemioSessionPayload{
 		AlkemioActorID:    &actor,
 		ExpiresAt:         futureUnix(),
@@ -71,8 +91,17 @@ func TestCookiePathResolvesActorID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != actor {
-		t.Errorf("ActorID = %q, want %q", id.ActorID, actor)
+	assertActorID(t, id, actor)
+}
+
+func TestCookieMalformedActorIDIsRejected(t *testing.T) {
+	a, mr, _ := newBothPathsAdapter(t)
+	actor := "not-a-uuid"
+	seedSession(t, mr, "sid-malformed", alkemioSessionPayload{
+		AlkemioActorID: &actor, ExpiresAt: futureUnix(), AbsoluteExpiresAt: futureUnix(),
+	})
+	if _, err := a.Authenticate(context.Background(), model.HandshakeCredentials{CookieSID: "sid-malformed"}); err == nil {
+		t.Fatal("cookie carrying a malformed actor id should be rejected")
 	}
 }
 
@@ -85,9 +114,7 @@ func TestCookieNotFoundFallsThroughToAnonymous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != model.ANONYMOUS_ACTOR_ID {
-		t.Errorf("ActorID = %q, want anonymous sentinel", id.ActorID)
-	}
+	assertAnonymousActorID(t, id)
 }
 
 // TestCookieTombstonedIs401 asserts a PRESENTED-but-invalid cookie session
@@ -109,12 +136,17 @@ func TestCookieTombstonedIs401(t *testing.T) {
 // its claim.
 func TestBearerPathResolvesActorID(t *testing.T) {
 	a, _, h := newBothPathsAdapter(t)
-	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{BearerToken: h.bearerToken(t, "bearer-actor")})
+	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{BearerToken: h.bearerToken(t, bearerActorID)})
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != "bearer-actor" {
-		t.Errorf("ActorID = %q, want bearer-actor", id.ActorID)
+	assertActorID(t, id, bearerActorID)
+}
+
+func TestBearerMalformedActorIDIsRejected(t *testing.T) {
+	a, _, h := newBothPathsAdapter(t)
+	if _, err := a.Authenticate(context.Background(), model.HandshakeCredentials{BearerToken: h.bearerToken(t, "not-a-uuid")}); err == nil {
+		t.Fatal("bearer carrying a malformed actor id should be rejected")
 	}
 }
 
@@ -136,19 +168,17 @@ func TestBearerInvalidIs401(t *testing.T) {
 // valid bearer are presented, the cookie wins (forward-auth priority order).
 func TestCookieHasPriorityOverBearer(t *testing.T) {
 	a, mr, h := newBothPathsAdapter(t)
-	cookieActor := "cookie-wins"
+	cookieActor := "33333333-3333-3333-3333-333333333333"
 	seedSession(t, mr, "sid-pri", alkemioSessionPayload{
 		AlkemioActorID: &cookieActor, ExpiresAt: futureUnix(), AbsoluteExpiresAt: futureUnix(),
 	})
 	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{
-		CookieSID: "sid-pri", BearerToken: h.bearerToken(t, "bearer-loses"),
+		CookieSID: "sid-pri", BearerToken: h.bearerToken(t, "44444444-4444-4444-4444-444444444444"),
 	})
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != cookieActor {
-		t.Errorf("ActorID = %q, want the cookie actor (priority)", id.ActorID)
-	}
+	assertActorID(t, id, cookieActor)
 }
 
 // TestGuestNameIsNamedAnonymous asserts ?guestName= resolves to the anonymous
@@ -160,9 +190,7 @@ func TestGuestNameIsNamedAnonymous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != model.ANONYMOUS_ACTOR_ID {
-		t.Errorf("guest principal = %q, want anonymous sentinel", id.ActorID)
-	}
+	assertAnonymousActorID(t, id)
 }
 
 // TestNoCredentialIsAnonymousSentinel asserts a handshake with NO credential
@@ -174,9 +202,7 @@ func TestNoCredentialIsAnonymousSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != model.ANONYMOUS_ACTOR_ID {
-		t.Errorf("no-credential ActorID = %q, want anonymous sentinel", id.ActorID)
-	}
+	assertAnonymousActorID(t, id)
 }
 
 // TestBearerOnlyDegradeIgnoresCookie asserts a bearer-only adapter (no session
@@ -192,14 +218,12 @@ func TestBearerOnlyDegradeIgnoresCookie(t *testing.T) {
 	// A cookie is presented but the cookie path is disabled — it must be ignored,
 	// not error, and the bearer resolves.
 	id, err := a.Authenticate(context.Background(), model.HandshakeCredentials{
-		CookieSID: "sid-ignored", BearerToken: h.bearerToken(t, "be-actor"),
+		CookieSID: "sid-ignored", BearerToken: h.bearerToken(t, "55555555-5555-5555-5555-555555555555"),
 	})
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != "be-actor" {
-		t.Errorf("ActorID = %q, want be-actor", id.ActorID)
-	}
+	assertActorID(t, id, "55555555-5555-5555-5555-555555555555")
 }
 
 // TestCookieOnlyDegradeIgnoresBearer asserts a cookie-only adapter (no bearer
@@ -215,7 +239,5 @@ func TestCookieOnlyDegradeIgnoresBearer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if id.ActorID != model.ANONYMOUS_ACTOR_ID {
-		t.Errorf("ActorID = %q, want anonymous sentinel (bearer ignored)", id.ActorID)
-	}
+	assertAnonymousActorID(t, id)
 }

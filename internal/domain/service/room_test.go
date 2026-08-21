@@ -14,6 +14,7 @@ import (
 
 	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
@@ -79,18 +80,29 @@ func (c *fakeClient) sessionEnd() (*model.SessionEnd, bool) {
 }
 
 func newFakeClient(t *testing.T) *fakeClient {
-	return newFakeClientWithIdentity(t, "")
+	t.Helper()
+	doc := ycrdt.NewDoc("guid")
+	aw := ycrdt.NewAwareness(doc)
+	h := protocol.NewSyncHandler(doc)
+	h.SetAwareness(aw)
+	return &fakeClient{t: t, doc: doc, aware: aw, handler: h}
 }
 
 // newFakeClientWithIdentity builds a fake client carrying an authenticated actor
 // id, so presence/contribution/authZ paths that key off the actor are exercised.
 func newFakeClientWithIdentity(t *testing.T, actorID string) *fakeClient {
 	t.Helper()
+	id := uuid.MustParse(actorID)
 	doc := ycrdt.NewDoc("guid")
 	aw := ycrdt.NewAwareness(doc)
 	h := protocol.NewSyncHandler(doc)
 	h.SetAwareness(aw)
-	return &fakeClient{t: t, doc: doc, aware: aw, handler: h, identity: model.Identity{ActorID: actorID}}
+	return &fakeClient{t: t, doc: doc, aware: aw, handler: h, identity: model.Identity{ActorID: &id}}
+}
+
+func testIdentity(name string) model.Identity {
+	id := uuid.NewSHA1(uuid.NameSpaceOID, []byte(name))
+	return model.Identity{ActorID: &id}
 }
 
 // Send implements service.Conn: the room calls it (from the room's run loop

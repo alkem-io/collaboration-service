@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
@@ -312,7 +314,9 @@ func TestMarshalEnvelopeShape(t *testing.T) {
 func TestContributionEmitsEvent(t *testing.T) {
 	f := &fakeRPC{}
 	store := newWithRPC(f)
-	if err := store.Contribution(context.Background(), "doc-c", []string{"actor-1", "actor-2"}); err != nil {
+	actor1 := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	actor2 := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	if err := store.Contribution(context.Background(), "doc-c", []uuid.UUID{actor1, actor2}); err != nil {
 		t.Fatalf("Contribution: %v", err)
 	}
 	if len(f.emits) != 1 || f.emits[0].pattern != PatternContribution {
@@ -320,7 +324,7 @@ func TestContributionEmitsEvent(t *testing.T) {
 	}
 	data, ok := f.emits[0].data.(ContributionData)
 	if !ok || data.ID != "doc-c" || len(data.Users) != 2 ||
-		data.Users[0].ID != "actor-1" || data.Users[1].ID != "actor-2" {
+		data.Users[0].ID != actor1.String() || data.Users[1].ID != actor2.String() {
 		t.Fatalf("contribution emit payload = %+v", f.emits[0].data)
 	}
 }
@@ -348,7 +352,7 @@ func TestLoadTransportErrorSurfaces(t *testing.T) {
 func TestContributionEmitErrorSurfaces(t *testing.T) {
 	f := &fakeRPC{emitErr: errors.New("bus down")}
 	store := newWithRPC(f)
-	if err := store.Contribution(context.Background(), "doc-c", []string{"actor-1"}); err == nil {
+	if err := store.Contribution(context.Background(), "doc-c", []uuid.UUID{uuid.MustParse("11111111-1111-1111-1111-111111111111")}); err == nil {
 		t.Error("expected Contribution to surface the emit error")
 	}
 }

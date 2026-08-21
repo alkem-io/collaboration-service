@@ -119,7 +119,7 @@ func TestADeniedReadNeverMaterializesTheDocument(t *testing.T) {
 	client := newFakeClient(t)
 	session, frames, err := mgr.Join(context.Background(), JoinRequest{
 		ID: doc, Content: model.ContentTypeMemo,
-		Identity: model.Identity{ActorID: "intruder"}, Conn: client,
+		Identity: testIdentity("intruder"), Conn: client,
 	})
 
 	if !errors.Is(err, ErrForbidden) {
@@ -159,7 +159,7 @@ func TestAnAuthZOutageFailsClosedWithoutMaterializing(t *testing.T) {
 	client := newFakeClient(t)
 	_, _, err := mgr.Join(context.Background(), JoinRequest{
 		ID: doc, Content: model.ContentTypeMemo,
-		Identity: model.Identity{ActorID: "someone"}, Conn: client,
+		Identity: testIdentity("someone"), Conn: client,
 	})
 
 	if err == nil {
@@ -259,7 +259,7 @@ func TestASessionFailsClosedOnEitherEvaluation(t *testing.T) {
 			client := newFakeClient(t)
 			_, _, err := mgr.Join(context.Background(), JoinRequest{
 				ID: doc, Content: model.ContentTypeMemo,
-				Identity: model.Identity{ActorID: "a"}, Conn: client,
+				Identity: testIdentity("a"), Conn: client,
 			})
 			if err == nil {
 				t.Fatal("the session was established despite an unresolved authorization")
