@@ -2,11 +2,11 @@ package service
 
 import "time"
 
-// tokenBucket is a per-connection update-rate limiter (FR-024, epic R9 ~50 msg/s
-// default). It admits up to `burst` messages immediately and refills at `rate`
+// tokenBucket is an optional per-connection update-rate limiter (FR-024). It
+// admits up to `burst` messages immediately and refills at `rate`
 // tokens per second; a drained bucket rejects until a token refills. A zero rate
-// disables limiting (the bucket always admits), keeping rate limiting opt-in and
-// config-tunable. It is not safe for concurrent use — each bucket is owned by one
+// disables limiting (the default), keeping rate limiting opt-in and config-tunable.
+// It is not safe for concurrent use — each bucket is owned by one
 // room run loop, the single writer (so no lock is needed, matching the room's
 // single-writer invariant).
 type tokenBucket struct {

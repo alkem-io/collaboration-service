@@ -5,6 +5,21 @@ import (
 	"time"
 )
 
+func TestProtectiveDefaultsDoNotChangeOrdinaryTraffic(t *testing.T) {
+	limits := DefaultLimits()
+	if limits.UpdateRatePerSec != 0 || limits.UpdateBurst != 0 {
+		t.Fatalf("update-rate defaults = rate %d, burst %d; want disabled", limits.UpdateRatePerSec, limits.UpdateBurst)
+	}
+
+	room := DefaultRoomConfig()
+	if room.CollaboratorInactivity != 0 {
+		t.Fatalf("collaborator inactivity default = %v, want disabled", room.CollaboratorInactivity)
+	}
+	if room.ContributionWindow != 10*time.Minute {
+		t.Fatalf("contribution window default = %v, want 10m", room.ContributionWindow)
+	}
+}
+
 // TestTokenBucketAllowsBurstThenRefills asserts the token bucket admits up to its
 // burst depth immediately, rejects once drained, then refills at the configured
 // rate (the per-connection update-rate limiter, FR-024).

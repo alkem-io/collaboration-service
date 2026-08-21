@@ -35,8 +35,9 @@ func (r *Room) disconnect(id connID, code model.SessionEndCode) {
 
 // sweepInactive downgrades every collaborator that has not mutated the document
 // within CollaboratorInactivity to viewer, emitting a read-only-state control so
-// the client disables local editing (FR-014, whiteboard collaborator_inactivity
-// parity). The downgrade carries the `inactivity` reason (OPEN-1) on both the
+// the client disables local editing (FR-014). The optional downgrade currently
+// measures document mutations, not volatile cursor activity. It carries the
+// `inactivity` reason (OPEN-1) on both the
 // read-only-state and the additive collaborator-mode frame, so the client mirrors
 // today's collaborator-mode UX. Runs on the room loop, so the member map access is
 // race-free.

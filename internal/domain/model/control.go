@@ -249,8 +249,8 @@ const (
 type CollaboratorModeReason = string
 
 const (
-	// ReasonInactivity marks an idle collaborator downgraded to viewer after the
-	// inactivity window (FR-014, whiteboard collaborator_inactivity parity).
+	// ReasonInactivity marks an idle collaborator downgraded to viewer after an
+	// explicitly configured inactivity window (FR-014).
 	ReasonInactivity CollaboratorModeReason = "inactivity"
 	// ReasonRoomCapacityReached and ReasonMultiUserNotAllowed are shared with the
 	// read-only reasons above; they also surface as collaborator-mode reasons.

@@ -427,31 +427,16 @@ speaking both legacy dialects with the blob inline.
 
 ### OPEN-4 — limits defaults + presence/collaborator-mode + FR-014 metric (Wave 3, T013/T014)
 
-**Found in code / epic research:** the epic's R9 proposes defaults — **max doc size
-~32 MB**, **max connections/room** carried from today's `maxCollaborators`,
-**per-connection rate ~50 msg/s** token-bucket; inactivity downgrade as today. The
-legacy services confirm the model: read-only downgrade when `update=false`, when
-`collaboratorCount >= maxCollaborators` (ROOM_CAPACITY_REACHED), when
-`isMultiUser=false` and a second joins; whiteboard adds **inactivity downgrade**
-after `collaborator_inactivity` seconds. The **north-star metric** is a per-window
-set of contributing actor ids flushed on an interval (`contribution_window`).
-
-**Genuinely unknown:** the **exact default values** for the new service (the epic
-calls them "starting defaults, all tunable") and whether the contribution metric is
-emitted over the **same RabbitMQ event** (tied to OPEN-3) or a **Prometheus
-counter** (or both).
-
-**Recommendation:** Adopt the R9 defaults as the config defaults — `MAX_DOC_BYTES=32MiB`,
-`MAX_CONNS_PER_ROOM` from metadata `maxCollaborators` (fallback e.g. 50),
-`UPDATE_RATE=50/s` token-bucket, `COLLABORATOR_INACTIVITY=120s`,
-`CONTRIBUTION_WINDOW=…` carried from the legacy config. Emit the contribution metric
-**both** as a Prometheus gauge (`collaboration_contributing_actors`) *and*, in
-Alkemio mode, as the RabbitMQ `contribution` event (so `server` analytics are
-unbroken). **Resolved & built (T013/T014):** the R9 defaults are adopted
-(`MAX_DOC_BYTES=32MiB`, `MAX_CONNS_PER_ROOM=50`, `UPDATE_RATE_PER_SEC≈50`,
-`COLLABORATOR_INACTIVITY_SECONDS=120`, `CONTRIBUTION_WINDOW_SECONDS=60`) and the
-metric ships **both** transports (Prometheus gauge + RMQ `collaboration-contribution`
-event).
+The limits remain configurable, and the contribution metric ships both as a
+Prometheus gauge and as the RabbitMQ `collaboration-contribution` event. The
+defaults were corrected after browser E2E: the all-frame limiter disconnected an ordinary
+whiteboard during cursor movement, while the legacy server had no corresponding
+hard cap. `UPDATE_RATE_PER_SEC` therefore defaults to `0` (off). The current
+inactivity implementation observes document mutations but not volatile cursor
+activity, unlike legacy, so `COLLABORATOR_INACTIVITY_SECONDS` also defaults to
+`0` rather than claiming parity. `CONTRIBUTION_WINDOW_SECONDS` defaults to the
+legacy `600`. Explicit non-zero rate and inactivity configuration remains
+available.
 
 ### OPEN-5 — AuthN-mode enum shape + AuthZ-mode independence (Wave 5, T018) — ✅ DECIDED
 

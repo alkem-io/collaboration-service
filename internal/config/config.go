@@ -133,15 +133,17 @@ type LimitsConfig struct {
 	// document's maxCollaborators is a future enhancement, not yet wired in.
 	MaxConnsPerRoom int
 	// UpdateRatePerSec is the per-connection token-bucket refill rate
-	// (UPDATE_RATE_PER_SEC, default 50 msg/s).
+	// (UPDATE_RATE_PER_SEC, default 0/off). A non-zero value counts every inbound
+	// wire frame, including awareness and ephemeral traffic.
 	UpdateRatePerSec int
 	// UpdateBurst is the token-bucket depth (UPDATE_BURST, default = rate).
 	UpdateBurst int
 	// CollaboratorInactivitySeconds downgrades an idle collaborator to viewer
-	// (COLLABORATOR_INACTIVITY_SECONDS, default 120s; 0 disables).
+	// (COLLABORATOR_INACTIVITY_SECONDS, default 0/off). The current activity model
+	// counts document mutations, not volatile cursor activity.
 	CollaboratorInactivitySeconds int
 	// ContributionWindowSeconds is the contribution-metric flush cadence
-	// (CONTRIBUTION_WINDOW_SECONDS, default 60s; 0 disables).
+	// (CONTRIBUTION_WINDOW_SECONDS, default 600s; 0 disables).
 	ContributionWindowSeconds int
 	// IdleReleaseSeconds releases an empty room this long after its last member
 	// leaves (IDLE_RELEASE_SECONDS, default 30s; 0 releases immediately).
@@ -337,9 +339,9 @@ const (
 	// unsaveable. 30 MiB leaves headroom for framing.
 	defaultMaxDocBytes               = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom           = 50
-	defaultUpdateRatePerSec          = 50
-	defaultCollaboratorInactivitySec = 120
-	defaultContributionWindowSec     = 60
+	defaultUpdateRatePerSec          = 0
+	defaultCollaboratorInactivitySec = 0
+	defaultContributionWindowSec     = 600
 	defaultIdleReleaseSec            = 30   // matches service.DefaultRoomConfig().IdleTimeout
 	defaultSaveDebounceMillis        = 2000 // matches service.DefaultRoomConfig().SaveDebounce
 	defaultFlushFailureThreshold     = 5    // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold

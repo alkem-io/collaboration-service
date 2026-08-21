@@ -29,7 +29,12 @@ server-only choices the epic deferred.
 - **Alternatives**: embed authorization rules in the collab service — rejected (duplicates `server`/auth-eval logic, violates DRY, couples standalone reuse to Alkemio's model).
 
 ### R9 — Resource-limit defaults (server enforcement)
-- **Decision**: configurable, starting defaults — max doc size ~32 MB; max connections/room from today's `maxCollaborators`; per-connection update rate ~50 msg/s token-bucket; inactivity downgrade as today. All tunable.
+- **Decision (corrected after browser E2E against the native-Yjs client)**:
+  configurable limits remain available, but the all-frame update-rate limiter and
+  mutation-only inactivity downgrade default to off. They do not reproduce legacy
+  behaviour: the legacy whiteboard had no server-side frame-rate disconnect, and
+  volatile cursor activity reset its inactivity timer. The contribution window
+  defaults to the legacy 600 seconds.
 - **Server realization**: enforced in the room/handler at Wave 3 (T014); a breach → control message + disconnect, others unaffected. Exact defaults to confirm (OPEN-4).
 
 ## Wave-1 server resolutions

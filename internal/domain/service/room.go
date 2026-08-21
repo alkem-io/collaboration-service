@@ -366,8 +366,8 @@ type RoomConfig struct {
 	// Limits carries the configurable enforcement bounds (FR-024, epic R9).
 	Limits Limits
 	// CollaboratorInactivity downgrades an idle collaborator to viewer after this
-	// long with no mutation (FR-014, whiteboard parity). Zero disables the
-	// downgrade. Reset on any client mutation.
+	// long with no document mutation. Zero disables the downgrade and is the
+	// default because volatile cursor activity is not counted here.
 	CollaboratorInactivity time.Duration
 	// ContributionWindow is the flush cadence for the north-star contribution
 	// metric/event: the set of actors that contributed in the window is emitted
@@ -429,9 +429,9 @@ const (
 
 	defaultMaxDocBytes             = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom         = 50
-	defaultUpdateRatePerSec        = 50
-	defaultCollaboratorInactivity  = 120 * time.Second
-	defaultContributionWindowEvery = 60 * time.Second
+	defaultUpdateRatePerSec        = 0
+	defaultCollaboratorInactivity  = 0
+	defaultContributionWindowEvery = 10 * time.Minute
 	// defaultBackendTimeout bounds each backend call on the run loop (authZ,
 	// persist, purge, publish) so a hung backend cannot wedge the single-writer
 	// loop. Generous enough for a slow-but-alive backend; far below any human-
