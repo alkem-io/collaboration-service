@@ -1,11 +1,14 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
 // assetsRoot is the Excalidraw scene root that holds file locators.
@@ -53,6 +56,31 @@ func trimECMAScript(s string) string {
 	})
 }
 
+// validateLocator applies the bounded-locator VALUE rule to one string.
+//
+// Extracted so the memo image-src check and the whiteboard files check enforce
+// exactly the same rule rather than two drifting copies of it. The returned
+// errors are phrased to read as a suffix ("is empty"), so each caller supplies
+// its own subject and the whiteboard messages stay byte-identical to what they
+// were before the split.
+func validateLocator(v string) error {
+	// The byte bound is on the original: trimming is for the emptiness and
+	// prefix checks, not for deciding how much data was actually sent.
+	if len(v) > maxLocatorBytes {
+		return fmt.Errorf("is %d bytes, over the %d-byte locator limit", len(v), maxLocatorBytes)
+	}
+	trimmed := trimECMAScript(v)
+	if trimmed == "" {
+		return errors.New("is empty")
+	}
+	// Case-insensitive on the TRIMMED value: leading whitespace or a capitalised
+	// scheme would otherwise walk straight past a literal prefix comparison.
+	if strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+		return errors.New("is an inline data: locator, not a reference")
+	}
+	return nil
+}
+
 func validateAssetsRoot(doc *ycrdt.Doc) error {
 	// No nil guard on GetMap. It returns nil only when a root was created LOCALLY as
 	// another type before being asked for as a map, and this service has no such
@@ -66,19 +94,8 @@ func validateAssetsRoot(doc *ycrdt.Doc) error {
 		if !ok {
 			return fmt.Errorf("files[%q] is %T, want a string locator", key, raw)
 		}
-		// The byte bound is on the original: trimming is for the emptiness and
-		// prefix checks, not for deciding how much data was actually sent.
-		if len(v) > maxLocatorBytes {
-			return fmt.Errorf("files[%q] is %d bytes, over the %d-byte locator limit", key, len(v), maxLocatorBytes)
-		}
-		trimmed := trimECMAScript(v)
-		if trimmed == "" {
-			return fmt.Errorf("files[%q] is empty", key)
-		}
-		// Case-insensitive on the TRIMMED value: leading whitespace or a capitalised
-		// scheme would otherwise walk straight past a literal prefix comparison.
-		if strings.HasPrefix(strings.ToLower(trimmed), "data:") {
-			return fmt.Errorf("files[%q] is an inline data: locator, not a reference", key)
+		if err := validateLocator(v); err != nil {
+			return fmt.Errorf("files[%q] %w", key, err)
 		}
 	}
 	return nil
@@ -103,4 +120,63 @@ func cloneDoc(src *ycrdt.Doc, guid string) (*ycrdt.Doc, error) {
 		return nil, fmt.Errorf("seeding clone: %w", err)
 	}
 	return dst, nil
+}
+
+// memoRoot is the fragment y-prosemirror binds a memo to.
+const memoRoot = "default"
+
+// validateMemoImages enforces the SAME bounded-locator rule on a memo's image
+// `src` attributes that validateAssetsRoot enforces on a whiteboard's `files`
+// entries.
+//
+// The invariant is Anton's and it is one invariant, not two: a collaboration
+// document carries REFERENCES to blobs, never blob bytes. A whiteboard smuggles
+// them through `files`; a memo smuggles them through an image node's `src`. The
+// value rule is shared (validateLocator) precisely so the two cannot drift.
+//
+// MAX_DOC_BYTES does not bound this: an inline payload is orders of magnitude
+// below the limit and passes it cleanly. An authenticated WebSocket is an
+// untrusted boundary, so "a client would not send that" is not a control.
+//
+// MISSING src is SKIPPED, mirroring the whiteboard rule: there a key absent from
+// `files` is never inspected and only a PRESENT non-string value is refused. An
+// editor that creates the node before its upload resolves must not have the
+// update refused and its generation reset mid-edit.
+func validateMemoImages(doc *ycrdt.Doc) error {
+	// GetXmlFragment is safe to call: applyConvention already materializes this
+	// exact root for every memo, so inspecting it grows the document nothing it
+	// does not already have. That is why the whiteboard-only reasoning in
+	// initShadow does not apply here.
+	for i, node := range doc.GetXmlFragment(memoRoot).QuerySelectorAll("image") {
+		el, ok := node.(*ycrdt.YXmlElement)
+		if !ok {
+			continue
+		}
+		if !el.HasAttribute("src") {
+			continue
+		}
+		raw := el.GetAttribute("src")
+		v, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("image[%d] src is %T, want a string locator", i, raw)
+		}
+		if err := validateLocator(v); err != nil {
+			return fmt.Errorf("image[%d] src %w", i, err)
+		}
+	}
+	return nil
+}
+
+// validateSchema applies the document convention's bounded-locator rule.
+//
+// One dispatch point, so the candidate-apply machinery in applyUpdate stays
+// convention-agnostic and a new convention cannot silently inherit "no checks".
+func (r *Room) validateSchema(doc *ycrdt.Doc) error {
+	switch r.content {
+	case model.ContentTypeWhiteboard:
+		return validateAssetsRoot(doc)
+	case model.ContentTypeMemo:
+		return validateMemoImages(doc)
+	}
+	return nil
 }

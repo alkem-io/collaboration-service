@@ -194,24 +194,25 @@ func TestAPartiallyAppliedCandidateDoesNotPoisonLaterValidation(t *testing.T) {
 }
 
 // TestAMemoIsNeverGivenAFilesRoot is load-bearing scope, not an optimization.
-// Accessing a named root MATERIALIZES it in Yjs, so validating a memo would add a
-// files map to a document whose convention is a single XmlFragment.
+// Accessing a named root MATERIALIZES it in Yjs, so a memo must never be validated
+// in a way that adds a files map to a document whose convention is a single
+// XmlFragment.
+//
+// This assertion got STRONGER when memos gained a validation shadow. Previously a
+// memo was never validated at all, so it trivially grew no files root. Now it IS
+// validated on every update, and the check must reach its images through
+// XmlFragment("default") — the root applyConvention already materializes — without
+// ever touching GetMap("files").
 //
 // Asserted on a room built exactly as newRoom builds one, but not running: reading
 // a live room's document from the test goroutine races its run loop, which is the
 // single writer.
 func TestAMemoIsNeverGivenAFilesRoot(t *testing.T) {
-	for _, tc := range []struct {
-		content model.ContentType
-		shadow  bool
-	}{
-		{model.ContentTypeMemo, false},
-		{model.ContentTypeWhiteboard, true},
-	} {
-		t.Run(string(tc.content), func(t *testing.T) {
+	for _, content := range []model.ContentType{model.ContentTypeMemo, model.ContentTypeWhiteboard} {
+		t.Run(string(content), func(t *testing.T) {
 			r := newBareRoom(t)
-			r.content = tc.content
-			applyConvention(r.doc, tc.content)
+			r.content = content
+			applyConvention(r.doc, content)
 			before, err := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
 			if err != nil {
 				t.Fatalf("encode: %v", err)
@@ -220,12 +221,19 @@ func TestAMemoIsNeverGivenAFilesRoot(t *testing.T) {
 			if err := r.initShadow(r.doc); err != nil {
 				t.Fatalf("initShadow: %v", err)
 			}
-			if (r.shadow != nil) != tc.shadow {
-				t.Fatalf("shadow present = %v, want %v for %s", r.shadow != nil, tc.shadow, tc.content)
+			// BOTH conventions carry a shadow now: both hold blob locators that must
+			// be references, a whiteboard in `files` and a memo in an image `src`.
+			if r.shadow == nil {
+				t.Fatalf("%s has no validation shadow; its updates would go unchecked", content)
+			}
+			// Run the real validation against the live doc, so the no-files-root claim
+			// is tested against what actually executes rather than against setup alone.
+			if err := r.validateSchema(r.doc); err != nil {
+				t.Fatalf("validating a clean %s: %v", content, err)
 			}
 
 			for _, k := range r.doc.ToJson().Keys() {
-				if k == assetsRoot && tc.content == model.ContentTypeMemo {
+				if k == assetsRoot && content == model.ContentTypeMemo {
 					t.Fatal("a memo document grew a files root — inspecting a root materializes it")
 				}
 			}
@@ -234,7 +242,7 @@ func TestAMemoIsNeverGivenAFilesRoot(t *testing.T) {
 				t.Fatalf("encode: %v", err)
 			}
 			if string(before) != string(after) {
-				t.Fatalf("%s: the document's encoded state changed merely by preparing validation", tc.content)
+				t.Fatalf("%s: the document's encoded state changed merely by preparing and running validation", content)
 			}
 		})
 	}
@@ -503,5 +511,36 @@ func TestALocalOverBudgetUpdateIsRejectedBeforeTheCandidate(t *testing.T) {
 	good := poisonUpdate(t, room, "ok", "blob://asset/legit")
 	if got := room.applyUpdate(good, updateOrigin{src: 1}); got != applyRejectedTooLarge {
 		t.Fatalf("over-budget local update = %v, want applyRejectedTooLarge", got)
+	}
+}
+
+// TestWhiteboardMessagesSurviveTheSharedRule pins every whiteboard rejection
+// string verbatim.
+//
+// The locator VALUE rule was factored out of validateAssetsRoot so the memo image
+// check enforces the same rule rather than a second copy of it. Factoring is
+// exactly the kind of change that silently reshapes an error message, and these
+// strings are the operator's only view of why an update was refused. Asserted on
+// the full message, not on a substring, so a reworded or re-ordered subject fails.
+func TestWhiteboardMessagesSurviveTheSharedRule(t *testing.T) {
+	for _, tc := range []struct {
+		val  interface{}
+		want string
+	}{
+		{42, `files["k"] is int, want a string locator`},
+		{"", `files["k"] is empty`},
+		{"data:image/png;base64,x", `files["k"] is an inline data: locator, not a reference`},
+		{strings.Repeat("a", maxLocatorBytes+1), `files["k"] is 2049 bytes, over the 2048-byte locator limit`},
+	} {
+		d := ycrdt.NewDoc("wb")
+		d.GetMap(assetsRoot).Set("k", tc.val)
+		err := validateAssetsRoot(d)
+		if err == nil {
+			t.Errorf("%#v was accepted", tc.val)
+			continue
+		}
+		if err.Error() != tc.want {
+			t.Errorf("message = %q, want %q", err.Error(), tc.want)
+		}
 	}
 }

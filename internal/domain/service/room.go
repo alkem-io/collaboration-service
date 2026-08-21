@@ -1364,8 +1364,8 @@ func (r *Room) applyUpdate(update []byte, origin updateOrigin) applyResult {
 			r.rebuildShadow("after a failed candidate apply")
 			return applyCandidateFailed
 		}
-		if err := validateAssetsRoot(r.shadow); err != nil {
-			r.logger.Warn("update rejected: assets-root schema",
+		if err := r.validateSchema(r.shadow); err != nil {
+			r.logger.Warn("update rejected: locator schema",
 				zap.String("doc", string(r.id)), zap.Bool("peer", origin.peer), zap.Error(err))
 			// The shadow now holds the poison. Rebuild from the still-clean live doc.
 			r.rebuildShadow("after a schema rejection")
@@ -1383,17 +1383,15 @@ func (r *Room) applyUpdate(update []byte, origin updateOrigin) applyResult {
 			// room down WITHOUT a flush, which is exactly the required behaviour.
 			r.invariantFailed("live apply failed after the candidate accepted the same bytes", err)
 		}
-		// No candidate was involved: a memo has no assets-root contract and therefore
-		// no shadow. Its behaviour is PRESERVED EXACTLY as it was before this change —
-		// log and fall through to the same result as before.
+		// No candidate was involved, so this room has no recognized convention and
+		// therefore no shadow. Both memo and whiteboard now carry one, so in practice
+		// this branch is not reached by either; it remains because the fallthrough
+		// must stay defined rather than depend on that.
 		//
 		// Deliberately not "corrected" here. Without a candidate nothing proves the
 		// live document was untouched; apply has no undo, the synchronous observer may
 		// already have set dirty and broadcast, and reporting not-applied would change
 		// whether a save is armed for a document that may have been partially mutated.
-		// How a partially applied malformed memo update should be handled is a real
-		// question, but it is not this one, and an assets-root change for whiteboards
-		// must not answer it by side effect.
 		r.logger.Warn("applying update failed", zap.String("doc", string(r.id)), zap.Error(err))
 	}
 	return applyOK
@@ -1422,12 +1420,19 @@ func (r *Room) invariantFailed(what string, cause error) {
 // initShadow builds the validation shadow from the document the registry just
 // published, so it is in lockstep from the first update onward.
 //
-// Whiteboards only. applyConvention creates the files root for a whiteboard and an
-// XmlFragment for a memo, and INSPECTING a root materializes it — so validating a
-// memo would grow it a files map it should never have. A memo has no assets-root
-// contract, so it carries no shadow and pays nothing.
+// Both conventions carry a shadow, because both carry blob locators that must be
+// references rather than bytes: a whiteboard in `files`, a memo in an image
+// node's `src`.
+//
+// The memo check must read XmlFragment("default") and nothing else. INSPECTING a
+// root materializes it, so reaching for `files` here would grow a memo a map its
+// convention forbids — which is why memos were originally excluded outright
+// rather than validated against the whiteboard rule.
+//
+// A memo pays what a whiteboard already paid: one clone at open, one candidate
+// apply per update.
 func (r *Room) initShadow(doc *ycrdt.Doc) error {
-	if r.content != model.ContentTypeWhiteboard {
+	if r.content != model.ContentTypeWhiteboard && r.content != model.ContentTypeMemo {
 		return nil
 	}
 	shadow, err := cloneDoc(doc, string(r.id))
