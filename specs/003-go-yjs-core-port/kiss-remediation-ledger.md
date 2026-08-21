@@ -96,11 +96,12 @@ not exercised early enough.
 | ID | Status | Gate |
 |---|---|---|
 | E2E-001 | VERIFIED | One-user UI create/open/draw, stable long hold with pointer movement, close, full reload, and file-service checkpoint persistence. |
-| E2E-002 | RUNNING | Prior attempts were invalidated by two proven driver artifacts: Escape closed the dialog and a WebSocket wrapper omitted static state constants. Rerun with neither defect: edit from each, live convergence, stable sockets and reload persistence; repeat with distinct identities when available. |
+| E2E-002 | VERIFIED | Two isolated same-actor browser contexts opened the same fresh whiteboard. A's ellipse rendered in B; B's diamond rendered in A; both cursors appeared; sockets had zero closes/errors; both shapes survived full reload. Evidence: `/tmp/006-e2e-canonical/2ctx/`. |
 | E2E-003 | PENDING | Image upload through UI, peer visibility, reload/cold-load, and stored Yjs inspection proving locators only—no `data:` bytes. |
 | E2E-004 | PENDING | Memo two-context live convergence and reload/cold-load persistence. |
 | E2E-005 | PENDING | Whiteboard content replacement through template/framing while a room is live (BASIC-005). |
 | E2E-006 | PENDING | UI delete through lifecycle delivery and collaboration purge (BASIC-006). |
+| E2E-007 | PENDING | Repeat two-context whiteboard and memo presence/convergence with two distinct canonically registered identities; same-actor multi-tab is already verified. |
 | LOAD-001 | PENDING | 20 boards × 20 connections for 10 minutes: 396 protocol clients plus 4 Chromium controls; pointer-only then mixed document edits. Assert zero unexpected closes/sheds/errors, awareness cardinality 20, pointer p95 ≤100 ms/p99 ≤250 ms, zero pointer-only checkpoints, mixed checkpoint ceiling about 10/s total at 2 s, and report actual CPU/RSS. Browser controls must also report main-thread/render latency: each client currently rebuilds the full collaborator map on every remote awareness frame (up to about 570 scene updates/s at 20 users). Service measurements must separate live and validator-shadow Y.Doc memory/CPU—the security-validating shadow is reachable and stays unless measurement justifies a core-level optimization. If remote rendering measures badly, prefer one animation-frame coalesced render—not a protocol state machine. Repeat unchanged once. |
 
 ## Deferred feature work (frozen until basics close)
