@@ -2035,8 +2035,10 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// still alive; it does not, because the deletion is the producer's and completes
 	// before the event is published. The only remaining option is producer-side
 	// enrichment — the event carrying what the consumer would otherwise look up.
-	// That spans repos and is not decided here. BASIC-004 stays OPEN; do not read
-	// this branch as a settled design.
+	// That spans repos and is not decided here. Tracked as BASIC-004 in the
+	// canonical remediation ledger — alkem-io/agents-hq ->
+	// specs/006-collab-content-unification/kiss-remediation-ledger.md — which
+	// carries its current status; do not read this branch as a settled design.
 	//
 	// Any in-flight periodic emit is left alone either way: its goroutine
 	// completes on its own bounded context and exits on r.done.

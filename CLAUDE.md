@@ -131,7 +131,9 @@ branches on these literals, so changing one is a cross-repo change.
 connection open and BEFORE the room is materialized, and the resulting capability
 holds until that socket closes. There are no per-frame checks and no lease. A
 revocation therefore takes effect on the client's next connection, not immediately
-(tracked as BASIC-015 in the KISS remediation ledger). A denied session closes
+(tracked as BASIC-015 in the canonical remediation ledger:
+[alkem-io/agents-hq](https://github.com/alkem-io/agents-hq) →
+`specs/006-collab-content-unification/kiss-remediation-ledger.md`). A denied session closes
 `1008`; an authorization backend outage
 closes `1011`, so clients keep retrying.
 

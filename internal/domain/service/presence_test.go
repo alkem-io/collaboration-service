@@ -502,7 +502,9 @@ func TestDisabledContributionWindowCollectsAndEmitsNothing(t *testing.T) {
 // id against the memo and whiteboard rows. A deleted document misses both, so the
 // event is discarded and logged as "collaboration-contribution for unknown
 // document". Emitting it is a bus round trip whose only outcome is a warn per
-// delete. (The dropped final window is BASIC-004, still open.)
+// delete. The dropped final window is tracked as BASIC-004 in the canonical
+// remediation ledger (alkem-io/agents-hq ->
+// specs/006-collab-content-unification/kiss-remediation-ledger.md).
 //
 // Non-vacuity: drop the `end.Code != model.CodeDocumentDeleted` guard in teardown
 // and this emits, failing here.
