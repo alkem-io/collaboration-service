@@ -44,7 +44,7 @@ func (s *measuringStore) LoadCheckpoint(ctx context.Context, id backend.Document
 // Appending into one node keeps the STRUCTURE fixed so only the number of edits
 // that produced the text varies, which is the variable SC-012 is about.
 func appendIntoOneNode(doc *ycrdt.Doc, s string) {
-	f := doc.GetXmlFragment("default")
+	f := doc.GetXMLFragment("default")
 	xt, _ := f.GetFirstChild().(*ycrdt.YXmlText)
 	if xt == nil {
 		xt = ycrdt.NewYXmlText()

@@ -232,7 +232,7 @@ func TestAMemoIsNeverGivenAFilesRoot(t *testing.T) {
 				t.Fatalf("validating a clean %s: %v", content, err)
 			}
 
-			for _, k := range r.doc.ToJson().Keys() {
+			for _, k := range r.doc.ToJSON().Keys() {
 				if k == assetsRoot && content == model.ContentTypeMemo {
 					t.Fatal("a memo document grew a files root — inspecting a root materializes it")
 				}

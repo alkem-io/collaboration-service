@@ -295,7 +295,7 @@ func (c *wsClient) dispatch(ctx context.Context, frame []byte) {
 func (c *wsClient) insertMemo(s string) {
 	c.lock()
 	defer c.unlock()
-	frag := c.doc.GetXmlFragment("default")
+	frag := c.doc.GetXMLFragment("default")
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -305,7 +305,7 @@ func (c *wsClient) insertMemo(s string) {
 func (c *wsClient) memoText() string {
 	c.lock()
 	defer c.unlock()
-	return c.doc.GetXmlFragment("default").ToString()
+	return c.doc.GetXMLFragment("default").ToString()
 }
 
 // addElement sets an id-keyed element on the whiteboard's "elements" Y.Map.

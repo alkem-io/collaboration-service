@@ -38,7 +38,7 @@ func memoRoom(t *testing.T) *Room {
 // with and without it.
 func setMemoImage(t *testing.T, d *ycrdt.Doc, src interface{}) {
 	t.Helper()
-	frag := d.GetXmlFragment(memoRoot)
+	frag := d.GetXMLFragment(memoRoot)
 	frag.Insert(0, ycrdt.ArrayAny{ycrdt.NewYXmlElement("paragraph")})
 	para, ok := frag.Get(0).(*ycrdt.YXmlElement)
 	if !ok {
@@ -121,7 +121,7 @@ func TestNonImageMemoNodesAreUnaffected(t *testing.T) {
 	r := memoRoom(t)
 	// Integrated the same way setMemoImage does — nesting detached elements yields
 	// a tree QuerySelectorAll cannot see, which would make this pass vacuously.
-	frag := r.doc.GetXmlFragment(memoRoot)
+	frag := r.doc.GetXMLFragment(memoRoot)
 	frag.Insert(0, ycrdt.ArrayAny{ycrdt.NewYXmlElement("paragraph")})
 	para, ok := frag.Get(0).(*ycrdt.YXmlElement)
 	if !ok {
@@ -151,7 +151,7 @@ func TestAValidMemoImageIsApplied(t *testing.T) {
 	if got := r.applyUpdate(updateFrom(t, client), updateOrigin{src: 1}); got != applyOK {
 		t.Fatalf("applyUpdate = %v, want applyOK for an ordinary locator", got)
 	}
-	if n := len(r.doc.GetXmlFragment(memoRoot).QuerySelectorAll("image")); n != 1 {
+	if n := len(r.doc.GetXMLFragment(memoRoot).QuerySelectorAll("image")); n != 1 {
 		t.Fatalf("the live memo holds %d image node(s), want 1", n)
 	}
 }
@@ -194,7 +194,7 @@ func TestMemoPoisonOnTheRealRoomPath(t *testing.T) {
 
 	var watcherImages int
 	watcher.withDoc(func(d *ycrdt.Doc) {
-		watcherImages = len(d.GetXmlFragment(memoRoot).QuerySelectorAll("image"))
+		watcherImages = len(d.GetXMLFragment(memoRoot).QuerySelectorAll("image"))
 	})
 	if watcherImages != 0 {
 		t.Fatalf("the watcher holds %d image node(s); a rejected update was broadcast", watcherImages)
@@ -217,7 +217,7 @@ func TestMemoPoisonOnTheRealRoomPath(t *testing.T) {
 		if aerr := ycrdt.ApplyUpdateV2(reloaded, stored, nil); aerr != nil {
 			t.Fatalf("decoding the stored snapshot: %v", aerr)
 		}
-		for i, node := range reloaded.GetXmlFragment(memoRoot).QuerySelectorAll("image") {
+		for i, node := range reloaded.GetXMLFragment(memoRoot).QuerySelectorAll("image") {
 			el, ok := node.(*ycrdt.YXmlElement)
 			if !ok {
 				continue

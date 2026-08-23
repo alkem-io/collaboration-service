@@ -18,7 +18,7 @@ import (
 // containing both (CRDT, no last-write-wins loss) — the property the convergence
 // tests assert.
 func insertText(doc *ycrdt.Doc, s string) {
-	f := doc.GetXmlFragment("default")
+	f := doc.GetXMLFragment("default")
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -26,7 +26,7 @@ func insertText(doc *ycrdt.Doc, s string) {
 
 // xmlText renders the memo's "default" fragment to a plain string.
 func xmlText(doc *ycrdt.Doc) string {
-	return doc.GetXmlFragment("default").ToString()
+	return doc.GetXMLFragment("default").ToString()
 }
 
 // --- whiteboard (id-keyed Y.Map) helpers ---
@@ -62,7 +62,7 @@ func docMentions(doc *ycrdt.Doc, needle string) bool {
 // itself — a test-only diagnostic, and going through encoding/json avoids
 // depending on an internal serializer for a leak assertion.
 func ycrdtJSON(doc *ycrdt.Doc) string {
-	b, err := json.Marshal(doc.ToJson())
+	b, err := json.Marshal(doc.ToJSON())
 	if err != nil {
 		return ""
 	}

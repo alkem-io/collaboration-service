@@ -269,13 +269,13 @@ func (c *wsTestClient) run(ctx context.Context) {
 func (c *wsTestClient) text() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.doc.GetXmlFragment("default").ToString()
+	return c.doc.GetXMLFragment("default").ToString()
 }
 
 func (c *wsTestClient) insert(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	f := c.doc.GetXmlFragment("default")
+	f := c.doc.GetXMLFragment("default")
 	xt := ycrdt.NewYXmlText()
 	f.Push(ycrdt.ArrayAny{xt})
 	// Insert with the nil Object (IsNil) — no explicit formatting attributes,

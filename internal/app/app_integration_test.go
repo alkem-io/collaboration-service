@@ -132,7 +132,7 @@ func (c *integClient) pump() {
 func (c *integClient) insert(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	frag := c.doc.GetXmlFragment("default")
+	frag := c.doc.GetXMLFragment("default")
 	xt := ycrdt.NewYXmlText()
 	frag.Push(ycrdt.ArrayAny{xt})
 	xt.Insert(0, s, ycrdt.Object{})
@@ -141,7 +141,7 @@ func (c *integClient) insert(s string) {
 func (c *integClient) text() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.doc.GetXmlFragment("default").ToString()
+	return c.doc.GetXMLFragment("default").ToString()
 }
 
 func (c *integClient) close() { _ = c.conn.Close(websocket.StatusNormalClosure, "bye") }

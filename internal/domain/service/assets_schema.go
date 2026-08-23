@@ -143,11 +143,11 @@ const memoRoot = "default"
 // editor that creates the node before its upload resolves must not have the
 // update refused and its generation reset mid-edit.
 func validateMemoImages(doc *ycrdt.Doc) error {
-	// GetXmlFragment is safe to call: applyConvention already materializes this
+	// GetXMLFragment is safe to call: applyConvention already materializes this
 	// exact root for every memo, so inspecting it grows the document nothing it
 	// does not already have. That is why the whiteboard-only reasoning in
 	// initShadow does not apply here.
-	for i, node := range doc.GetXmlFragment(memoRoot).QuerySelectorAll("image") {
+	for i, node := range doc.GetXMLFragment(memoRoot).QuerySelectorAll("image") {
 		el, ok := node.(*ycrdt.YXmlElement)
 		if !ok {
 			continue

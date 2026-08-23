@@ -69,7 +69,7 @@ func TestRoomWithNoStoredStateOpensEmptyAndEditable(t *testing.T) {
 // seeded the MEMO root (a spurious Y.XmlFragment "default") instead of the
 // whiteboard roots (elements/files/appState) — a durable wrong-type root that
 // defeats applyConvention's anti-race guarantee. We inspect doc.Share directly
-// (NOT GetMap/GetXmlFragment, which are get-or-create and would mask the bug) so
+// (NOT GetMap/GetXMLFragment, which are get-or-create and would mask the bug) so
 // the assertion sees only the roots the convention actually materialized.
 func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
 	t.Parallel()
@@ -99,21 +99,21 @@ func TestConventionUsesPersistedTypeOverStaleHandshake(t *testing.T) {
 	}
 	// The whiteboard convention roots exist; the memo "default" fragment does NOT.
 	for _, root := range []string{"elements", "files", "appState"} {
-		if !room.doc.ToJson().Has(root) {
+		if !room.doc.ToJSON().Has(root) {
 			t.Fatalf("whiteboard root %q was not materialized; roots are %v", root, shareKeys(room.doc))
 		}
 	}
-	if room.doc.ToJson().Has("default") {
+	if room.doc.ToJSON().Has("default") {
 		t.Fatalf("the stale memo convention root \"default\" was materialized for a whiteboard doc; roots are %v", shareKeys(room.doc))
 	}
 }
 
 // shareKeys lists the root share names materialized on a doc, for assertion
 // messages.
-// Doc.Share is unexported in go-yjs; ToJson ranges over EVERY share root
+// Doc.Share is unexported in go-yjs; ToJSON ranges over EVERY share root
 // (including ones materialized but still empty), so its keys are an exact
 // exported equivalent of the old Share key set — the assertion is preserved,
 // not weakened (FR-018a).
 func shareKeys(doc *ycrdt.Doc) []string {
-	return doc.ToJson().Keys()
+	return doc.ToJSON().Keys()
 }

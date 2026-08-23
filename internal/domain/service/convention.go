@@ -29,7 +29,7 @@ func applyConvention(doc *ycrdt.Doc, content model.ContentType) {
 	switch content {
 	case model.ContentTypeMemo:
 		// y-prosemirror binds the fragment named "default".
-		_ = doc.GetXmlFragment("default")
+		_ = doc.GetXMLFragment("default")
 
 	case model.ContentTypeWhiteboard:
 		// Excalidraw scene roots: elements (id-keyed), files, appState.
