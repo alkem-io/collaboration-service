@@ -22,6 +22,23 @@ const (
 	// WireControl carries server→client control messages (saved / save-error /
 	// read-only-state / room-user-change / session-end). Server-originated.
 	WireControl WireMessageType = 3
+	// WireDurabilityRequest carries a CLIENT→SERVER request to be told when the
+	// document's current state is durable: a JSON body naming a caller-chosen
+	// request id.
+	//
+	// It is a distinct wire type rather than an inbound WireControl because
+	// WireControl is declared server→client and the inbound dispatch drops it by
+	// design; widening that direction would make every control kind inbound-
+	// reachable, which is a much larger contract change than this needs.
+	//
+	// ADDITIVE AND ROLLING-SAFE IN ONE DIRECTION ONLY: a client that never sends
+	// type 4 is unaffected, and this service must therefore be deployed BEFORE any
+	// caller that sends it. A caller that sends it to an older build reaches the
+	// dispatch default and is silently ignored, which is why the caller must treat
+	// a missing response as a failure and MUST NOT fall back to the room-wide
+	// `saved` broadcast — that broadcast answers a different question and would
+	// report another editor's save as this request's durability.
+	WireDurabilityRequest WireMessageType = 4
 )
 
 // ControlKind names a server→client control event carried inside a WireControl
@@ -91,6 +108,24 @@ const (
 	// The literals matter: `client-web` keys off this kind and off every Code,
 	// Scope, and Disposition value. Changing one is a cross-repo change.
 	ControlSessionEnd ControlKind = "session-end"
+
+	// ControlPersisted answers ONE durability request: the document state that
+	// included the requester's preceding mutation has been accepted by BOTH
+	// configured stores. It carries the RequestID it answers, so it cannot be
+	// confused with the room-wide `saved` broadcast, which names no requester and
+	// may be another editor's save entirely.
+	//
+	// It is NOT an acknowledgement of an individual update. One barrier may cover
+	// any number of mutations, and a client may have only one outstanding.
+	ControlPersisted ControlKind = "persisted"
+	// ControlPersistFailed answers ONE durability request that cannot be
+	// satisfied: the save failed, the room ended, the session had a frame dropped,
+	// or the requester may not write. It carries the RequestID and a reason.
+	//
+	// Every request gets exactly one of persisted / persist-failed. Silence is
+	// never an outcome the server intends, so a caller that sees silence has
+	// grounds to treat the barrier as failed rather than guess.
+	ControlPersistFailed ControlKind = "persist-failed"
 )
 
 // SessionEndCode names WHAT ended a session. It is a closed set: every value is
@@ -127,6 +162,26 @@ const (
 	// idle room being released). The document is intact and was flushed; coming
 	// back with a backoff is the correct behaviour.
 	CodeServerShutdown SessionEndCode = "server-shutdown"
+
+	// CodeUpdateNotAccepted means an inbound update could not be ADMITTED to the
+	// room's command queue — the room had left Active, or the queue stayed full
+	// past its deadline. The update was NOT applied, NOT broadcast and NOT saved.
+	//
+	// MEMBER scope: this is one connection's frame, and the room and every other
+	// member are unaffected. TRANSIENT disposition: the condition is a momentary
+	// server-side backlog or a room changing state, so the client should reconnect
+	// with backoff rather than treat it as final.
+	//
+	// It exists because the alternative was silence. The refusal used to be
+	// discarded, so the client kept editing a generation the server never received
+	// — a divergence nothing would report, and one that would let a durability
+	// barrier answer "your work is safe" about a mutation that never arrived.
+	// Naming it is what makes the loss visible at the moment it happens.
+	//
+	// DEPLOY ORDER MATTERS: a client that does not know this code classifies it as
+	// unknown and fails CLOSED (terminal, no reconnect), which is the opposite of
+	// the intent. Clients must understand it BEFORE this service emits it.
+	CodeUpdateNotAccepted SessionEndCode = "update-not-accepted"
 )
 
 // SessionEndScope says WHO the end applies to, so a client can tell "the
@@ -179,6 +234,7 @@ var sessionEndTable = map[SessionEndCode]SessionEnd{
 	CodeDocumentDeleted:           {CodeDocumentDeleted, ScopeDocument, DispositionTerminal},
 	CodeEditsNotSaved:             {CodeEditsNotSaved, ScopeDocument, DispositionTerminal},
 	CodeServerShutdown:            {CodeServerShutdown, ScopeDocument, DispositionTransient},
+	CodeUpdateNotAccepted:         {CodeUpdateNotAccepted, ScopeMember, DispositionTransient},
 }
 
 // NewSessionEnd resolves a code to its full session-end intent. An unknown code
@@ -258,6 +314,10 @@ const (
 type ControlMessage struct {
 	// Kind selects the control event.
 	Kind ControlKind `json:"kind"`
+	// RequestID correlates ControlPersisted / ControlPersistFailed with the
+	// durability request that asked. Empty on every other kind — in particular on
+	// ControlSaved, which is a room-wide broadcast and answers nobody.
+	RequestID string `json:"requestId,omitempty"`
 	// Version is the persisted snapshot version for ControlSaved.
 	Version int `json:"version,omitempty"`
 	// Error is a human-readable reason for ControlSaveError (never secrets).

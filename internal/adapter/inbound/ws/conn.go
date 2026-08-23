@@ -341,7 +341,11 @@ func closeStatusFor(end model.SessionEnd) (websocket.StatusCode, string) {
 	switch end.Code {
 	case model.CodeServerShutdown:
 		return websocket.StatusGoingAway, end.Code
-	case model.CodeUpdateRateExceeded:
+	case model.CodeUpdateRateExceeded, model.CodeUpdateNotAccepted:
+		// 1013 Try Again Later for BOTH member-scoped transient causes: the client
+		// was refused, nothing about the document is wrong, and reconnecting with
+		// backoff is the right response. They stay distinguishable by the close
+		// REASON, which is the code itself.
 		return websocket.StatusTryAgainLater, end.Code
 	case model.CodeDocumentSizeLimitExceeded, model.CodeDocumentDeleted, model.CodeEditsNotSaved:
 		return websocket.StatusPolicyViolation, end.Code

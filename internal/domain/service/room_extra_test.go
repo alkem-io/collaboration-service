@@ -83,18 +83,18 @@ func TestUnknownWireTypeIgnored(t *testing.T) {
 
 	var control bytes.Buffer
 	protocol.WriteMessage(&control, uint8(model.WireControl), []byte(`{"kind":"saved"}`))
-	if room.handleMessage(1, control.Bytes()) {
+	if room.handleMessage(1, control.Bytes(), false) {
 		t.Error("control frame should not mutate the document")
 	}
 
 	var unknown bytes.Buffer
 	protocol.WriteMessage(&unknown, 99, []byte("nonsense"))
-	if room.handleMessage(1, unknown.Bytes()) {
+	if room.handleMessage(1, unknown.Bytes(), false) {
 		t.Error("unknown frame should not mutate the document")
 	}
 
 	// A malformed (empty) frame is dropped without mutation.
-	if room.handleMessage(1, nil) {
+	if room.handleMessage(1, nil, false) {
 		t.Error("empty frame should not mutate the document")
 	}
 }

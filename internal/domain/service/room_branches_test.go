@@ -375,7 +375,7 @@ func TestHandleMessageDropsMalformedAwareness(t *testing.T) {
 	// length varint → awarenessBody rejects it.
 	var frame bytes.Buffer
 	protocol.WriteMessage(&frame, uint8(model.WireAwareness), []byte{0xff})
-	if room.handleMessage(1, frame.Bytes()) {
+	if room.handleMessage(1, frame.Bytes(), false) {
 		t.Fatal("a malformed awareness frame must not mutate the document")
 	}
 	if peer.count() != 0 {

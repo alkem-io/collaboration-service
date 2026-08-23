@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/antst/go-yjs/backend/hub"
@@ -187,6 +188,21 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 type Session struct {
 	room *Room
 	id   connID
+	// conn is this session's own outbound port. The session end for a refused
+	// enqueue MUST NOT route through the room: the room's command queue is the
+	// very thing that was unavailable, so telling the client through it could
+	// fail for the same reason. Holding the port here keeps the reason delivery
+	// independent of the failure it reports.
+	conn Conn
+	// dropped is set when an inbound frame from THIS session could not be handed
+	// to the room — the room left Active, or the command buffer stayed full past
+	// the enqueue deadline. It is read on the room loop via the command that
+	// carries it, so a later durability request from a session that has already
+	// lost a mutation is REFUSED rather than answered.
+	//
+	// Atomic because Forward runs on the socket's reader goroutine while the flag
+	// is consumed on the room's run loop.
+	dropped atomic.Bool
 }
 
 // SendBuffer is the per-connection outbound queue depth the adapter should use.
@@ -274,7 +290,7 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 			if jr.err != nil {
 				return nil, nil, jr.err
 			}
-			return &Session{room: room, id: jr.id}, jr.frames, nil
+			return &Session{room: room, id: jr.id, conn: req.Conn}, jr.frames, nil
 		case <-room.done:
 			// The room tore down after our enqueue won the buffered-send race but
 			// before processing the join: its run loop has exited and nothing will
@@ -593,7 +609,55 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 // serialized processing. Non-blocking from the caller's view beyond the room's
 // command-channel buffer.
 func (s *Session) Forward(frame []byte) {
-	s.room.enqueue(command{kind: cmdMessage, src: s.id, data: frame})
+	// OBSERVE THE REFUSAL. enqueue returns false when the room has left Active or
+	// the command buffer stayed full past its deadline, and this used to discard
+	// that: the frame vanished, the client was told nothing, and the session
+	// carried on as though the server had its edit.
+	//
+	// The silence was the defect. A client whose frame is dropped goes on editing a
+	// generation the server never received, and nothing anywhere says so: the two
+	// documents diverge silently and stay diverged. A durability barrier over that
+	// session would compound it by answering "your work is safe" about a mutation
+	// that never arrived. So the loss is recorded on the session, the client is
+	// TOLD, and the socket ends.
+	if s.room.enqueue(command{
+		kind:           cmdMessage,
+		src:            s.id,
+		data:           frame,
+		sessionDropped: s.dropped.Load(),
+	}) {
+		return
+	}
+
+	// THE FRAME IS LOST. Order matters and is the whole design:
+	//
+	//  1. POISON FIRST, and only once. Any durability request that is somehow
+	//     already in flight, or that races in behind this, must find the session
+	//     marked — so no barrier can ever be answered `persisted` for a document
+	//     state that is missing this update.
+	//  2. TELL THE CLIENT, with a typed member-scoped transient end. It was not
+	//     applied, not broadcast, not saved, and reconnecting is the right
+	//     response.
+	//  3. CLOSE AFTER DRAIN, so the reason is written before the socket goes.
+	//
+	// Steps 2 and 3 go DIRECTLY to this session's connection rather than through
+	// the room, because the room's command queue is precisely what was
+	// unavailable — routing the explanation through the failure would risk losing
+	// the explanation too.
+	//
+	// Swap(true) rather than Store(true): a second refused frame on an already
+	// poisoned session must not queue a second session-end behind the first.
+	if s.dropped.Swap(true) {
+		return
+	}
+	if s.conn == nil {
+		return
+	}
+	end := model.NewSessionEnd(model.CodeUpdateNotAccepted)
+	if frame := encodeControl(end.Control()); frame != nil {
+		_ = s.conn.Send(frame)
+	}
+	s.conn.CloseAfterDrain(end)
 }
 
 // Leave detaches the connection from its room. The room releases itself (after a

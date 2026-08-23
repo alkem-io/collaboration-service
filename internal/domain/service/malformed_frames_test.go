@@ -40,7 +40,7 @@ func TestMalformedFramesAreDroppedWithoutHarmingTheRoom(t *testing.T) {
 		for _, frame := range garbage {
 			// handleMessage returns "should tear down" — it must never be true for a
 			// frame the room simply could not parse.
-			if room.handleMessage(1, frame) {
+			if room.handleMessage(1, frame, false) {
 				t.Fatalf("a malformed client frame (%v) asked for a room teardown; one bad client must not become an outage for every collaborator", frame)
 			}
 		}
@@ -77,7 +77,7 @@ func TestClientControlFramesAreIgnored(t *testing.T) {
 	before := xmlText(room.doc)
 
 	for _, msgType := range []byte{0x03, 0x7f} { // control, and an unassigned type
-		if room.handleMessage(1, []byte{msgType, 0x00}) {
+		if room.handleMessage(1, []byte{msgType, 0x00}, false) {
 			t.Fatalf("a client-sent frame of type %#x asked for a teardown; unknown types must be ignored, not fatal", msgType)
 		}
 	}
@@ -113,7 +113,7 @@ func TestAwarenessTheDecoderRejectsIsNotRelayedToPeers(t *testing.T) {
 	frame := []byte{0x01, 0x04, 0xff, 0xff, 0xff, 0xff}
 
 	before := observer.count()
-	if room.handleMessage(1, frame) {
+	if room.handleMessage(1, frame, false) {
 		t.Fatal("a rejected awareness frame must not ask for a room teardown")
 	}
 

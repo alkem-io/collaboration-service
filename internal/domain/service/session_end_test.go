@@ -34,6 +34,18 @@ func TestEverySessionEndCodeCarriesScopeAndDisposition(t *testing.T) {
 		model.CodeDocumentDeleted:           {Code: model.CodeDocumentDeleted, Scope: model.ScopeDocument, Disposition: model.DispositionTerminal},
 		model.CodeEditsNotSaved:             {Code: model.CodeEditsNotSaved, Scope: model.ScopeDocument, Disposition: model.DispositionTerminal},
 		model.CodeServerShutdown:            {Code: model.CodeServerShutdown, Scope: model.ScopeDocument, Disposition: model.DispositionTransient},
+		// Added with the durability barrier's prerequisite. MEMBER scope because it
+		// is one connection's frame that was refused — the room and every other
+		// member are unaffected. TRANSIENT because the cause is a momentary backlog
+		// or a room changing state, so the client should reconnect with backoff.
+		//
+		// THE CLIENT DISPOSITION THIS GUARD DEMANDS IS AGREED AND ORDERED: client-web
+		// ships the classifier entry FIRST (stage 1), this service emits it SECOND,
+		// and the server durability caller THIRD. The order is not cosmetic — an
+		// unknown code makes classifySessionEnd return null and the client fails
+		// CLOSED, so emitting it to a client that does not know it would turn a
+		// transient fault into a permanent disconnect.
+		model.CodeUpdateNotAccepted: {Code: model.CodeUpdateNotAccepted, Scope: model.ScopeMember, Disposition: model.DispositionTransient},
 	}
 
 	codes := model.SessionEndCodes()

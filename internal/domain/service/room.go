@@ -86,6 +86,11 @@ type command struct {
 	// contribution completion is produced by the one bounded off-loop periodic
 	// emit and reconciled on the room loop.
 	contribution *contributionFlight
+	// sessionDropped is true when the sending session has ALREADY had an inbound
+	// frame refused by enqueue. It rides on the command rather than being read
+	// from the Session, so the run loop never touches state owned by a reader
+	// goroutine.
+	sessionDropped bool
 }
 
 type cmdKind uint8
@@ -142,6 +147,24 @@ type roomMember struct {
 	// it first sends an awareness frame; 0 means not yet seen.
 	awarenessID  ycrdt.Number
 	hasAwareness bool
+	// durabilityPoisoned is set when ANY of this member's mutating updates was
+	// refused while the connection stayed alive. It is STICKY for the life of the
+	// member: nothing in the room clears it, and a reconnect gets a fresh member
+	// with the zero value.
+	//
+	// It has to be sticky because of the ordinary ordering. A barrier arrives
+	// AFTER the update it covers, so at rejection time there is usually no
+	// outstanding request to fail — failing one only covers the inverse order.
+	// Without a flag that survives, the request that follows a rejected update
+	// finds a clean room and is answered `persisted`, which claims durability for
+	// a mutation the service explicitly refused. That is the exact false positive
+	// the barrier exists to make impossible.
+	durabilityPoisoned bool
+	// barrier is the ONE outstanding durability request this member may have.
+	// Empty means none. One per connection, not per update: the caller is
+	// sequential, and an unbounded waiter map is a denial-of-service surface for
+	// a benefit nobody asked for.
+	barrier string
 }
 
 // Room is a live, in-memory document session (data-model.md "Room"): it owns the
@@ -945,7 +968,7 @@ func newOptionalTicker(every time.Duration) (*time.Timer, time.Duration) {
 // emptied room is released, not leaked). Extracted from dispatch to keep its
 // branching low.
 func (r *Room) handleMessageCmd(cmd command, armSave, armIdle func()) {
-	if r.handleMessage(cmd.src, cmd.data) {
+	if r.handleMessage(cmd.src, cmd.data, cmd.sessionDropped) {
 		armSave()
 	}
 	if len(r.members) == 0 {
@@ -1174,7 +1197,7 @@ func (r *Room) dropMember(id connID) bool {
 // Before any handling it enforces the per-connection update rate (FR-024): a
 // connection that breaches its token bucket is disconnected with a control
 // message; other collaborators are unaffected.
-func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
+func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mutated bool) {
 	// Ignore late frames from an already-evicted source. After disconnect/leave
 	// the socket can still forward buffered frames before its close propagates;
 	// without this gate an evicted connection could keep publishing awareness or
@@ -1239,11 +1262,258 @@ func (r *Room) handleMessage(src connID, frame []byte) (mutated bool) {
 		r.publishToPeers(frame, true)
 		return false
 
+	case model.WireDurabilityRequest:
+		return r.handleDurabilityRequest(src, payload, sessionDropped)
+
 	default:
 		// Control is server→client only; ignore client-sent control/unknown
 		// types (matches y-protocols leniency).
 		return false
 	}
+}
+
+// handleDurabilityRequest answers one barrier request, or refuses it.
+//
+// It runs on the run loop, AFTER the sender's preceding mutation, because both
+// arrive on the same per-connection FIFO and this room consumes that FIFO in
+// order. That ordering is the entire correlation mechanism: no id is attached to
+// the update, and none is needed.
+func (r *Room) handleDurabilityRequest(src connID, payload []byte, sessionDropped bool) bool {
+	id := durabilityRequestID(payload)
+	if id == "" {
+		// Unreadable body, or an id that violates the contract. There is no id to
+		// correlate a failure to, so this is the ONE case answered with silence —
+		// which is why the guarantee below is stated for every VALID request.
+		r.logger.Warn("dropping a durability request with a missing or invalid request id")
+		return false
+	}
+
+	// ONE LOOKUP for every per-member decision below. An unknown src — a member
+	// already evicted — has nothing to answer to and nothing to park on, so it
+	// leaves here.
+	m, ok := r.members[src]
+	if !ok {
+		return false
+	}
+
+	// A MEMBER WHOSE WRITE WAS REFUSED CAN NEVER BE ANSWERED `persisted` AGAIN on
+	// this connection. Its generation contains a struct the server rejected, so
+	// nothing it asks about is fully in the durable document, and no later flush —
+	// including one triggered by an entirely different member — may be allowed to
+	// answer for it. The client must resync on a new connection first.
+	if m.durabilityPoisoned {
+		r.failBarrier(src, id, "an earlier update from this session was rejected; resync before requesting durability")
+		return false
+	}
+
+	// A SESSION THAT LOST A FRAME CAN NEVER BE ANSWERED `persisted`. The lost
+	// frame may have been the very mutation this asks about, and nothing on the
+	// server can tell. Fail it explicitly rather than let the client infer from
+	// silence.
+	if sessionDropped {
+		r.failBarrier(src, id, "a previous update from this session was not accepted")
+		return false
+	}
+
+	// Only a member that may WRITE may ask whether its write is durable. A viewer's
+	// mutation was refused, so a barrier over it would be asking about work the
+	// room deliberately discarded.
+	if m.mode != model.ModeCollaborator {
+		r.failBarrier(src, id, "this session is read-only")
+		return false
+	}
+
+	// ONE OUTSTANDING PER CONNECTION. A second request is refused rather than
+	// queued: the caller is sequential by contract, so a second concurrent one is
+	// a caller bug, and answering it would need a waiter map with no bound.
+	if m.barrier != "" {
+		r.failBarrier(src, id, "a durability request is already outstanding on this session")
+		return false
+	}
+
+	// ALREADY DURABLE. A clean room means the live document IS the durable one, by
+	// both of the ways clean arises: a cold load restores the checkpoint BEFORE the
+	// update observer is registered, so a freshly opened room is clean and equal to
+	// storage; and thereafter dirty is cleared at exactly one place, inside persist,
+	// after BOTH stores accepted.
+	//
+	// This is the ambiguous-close case: the client reconnects and resends an update
+	// the server already has, the apply changes nothing, and the barrier resolves
+	// without forcing a redundant write.
+	if !r.dirty {
+		r.answerBarrier(src, id)
+		return false
+	}
+
+	// SAVE-ON-RELEASE MODE HAS NO FLUSH TO WAIT FOR. With SaveDebounce <= 0 the
+	// only persist is the one at release, so a parked request would hang for the
+	// life of the room. Answer it now, correlated, rather than silently.
+	//
+	// Triggering a persist from here instead was considered and rejected: persist
+	// can escalate, escalation IS a teardown, and dispatch expects a normal return
+	// from this path — so it would add a re-entrant teardown route for a
+	// configuration that deliberately has no periodic saving.
+	if r.cfg.SaveDebounce <= 0 {
+		r.failBarrier(src, id, "durability requests are unavailable while periodic saving is disabled")
+		return false
+	}
+
+	// Otherwise wait for the next successful persist. COALESCING IS INHERITED, not
+	// added: the save timer is armed once per clean→dirty cycle, so this joins the
+	// flight already scheduled rather than forcing a second one. A burst of
+	// requests across one dirty epoch therefore costs at most one write.
+	m.barrier = id
+	r.members[src] = m
+	// PARK WITHOUT TOUCHING THE TIMER. Arming here would be actively harmful:
+	// armSaveTimer is stop-then-Reset, NOT idempotent, so every request in a dirty
+	// epoch pushes a nearly-due flush back out by a full SaveDebounce. With several
+	// members asking, durability could be postponed indefinitely by the very
+	// requests waiting for it.
+	//
+	// Nothing needs arming. A room is dirty only because the update observer fired,
+	// and the clean->dirty transition that produced it already armed the timer; a
+	// failed flush arms the retry timer instead. So a dirty room always has a flush
+	// scheduled, and this joins it.
+	return false
+}
+
+// answerBarrier resolves one member's outstanding request as durable.
+func (r *Room) answerBarrier(src connID, id string) {
+	if ctrl := encodeControl(model.ControlMessage{
+		Kind:      model.ControlPersisted,
+		RequestID: id,
+	}); ctrl != nil {
+		r.sendTo(src, ctrl)
+	}
+}
+
+// failBarrier resolves one request as failed. Every VALID request gets exactly
+// one outcome — persisted or persist-failed. The single exception is a request
+// whose id is missing or violates the id contract: there is nothing to correlate
+// an answer to, so it is dropped. A caller that sees silence may therefore treat
+// the barrier as failed rather than guess.
+func (r *Room) failBarrier(src connID, id, reason string) {
+	if ctrl := encodeControl(model.ControlMessage{
+		Kind:      model.ControlPersistFailed,
+		RequestID: id,
+		Error:     reason,
+	}); ctrl != nil {
+		r.sendTo(src, ctrl)
+	}
+}
+
+// poisonDurability marks a member as permanently unable to be told its work is
+// durable on THIS connection, because one of its updates was refused.
+//
+// Sticky by design and cleared by nothing: the member is removed on disconnect,
+// so a reconnecting client gets a fresh member with a clean flag — which is
+// exactly the resync the rejection already demanded.
+func (r *Room) poisonDurability(src connID) {
+	if m, ok := r.members[src]; ok && !m.durabilityPoisoned {
+		m.durabilityPoisoned = true
+		r.members[src] = m
+	}
+}
+
+// failMemberBarrier fails ONE member's outstanding request, if it has one.
+// Used where a specific member's write is refused: the request that write was
+// covered by can no longer succeed, and a later unrelated flush must not be
+// allowed to answer it.
+func (r *Room) failMemberBarrier(src connID, reason string) {
+	m, ok := r.members[src]
+	if !ok || m.barrier == "" {
+		return
+	}
+	// State first, send second — see resolveBarriers.
+	pending := m.barrier
+	m.barrier = ""
+	r.members[src] = m
+	r.failBarrier(src, pending, reason)
+}
+
+// resolveBarriers answers every outstanding request after a SUCCESSFUL persist.
+// It runs at the one place dirty is cleared, so a resolution can never claim more
+// than both stores accepted.
+func (r *Room) resolveBarriers() {
+	// CLEAR THE STATE BEFORE SENDING, always. sendTo -> sendMember drops a member
+	// SYNCHRONOUSLY when its Send fails, which deletes it from r.members. Writing a
+	// captured roomMember back afterwards would RESURRECT the dead member: it
+	// reappears in the map with ConnClosed already counted, inflating occupancy and
+	// outliving teardown and awareness eviction. Same re-entrancy rule dropMember
+	// documents.
+	for id, m := range r.members {
+		if m.barrier == "" {
+			continue
+		}
+		pending := m.barrier
+		m.barrier = ""
+		r.members[id] = m
+		r.answerBarrier(id, pending)
+	}
+}
+
+// failBarriers resolves every outstanding request as failed. Called from the
+// teardown and flush-failure paths, so a pending request never outlives the room
+// or a failed save without a correlated answer.
+func (r *Room) failBarriers(reason string) {
+	// State first, send second — see resolveBarriers.
+	for id, m := range r.members {
+		if m.barrier == "" {
+			continue
+		}
+		pending := m.barrier
+		m.barrier = ""
+		r.members[id] = m
+		r.failBarrier(id, pending, reason)
+	}
+}
+
+// durabilityRequestID reads the request id out of a durability-request payload.
+// The body is a small JSON object rather than a bare string so the frame has room
+// to grow without a second wire type; an unreadable one yields "" and the request
+// is dropped rather than answered under a guessed id.
+func durabilityRequestID(payload []byte) string {
+	var body struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return ""
+	}
+	if !validRequestID(body.RequestID) {
+		return ""
+	}
+	return body.RequestID
+}
+
+// maxRequestIDLen bounds the caller-chosen request id. It is generous for a UUID
+// (36 chars) and small enough that echoing one back is never a payload.
+const maxRequestIDLen = 64
+
+// validRequestID enforces the request-id contract BEFORE the id is stored on a
+// member or echoed into a control frame.
+//
+// This matters because the id is UNBOUNDED CLIENT INPUT that the server keeps and
+// then sends back. The socket's read limit is the document size limit — tens of
+// megabytes — so without this one authenticated request could park a multi-
+// megabyte string on the member and make the server re-encode and transmit it.
+// "One outstanding request per connection" bounds the COUNT, not the bytes.
+//
+// The contract is deliberately narrow and explicit rather than inferred from
+// whatever the first caller happens to send: at most 64 bytes of
+// [A-Za-z0-9._-]. A UUID satisfies it unchanged.
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, c := range []byte(id) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // allowRate consumes a token from the source connection's bucket, reporting
@@ -1540,6 +1810,10 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// never mutated or broadcast the live doc. Disconnect only the offender
 	// (FR-024 offender-only impact); other collaborators are untouched.
 	if outcome.rejectedTooLarge {
+		// The offender is being disconnected, but it is still owed an answer for a
+		// request it has outstanding — and that answer must be a failure, not the
+		// silence its close would otherwise leave behind.
+		r.failMemberBarrier(src, "the update this request covered was rejected")
 		r.disconnect(src, model.CodeDocumentSizeLimitExceeded)
 		return false
 	}
@@ -1553,6 +1827,16 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// missing one. It has to drop that generation and resync. That recovery is the
 	// client's; the server's job is to refuse the write and say so.
 	if outcome.rejectedSchema {
+		// POISON ANY OUTSTANDING BARRIER FIRST. A refused write must never be
+		// convertible into a durability success: without this, a request parked
+		// before the rejection would be resolved `persisted` by the next unrelated
+		// flush, telling the caller its refused edit is safely stored.
+		//
+		// The failure is queued BEFORE the update-rejected frame, on the same
+		// per-connection FIFO, so the client learns the barrier died before it
+		// learns why.
+		r.poisonDurability(src)
+		r.failMemberBarrier(src, "the update this request covered was rejected")
 		if ctrl := encodeControl(model.ControlMessage{
 			Kind:  model.ControlUpdateRejected,
 			Error: "update rejected: file locators must be references, not inline data",
@@ -1581,6 +1865,9 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// This reports the CURRENT capability; it does not change it. Restoring write
 	// access is a separate question and deliberately not answered here.
 	if outcome.rejectedNotWritable {
+		// Same rule for a refused write from a member that may not write.
+		r.poisonDurability(src)
+		r.failMemberBarrier(src, "the update this request covered was rejected")
 		if ctrl := encodeControl(model.ControlMessage{
 			Kind:  model.ControlUpdateRejected,
 			Error: "update rejected: this session is read-only",
@@ -1871,6 +2158,12 @@ func (r *Room) persist(ctx context.Context) {
 	// version — a redelivered no-op PreRegister can bump the persisted row ahead of
 	// it; harmless while Metadata.Version is reserved/unused (FR-025).
 	r.dirty = false
+	// RESOLVE OUTSTANDING BARRIERS HERE, and only here. This is the single point
+	// where dirty is cleared, and it is reached only after SaveCheckpoint AND
+	// Metadata.Save both returned success — so a `persisted` answer can never
+	// claim more than both configured stores accepted. It says accepted-by-both-
+	// stores; it does NOT say fsync, and this service has no way to say that.
+	r.resolveBarriers()
 	r.onFlushSucceeded()
 	r.metrics.SnapshotSaved()
 	r.broadcastControl(model.ControlMessage{Kind: model.ControlSaved, Version: r.version})
@@ -2010,6 +2303,14 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// of the queue rather than of timing. Send's error is ignored deliberately —
 	// a client that has already gone away still needs dropping, and there is no
 	// one left to report the failure to.
+	// PENDING BARRIERS FAIL FIRST, before the session-end frame is queued. Four of
+	// the five teardown endings run with NO successful flush (escalation, panic,
+	// owner delete, shutdown abort), so a request outstanding at teardown would
+	// otherwise be answered by nothing at all. Queuing the failure ahead of the
+	// end on the same per-connection FIFO means the client learns the barrier
+	// failed BEFORE it learns the session is over, rather than having to infer it.
+	r.failBarriers("the room ended before the document could be persisted")
+
 	endFrame := encodeControl(end.Control())
 	for id, m := range r.members {
 		if endFrame != nil {

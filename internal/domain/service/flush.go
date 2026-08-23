@@ -57,6 +57,10 @@ func (r *Room) onFlushFailed(err error) {
 	}
 	undurable := r.undurableFor()
 
+	// Every outstanding request gets a correlated failure. The save did not
+	// happen, so a pending barrier must never be left to time out — silence would
+	// be indistinguishable from "still working".
+	r.failBarriers("the document could not be persisted")
 	r.metrics.SnapshotFailed()
 	// Emitted on EVERY failure, not only at escalation: the degraded window must be
 	// visible before anyone is disconnected, or the first signal an operator gets is
