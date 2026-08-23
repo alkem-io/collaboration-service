@@ -125,9 +125,23 @@ closes — both travel one per-connection FIFO, so the client cannot see the clo
 without the reason. Codes: `update-rate-exceeded` (member, transient),
 `document-size-limit-exceeded` (member, manual — the offending edit must be dropped,
 or reconnecting re-trips it), `document-deleted` (document, terminal),
-`edits-not-saved` (document, terminal — the three no-flush teardowns: escalation,
-generation invalidation, panic), `server-shutdown` (document, transient). The client
-branches on these literals, so changing one is a cross-repo change.
+`edits-not-saved` (document, terminal — the no-flush teardowns: escalation and
+panic), `server-shutdown` (document, transient), `update-not-accepted` (member,
+transient — an inbound update could not be admitted to the room's command queue;
+it was NOT applied, broadcast or saved, and the client should reconnect with
+backoff). The client branches on these literals, so changing one is a cross-repo
+change.
+
+**Adding a session-end code is a THREE-STAGE DEPLOY, in this order.** client-web's
+`classifySessionEnd` returns null for a code it does not know and the caller fails
+CLOSED — terminal, no reconnect — so emitting a new code to a client that has not
+shipped it turns a transient fault into a permanent disconnect. The order is
+therefore (1) client-web learns the code, (2) this service emits it, (3) any other
+caller that depends on it. `update-not-accepted` is at stage 2 as of this commit:
+it exists in the code and MUST NOT be deployed before client-web ships its
+classifier entry. `TestEverySessionEndCodeCarriesScopeAndDisposition` is the
+tripwire — it fails on any change to the code set until the client disposition is
+agreed and pinned.
 
 **Authorization is per WebSocket session.** READ and UPDATE are evaluated once, at
 connection open and BEFORE the room is materialized, and the resulting capability

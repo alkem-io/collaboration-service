@@ -405,7 +405,8 @@ func TestOnePersistResolvesEveryParkedBarrier(t *testing.T) {
 	}
 }
 
-// TestADroppedFrameEndsTheSessionAndBlocksAnyLaterBarrier is the A1 prerequisite.
+// TestARefusedFrameIsPoisonedAndTypedClosed covers the FIRST half of the A1
+// prerequisite: what Forward does at the moment an enqueue is refused.
 //
 // Forward used to DISCARD enqueue's refusal. A frame could vanish — the room left
 // Active, or the command buffer stayed full past its deadline — and the client
@@ -421,10 +422,15 @@ func TestOnePersistResolvesEveryParkedBarrier(t *testing.T) {
 // where the behaviour lives and it needs no wedged buffer or 30-second deadline to
 // reach deterministically.
 //
+// SCOPE, stated so the name does not overclaim: this proves the POISON IS SET and
+// the typed end is delivered. That a later request actually carries the poison to
+// a correlated failure is the other half, and it is proved end-to-end by
+// TestADroppedFrameThenARequestIsRefusedOnTheRunLoop below.
+//
 // Non-vacuity: restore Forward's discard of the return value and this fails at the
 // session-end assertion; keep the close but drop the poison Swap and the second
 // frame queues a second end.
-func TestADroppedFrameEndsTheSessionAndBlocksAnyLaterBarrier(t *testing.T) {
+func TestARefusedFrameIsPoisonedAndTypedClosed(t *testing.T) {
 	room := newBareRoom(t)
 	room.lc.state.Store(int32(stateDraining)) // every enqueue is refused
 	conn := &recordingConn{}
@@ -720,4 +726,81 @@ func TestForwardIsSafeWithoutAConnection(t *testing.T) {
 	if !session.dropped.Load() {
 		t.Fatal("the session was not poisoned when its frame was refused")
 	}
+}
+
+// TestADroppedFrameThenARequestIsRefusedOnTheRunLoop drives the COMBINED path the
+// A1 prerequisite is actually about, end to end, with no timing:
+//
+//	U is refused by enqueue  ->  the session is poisoned
+//	the room accepts work again
+//	R is accepted, carries sessionDropped, and comes back persist-failed
+//
+// The two halves matter together. Poisoning alone would be inert if the flag never
+// reached the run loop, and the seam test that calls handleDurabilityRequest with
+// true directly cannot show that Forward is what supplies it.
+//
+// Determinism comes from toggling the room's lifecycle state — the same seam the
+// enqueue-refusal tests already use — rather than wedging a 256-slot buffer for 30
+// seconds or building a fake scheduler.
+//
+// Non-vacuity: stop Forward threading s.dropped onto the command and this fails
+// with a `persisted`, because the room is clean and would answer immediately.
+func TestADroppedFrameThenARequestIsRefusedOnTheRunLoop(t *testing.T) {
+	room := newBareRoom(t)
+	conn := &recordingConn{}
+
+	// Join BEFORE the loop starts: nothing else is running, so touching room state
+	// here is safe and avoids racing the run loop for a member.
+	res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator)
+	if res.err != nil {
+		t.Fatalf("handleJoin: %v", res.err)
+	}
+	startRoom(room)
+	// Tear down THROUGH THE LOOP. releaseRoom calls teardown on the caller's
+	// goroutine, which races the running run loop over r.members — a harness race,
+	// but a real one, and the race detector is right to flag it.
+	t.Cleanup(func() {
+		room.enqueue(command{kind: cmdClose})
+		select {
+		case <-room.done:
+		case <-time.After(2 * time.Second):
+			t.Error("the room did not tear down")
+		}
+	})
+
+	session := &Session{room: room, id: res.id, conn: conn}
+
+	// 1. The room stops accepting work, so U's enqueue is refused.
+	room.lc.state.Store(int32(stateDraining))
+	session.Forward([]byte("the update that never lands"))
+	if !session.dropped.Load() {
+		t.Fatal("the session was not poisoned by the refused update")
+	}
+
+	// 2. The room accepts work again — a momentary backlog clearing, which is
+	//    exactly the transient condition the typed end tells the client to retry.
+	room.lc.state.Store(int32(stateActive))
+
+	// 3. The request is now ACCEPTED by the room, and must still be refused, because
+	//    it carries the session's poison with it.
+	requestDurability(&fakeClient{t: t, session: session}, "after-the-drop")
+
+	waitFor(t, "the request to be answered", func() bool { return conn.outcome("after-the-drop") != nil })
+	got := conn.outcome("after-the-drop")
+	if got.Kind != model.ControlPersistFailed {
+		t.Fatalf("a request following a DROPPED update resolved %s, want persist-failed; the service would be claiming durability for a mutation it never received", got.Kind)
+	}
+}
+
+// outcome returns the barrier control answering id, if one has arrived.
+func (c *recordingConn) outcome(id string) *model.ControlMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.controls {
+		if m.RequestID == id && (m.Kind == model.ControlPersisted || m.Kind == model.ControlPersistFailed) {
+			got := m
+			return &got
+		}
+	}
+	return nil
 }
