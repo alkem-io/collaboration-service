@@ -59,7 +59,7 @@ type countingMetrics struct {
 }
 
 func (m *countingMetrics) RoomOpened()                   { m.roomsOpen.Add(1) }
-func (m *countingMetrics) RoomClosed()                   { m.roomsClosed.Add(1) }
+func (m *countingMetrics) RoomClosed(string)             { m.roomsClosed.Add(1) }
 func (m *countingMetrics) ConnOpened()                   { m.connsOpen.Add(1) }
 func (m *countingMetrics) ConnClosed()                   { m.connsClosed.Add(1) }
 func (m *countingMetrics) SnapshotSaved()                { m.snapsSaved.Add(1) }

@@ -18,7 +18,7 @@ func TestPrometheusMetricsBridge(t *testing.T) {
 
 	m.RoomOpened()
 	m.RoomOpened()
-	m.RoomClosed()
+	m.RoomClosed("doc-1")
 	m.ConnOpened()
 	m.ConnClosed()
 	m.ConnOpened()

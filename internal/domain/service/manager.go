@@ -61,8 +61,12 @@ const shutdownDrainGrace = 5 * time.Second
 type Metrics interface {
 	// RoomOpened is called when a room is materialized.
 	RoomOpened()
-	// RoomClosed is called when a room is released.
-	RoomClosed()
+	// RoomClosed is called when a room is released. It carries the document id
+	// because a released room can no longer be accepting edits it cannot persist,
+	// so this is also where degraded-durability tracking for that document ends —
+	// on EVERY teardown, including the ones that neither restore durability nor
+	// escalate.
+	RoomClosed(doc string)
 	// ConnOpened is called when a connection joins a room.
 	ConnOpened()
 	// ConnClosed is called when a connection leaves or is evicted.
@@ -574,7 +578,7 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 	// open via RoomOpened). The shutdown-abort path tears down a never-registered
 	// room, so emitting RoomClosed there would underflow the rooms_active gauge.
 	if removed {
-		m.metrics.RoomClosed()
+		m.metrics.RoomClosed(string(id))
 	}
 	// The registry slot is NOT evicted here. It is evicted by the room's own
 	// teardown, which covers this path and one this path cannot reach: a room torn

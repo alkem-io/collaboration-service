@@ -639,9 +639,6 @@ func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
 				t.Setenv("METADATA_STORE", "rabbitmq")
 				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 				t.Setenv("RABBITMQ_HOST", "rmq")
-				t.Setenv("METADATA_STORE", "rabbitmq")
-				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
-				t.Setenv("RABBITMQ_HOST", "rmq")
 				t.Setenv("FILE_SERVICE_URL", "http://file-service:4003")
 				t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket")
 			}

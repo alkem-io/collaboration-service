@@ -104,7 +104,7 @@ func TestUnknownWireTypeIgnored(t *testing.T) {
 func TestNopMetricsCallable(t *testing.T) {
 	var m Metrics = NopMetrics{}
 	m.RoomOpened()
-	m.RoomClosed()
+	m.RoomClosed("doc-1")
 	m.ConnOpened()
 	m.ConnClosed()
 	m.SnapshotSaved()

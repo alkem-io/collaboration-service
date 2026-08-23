@@ -99,3 +99,84 @@ func TestEscalationClearsOnlyTheEscalatedDocument(t *testing.T) {
 		t.Fatalf("flush failures after A escalated = %v, want 2 (B's, not zero)", got)
 	}
 }
+
+// TestAClosedRoomStopsBeingCountedUndurable is the regression for a registry
+// leak that outlived the room.
+//
+// DocumentDurabilityRestored and DocumentEscalated each remove their document,
+// but a room can end without reaching EITHER. Concrete supported producers:
+//
+//  1. a document fails a flush, then an owner delete arrives — cmdCloseDeleted
+//     tears down with NO flush and no escalation;
+//  2. an empty room with SaveDebounce<=0 whose final flush fails — releaseIfEmpty
+//     accepts the loss and releases;
+//  3. shutdown paths that end a failing room without flushing.
+//
+// The room is gone, but its id stayed in the registry forever: the worst-case
+// gauges and collaboration_undurable_documents kept reporting a document no live
+// room owned, and the map never shrank. An operator would see a permanent alarm
+// with nothing behind it — which is the same class of blindness as the alarm that
+// silently cleared, just inverted.
+//
+// The drop belongs at the LIFECYCLE owner, not on the durability paths, because
+// only the lifecycle sees every ending. RoomClosed already fires exactly once per
+// released registered room, so it carries the id rather than a new method being
+// added. It does NOT mean "restored" — nothing was persisted, and
+// DurabilityEscalationsTotal remains the only data-loss signal.
+//
+// Non-vacuity: drop the delete from RoomClosed and this fails — A's alarm
+// survives its own teardown and undurable_documents stays at 2.
+func TestAClosedRoomStopsBeingCountedUndurable(t *testing.T) {
+	m := PrometheusMetrics{}
+	t.Cleanup(func() {
+		m.RoomClosed("doc-A")
+		m.RoomClosed("doc-B")
+	})
+
+	// Two failing documents. A is worse.
+	m.DocumentUndurable("doc-A", 4, 50*time.Second)
+	m.DocumentUndurable("doc-B", 2, 7*time.Second)
+	if got := gaugeValue(t, UndurableDocuments); got != 2 {
+		t.Fatalf("undurable documents = %v, want 2", got)
+	}
+
+	// A is deleted by its owner: torn down with no successful flush and no
+	// escalation. Neither durability path runs.
+	m.RoomClosed("doc-A")
+
+	if got := gaugeValue(t, UndurableDocuments); got != 1 {
+		t.Fatalf("undurable documents after a closed room = %v, want 1; the closed document is still being counted", got)
+	}
+	// B is still failing and its alarm must be intact — and now B is the worst.
+	if got := gaugeValue(t, UndurableFlushFailures); got != 2 {
+		t.Fatalf("flush failures = %v, want 2 (B's, which is still failing)", got)
+	}
+	if got := gaugeValue(t, UndurableSeconds); got != 7 {
+		t.Fatalf("undurable seconds = %v, want 7 (B's)", got)
+	}
+
+	// And closing the last one goes quiet.
+	m.RoomClosed("doc-B")
+	if got := gaugeValue(t, UndurableDocuments); got != 0 {
+		t.Fatalf("undurable documents after every room closed = %v, want 0", got)
+	}
+}
+
+// TestClosingANeverUndurableRoomIsHarmless pins that the drop is a no-op for the
+// overwhelmingly common case, so every room teardown can call it unconditionally
+// and an escalation followed by a teardown removes twice without harm.
+func TestClosingANeverUndurableRoomIsHarmless(t *testing.T) {
+	m := PrometheusMetrics{}
+	t.Cleanup(func() { m.RoomClosed("doc-failing") })
+
+	m.DocumentUndurable("doc-failing", 3, 30*time.Second)
+	m.RoomClosed("doc-healthy-never-failed")
+	m.RoomClosed("doc-healthy-never-failed") // twice: still a no-op
+
+	if got := gaugeValue(t, UndurableDocuments); got != 1 {
+		t.Fatalf("undurable documents = %v, want 1; closing unrelated healthy rooms must not disturb a live alarm", got)
+	}
+	if got := gaugeValue(t, UndurableFlushFailures); got != 3 {
+		t.Fatalf("flush failures = %v, want 3", got)
+	}
+}

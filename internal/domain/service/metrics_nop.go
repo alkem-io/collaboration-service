@@ -13,7 +13,7 @@ type NopMetrics struct{}
 func (NopMetrics) RoomOpened() {}
 
 // RoomClosed does nothing.
-func (NopMetrics) RoomClosed() {}
+func (NopMetrics) RoomClosed(string) {}
 
 // ConnOpened does nothing.
 func (NopMetrics) ConnOpened() {}

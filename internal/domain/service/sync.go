@@ -29,11 +29,14 @@ type syncOutcome struct {
 	// socket stays open, but the sender must resync before writing again: its
 	// refused struct leaves a gap in its own clock sequence.
 	rejectedSchema bool
-	// rejectedNotWritable is true when a mutating update arrived from a member
-	// that may not write (a viewer, or a collaborator downgraded mid-session by
-	// the inactivity sweep). Like rejectedSchema it refuses the WRITE, not the
-	// writer, and the sender must resync before writing again — the refused
-	// struct leaves the same gap in its clock sequence.
+	// rejectedNotWritable is true when a genuine EDIT (SyncMessageUpdate) arrived
+	// from a member that may not write — a viewer, or a collaborator downgraded
+	// mid-session by the inactivity sweep. Like rejectedSchema it refuses the
+	// WRITE, not the writer, and the sender must resync before writing again: the
+	// refused struct leaves the same gap in its clock sequence.
+	//
+	// It is deliberately FALSE for a handshake SyncStep2, which every client sends
+	// on connect and which is normally empty for a viewer.
 	rejectedNotWritable bool
 }
 
@@ -83,11 +86,27 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 		// origin; the update observer fans the delta to the other members and skips
 		// the sender.
 		if !canMutate {
-			// Refuse the write and SAY SO. Dropping it silently left the sender
-			// believing its edit had landed: it applied the struct locally, so its
-			// next update sits at clock k+1 against a server that never received k,
-			// stays pending forever, and the two documents never reconverge.
-			return syncOutcome{mutating: true, applied: false, rejectedNotWritable: true}, nil
+			// Refuse the write and SAY SO — but ONLY for a genuine edit.
+			//
+			// SyncMessageUpdate is a client pushing a change it has already applied
+			// locally. Dropped silently, the sender believes it landed: its next
+			// update sits at clock k+1 against a server that never received k, stays
+			// pending forever, and the two documents never reconverge. That is the
+			// case with a real producer — an in-session edit after the inactivity
+			// downgrade — and it gets the control frame.
+			//
+			// SyncMessageStep2 is the ORDINARY HANDSHAKE. Every client answers the
+			// server's Step1 with one, and for a viewer it is normally empty. Telling
+			// a viewer its update was rejected merely for connecting would make every
+			// supported read-only join surface an error and drop-and-resync its
+			// generation — churn manufactured out of a normal protocol exchange. A
+			// viewer with nothing to send has nothing refused, so it is dropped
+			// silently, exactly as before.
+			return syncOutcome{
+				mutating:            true,
+				applied:             false,
+				rejectedNotWritable: info.SyncType == protocol.SyncMessageUpdate,
+			}, nil
 		}
 		// Enforce MaxDocBytes BEFORE committing to the live doc (FR-024): an
 		// oversized update must never mutate or broadcast the authoritative doc and

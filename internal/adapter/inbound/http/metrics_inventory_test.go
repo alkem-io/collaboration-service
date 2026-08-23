@@ -124,7 +124,7 @@ func TestEveryMetricsHookMovesItsSeries(t *testing.T) {
 		setup  func()
 		call   func()
 	}{
-		{"RoomClosed", "collaboration_rooms_active", m.RoomOpened, m.RoomClosed},
+		{"RoomClosed", "collaboration_rooms_active", m.RoomOpened, func() { m.RoomClosed("doc-inv") }},
 		{"ConnClosed", "collaboration_connections_active", m.ConnOpened, m.ConnClosed},
 		{
 			"DocumentDurabilityRestored", "collaboration_undurable_flush_failures",
@@ -182,7 +182,7 @@ func seriesValue(t *testing.T, name string) float64 {
 func exerciseEveryMetricsHook() {
 	var m service.Metrics = PrometheusMetrics{}
 	m.RoomOpened()
-	m.RoomClosed()
+	m.RoomClosed("doc-inv")
 	m.ConnOpened()
 	m.ConnClosed()
 	m.SnapshotSaved()

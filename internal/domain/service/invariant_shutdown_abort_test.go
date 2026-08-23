@@ -19,8 +19,8 @@ type gaugeMetrics struct {
 	closed atomic.Int64
 }
 
-func (m *gaugeMetrics) RoomOpened() { m.opened.Add(1) }
-func (m *gaugeMetrics) RoomClosed() { m.closed.Add(1) }
+func (m *gaugeMetrics) RoomOpened()       { m.opened.Add(1) }
+func (m *gaugeMetrics) RoomClosed(string) { m.closed.Add(1) }
 
 // TestInvShutdownAbortNoGaugeUnderflow covers the singleflight shutdown-abort path
 // (spec 002 §6, FR-001) and its observability: a first-connect whose materialization

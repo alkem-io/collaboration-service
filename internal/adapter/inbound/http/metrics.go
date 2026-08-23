@@ -168,8 +168,28 @@ type PrometheusMetrics struct{}
 // RoomOpened increments the active-rooms gauge.
 func (PrometheusMetrics) RoomOpened() { RoomsActive.Inc() }
 
-// RoomClosed decrements the active-rooms gauge.
-func (PrometheusMetrics) RoomClosed() { RoomsActive.Dec() }
+// RoomClosed decrements the active-rooms gauge and ends degraded-durability
+// tracking for the document.
+//
+// The registry drop belongs HERE, at the lifecycle owner, not on the durability
+// paths. DocumentDurabilityRestored and DocumentEscalated each remove an entry,
+// but a room can end without reaching either: an owner delete arriving after a
+// failed flush tears down with no flush at all, and an empty room with
+// SaveDebounce<=0 accepts the loss and releases. Those documents would stay in
+// the registry forever, holding collaboration_undurable_documents and the worst
+// gauges at a value no live room owns.
+//
+// This is NOT "restored" — nothing was persisted, and the escalation counter
+// remains the only data-loss signal. It is "no longer accepting edits", which is
+// what the gauge measures. Removing an id that is not present is a no-op, so an
+// escalation followed by this teardown removes twice, harmlessly.
+func (PrometheusMetrics) RoomClosed(doc string) {
+	RoomsActive.Dec()
+	undurableMu.Lock()
+	defer undurableMu.Unlock()
+	delete(undurableDocs, doc)
+	publishUndurableLocked()
+}
 
 // ConnOpened increments the active-connections gauge.
 func (PrometheusMetrics) ConnOpened() { ConnectionsActive.Inc() }
