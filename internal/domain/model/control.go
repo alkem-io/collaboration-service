@@ -163,14 +163,24 @@ const (
 	// back with a backoff is the correct behaviour.
 	CodeServerShutdown SessionEndCode = "server-shutdown"
 
-	// CodeUpdateNotAccepted means an inbound update could not be ADMITTED to the
-	// room's command queue — the room had left Active, or the queue stayed full
-	// past its deadline. The update was NOT applied, NOT broadcast and NOT saved.
+	// CodeUpdateNotAccepted means an inbound update was refused by BACKPRESSURE:
+	// the room was ALIVE and its command buffer stayed full past the deadline. The
+	// update was NOT applied, NOT broadcast and NOT saved.
+	//
+	// BACKPRESSURE ONLY, and the narrowness is load-bearing. An enqueue is also
+	// refused when the room has left Active, and that case is deliberately SILENT
+	// here: the room is tearing down and will send its own AUTHORITATIVE
+	// document-scoped end (document-deleted, edits-not-saved, server-shutdown). A
+	// member-scoped transient end from the refusal path would reach the
+	// connection's terminal boundary first and make the real one be refused — so a
+	// deletion or a data-loss escalation would reach the user as "try again later".
+	// Teardown owns its own ending; this code speaks only for a live room that
+	// could not keep up.
 	//
 	// MEMBER scope: this is one connection's frame, and the room and every other
-	// member are unaffected. TRANSIENT disposition: the condition is a momentary
-	// server-side backlog or a room changing state, so the client should reconnect
-	// with backoff rather than treat it as final.
+	// member are unaffected. TRANSIENT disposition: a momentary server-side
+	// backlog, so the client should reconnect with backoff rather than treat it as
+	// final.
 	//
 	// It exists because the alternative was silence. The refusal used to be
 	// discarded, so the client kept editing a generation the server never received

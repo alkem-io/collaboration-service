@@ -127,10 +127,13 @@ without the reason. Codes: `update-rate-exceeded` (member, transient),
 or reconnecting re-trips it), `document-deleted` (document, terminal),
 `edits-not-saved` (document, terminal — the no-flush teardowns: escalation and
 panic), `server-shutdown` (document, transient), `update-not-accepted` (member,
-transient — an inbound update could not be admitted to the room's command queue;
-it was NOT applied, broadcast or saved, and the client should reconnect with
-backoff). The client branches on these literals, so changing one is a cross-repo
-change.
+transient — a live room's command buffer stayed full past its deadline, so an
+inbound update was NOT applied, broadcast or saved and the client should reconnect
+with backoff). That code is for BACKPRESSURE ONLY: an enqueue refused because the
+room is tearing down is deliberately silent, because teardown sends its own
+authoritative document-scoped end and a competing member-scoped one would preempt
+it — reporting a deletion or a data-loss escalation as a retry.
+The client branches on these literals, so changing one is a cross-repo change.
 
 **Adding a session-end code is a THREE-STAGE DEPLOY, in this order.** client-web's
 `classifySessionEnd` returns null for a code it does not know and the caller fails
