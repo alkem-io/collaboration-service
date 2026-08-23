@@ -6,7 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
@@ -254,36 +253,6 @@ func TestUnknownDocumentIsRefusedWithoutMaterializing(t *testing.T) {
 // client whose unsaved work had just been discarded could not tell this from a
 // network blip and would reconnect showing an older document as if nothing had
 // happened.
-func TestInvalidatedGenerationTellsMembersTheirEditsAreGone(t *testing.T) {
-	room, reg, _ := dirtyRoomWithRegistry(t, "doc-invalidated-end")
-	a := newFakeClient(t)
-	// Join before the loop starts: nothing else is running, so touching room state
-	// here is safe and avoids racing the run loop for a member.
-	if res := room.handleJoin(a, a.identity, model.ModeCollaborator); res.err != nil {
-		t.Fatalf("handleJoin: %v", res.err)
-	}
-	startRoom(room)
-
-	if err := reg.Invalidate(context.Background(), backend.DocumentID("doc-invalidated-end")); err != nil {
-		t.Fatalf("Invalidate: %v", err)
-	}
-	select {
-	case <-room.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("invalidation did not tear the room down")
-	}
-
-	end, _ := a.sessionEnd()
-	if end == nil {
-		t.Fatal("the member's socket was abandoned without a session end")
-	}
-	if end.Code != model.CodeEditsNotSaved {
-		t.Errorf("session end = %q, want %q: the generation was dropped without persisting", end.Code, model.CodeEditsNotSaved)
-	}
-	if !hasControlCode(a, model.CodeEditsNotSaved) {
-		t.Error("the member was not told its unsaved edits were discarded")
-	}
-}
 
 // serverOwnedMeta models the production ownership boundary: `server` owns the
 // metadata row and removes it itself. Collab has no Delete on the MetadataStore

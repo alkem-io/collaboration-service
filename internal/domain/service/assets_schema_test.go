@@ -379,12 +379,12 @@ func TestPoisonOnTheRealRoomPath(t *testing.T) {
 	})
 
 	// Drain the run loop deterministically instead of sleeping. The command channel
-	// is FIFO, so: the poison is already queued; queue an explicit persist behind it;
+	// is FIFO, so: the poison is already queued; queue a no-op command behind it;
 	// then join a third member, whose cmdJoin is queued behind THAT and whose reply
 	// only comes back once the run loop has processed both. When Join returns, the
 	// poison has been handled and a persist has actually run — so if the rejection
 	// had marked the room dirty, a snapshot would exist by now.
-	room.enqueue(command{kind: cmdPersist})
+	room.enqueue(command{kind: cmdLeave})
 	barrier := newFakeClient(t)
 	barrier.join(mgr, doc, model.ContentTypeWhiteboard)
 

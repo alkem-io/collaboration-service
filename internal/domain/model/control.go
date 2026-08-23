@@ -237,9 +237,6 @@ const (
 	// ReasonRoomCapacityReached marks a read-only/refused client because the room
 	// is at its connection cap (ROOM_CAPACITY_REACHED).
 	ReasonRoomCapacityReached ReadOnlyReason = "room-capacity-reached"
-	// ReasonMultiUserNotAllowed marks a read-only/refused client because the
-	// document is single-user (multiUserNotAllowed) and already occupied.
-	ReasonMultiUserNotAllowed ReadOnlyReason = "multi-user-not-allowed"
 )
 
 // CollaboratorModeReason is the code (OPEN-1) explaining a collaborator-mode
@@ -252,7 +249,7 @@ const (
 	// ReasonInactivity marks an idle collaborator downgraded to viewer after an
 	// explicitly configured inactivity window (FR-014).
 	ReasonInactivity CollaboratorModeReason = "inactivity"
-	// ReasonRoomCapacityReached and ReasonMultiUserNotAllowed are shared with the
+	// ReasonRoomCapacityReached is shared with the
 	// read-only reasons above; they also surface as collaborator-mode reasons.
 )
 

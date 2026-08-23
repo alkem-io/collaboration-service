@@ -38,7 +38,7 @@ func (r *Room) onFlushSucceeded() {
 		zap.Duration("undurable_for", r.undurableFor()))
 	r.flushFailures = 0
 	r.undurableSince = time.Time{}
-	r.metrics.DocumentDurabilityRestored()
+	r.metrics.DocumentDurabilityRestored(string(r.id))
 	// FR-027's restore half — telling collaborators their work is safe again — is
 	// carried by persist's own unconditional `saved` broadcast, which runs
 	// immediately after this. Emitting one here too sent the client TWO identical
@@ -61,7 +61,7 @@ func (r *Room) onFlushFailed(err error) {
 	// Emitted on EVERY failure, not only at escalation: the degraded window must be
 	// visible before anyone is disconnected, or the first signal an operator gets is
 	// users being kicked off (FR-026, SC-013).
-	r.metrics.DocumentUndurable(r.flushFailures, undurable)
+	r.metrics.DocumentUndurable(string(r.id), r.flushFailures, undurable)
 
 	threshold := r.cfg.Limits.FlushFailureThreshold
 	if threshold <= 0 {
@@ -100,7 +100,7 @@ func (r *Room) escalateUndurable(undurable time.Duration, err error) {
 		zap.Int("consecutive_failures", r.flushFailures),
 		zap.Duration("undurable_for", undurable),
 		zap.Error(err))
-	r.metrics.DocumentEscalated(undurable)
+	r.metrics.DocumentEscalated(string(r.id), undurable)
 	// Tear down WITHOUT flushing: the whole reason we are here is that the store
 	// will not accept writes, and the teardown matrix forbids persisting a document
 	// whose durability is in doubt (FR-011a).

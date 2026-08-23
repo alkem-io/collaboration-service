@@ -20,7 +20,6 @@
 //	REQUEST/REPLY (publish to the server queue, await a reply on a reply queue):
 //	  pattern "collaboration-save"   data SaveData    → reply { success: true } | { error }
 //	  pattern "collaboration-fetch"  data FetchData   → reply FetchReply
-//	  pattern "collaboration-info"   data InfoData    → reply InfoReply
 //	FIRE-AND-FORGET (publish, no reply):
 //	  pattern "collaboration-contribution"  data ContributionData
 //
@@ -73,25 +72,6 @@ type FetchReply struct {
 	Error           string `json:"error,omitempty"`
 }
 
-// InfoData is the collaboration-info request payload: who is asking about which
-// document (carried forward from the legacy info pattern, unified field names —
-// actorId, never userId, per constitution §III).
-type InfoData struct {
-	ActorID string `json:"actorId"`
-	ID      string `json:"id"`
-}
-
-// InfoReply carries the collaborator-mode inputs forward from BOTH legacy
-// dialects: read + update + maxCollaborators (whiteboard's 3 fields), plus the
-// optional isMultiUser memos added. maxCollaborators is a pointer so "unset"
-// (whiteboard's number|undefined) is distinguishable from zero.
-type InfoReply struct {
-	Read             bool  `json:"read"`
-	Update           bool  `json:"update"`
-	MaxCollaborators *int  `json:"maxCollaborators,omitempty"`
-	IsMultiUser      *bool `json:"isMultiUser,omitempty"`
-}
-
 // ContributionData is the collaboration-contribution event payload: the per-
 // window set of contributing actors (carried forward from the legacy
 // collaboration-memo-contribution { memoId, users } and contribution
@@ -110,6 +90,5 @@ type User struct {
 const (
 	PatternSave         = "collaboration-save"
 	PatternFetch        = "collaboration-fetch"
-	PatternInfo         = "collaboration-info"
 	PatternContribution = "collaboration-contribution"
 )

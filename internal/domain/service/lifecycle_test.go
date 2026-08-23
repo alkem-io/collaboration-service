@@ -298,10 +298,9 @@ func TestDoubleLeaveAndForwardAfterReleaseAreSafe(t *testing.T) {
 // The durability signals are no-ops in this counter: these tests predate them and
 // assert on room/connection/snapshot counts, so absorbing them keeps the double
 // satisfying Metrics without pretending to observe what it does not check.
-func (m *countingMetrics) DocumentUndurable(int, time.Duration) {}
-func (m *countingMetrics) DocumentDurabilityRestored()          {}
-func (m *countingMetrics) DocumentEscalated(time.Duration)      {}
-func (m *countingMetrics) GenerationInvalidated()               {}
+func (m *countingMetrics) DocumentUndurable(string, int, time.Duration) {}
+func (m *countingMetrics) DocumentDurabilityRestored(string)            {}
+func (m *countingMetrics) DocumentEscalated(string, time.Duration)      {}
 
 // CloseAfterDrain implements service.Conn.
 func (c *erroringConn) CloseAfterDrain(_ model.SessionEnd) {}

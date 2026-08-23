@@ -97,6 +97,10 @@ func (r ErrorResponse) Render(w http.ResponseWriter, code int) {
 // @Summary     Create (pre-register) a collaboration document
 // @Description Pre-registers a document's metadata for the standalone (no-bus)
 // @Description deployment so it exists in the index ahead of its first connect.
+// @Description NOT MOUNTED in the Alkemio deployment: the route is registered only
+// @Description when METADATA_STORE != rabbitmq, because there `server` owns the row
+// @Description and creates it. Documenting it unconditionally described an endpoint
+// @Description that does not exist in the topology the spec is read against.
 // @Tags        collaboration
 // @Accept      json
 // @Produce     json

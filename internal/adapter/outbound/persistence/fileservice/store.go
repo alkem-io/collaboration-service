@@ -350,7 +350,38 @@ func (s *Store) fetch(ctx context.Context, pointer string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("file-service fetch: unexpected status %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return readBounded(resp.Body, s.cfg.MaxUploadSize, pointer)
+}
+
+// readBounded reads a checkpoint body under the SAME size contract the write path
+// enforces, and reports an oversize blob as an error naming the limit instead of
+// buffering it whole.
+//
+// The write path has always refused a snapshot above MaxUploadSize (SaveCheckpoint
+// below), so a stored blob past that limit is by definition one this service did
+// not write — a content migration, a hand-repaired file, or the wrong object
+// behind the pointer. Reading it with a bare io.ReadAll materialised the entire
+// body in memory before anything looked at its size, on the room-materialisation
+// path: one OOM per concurrent cold open, and no error that named a size.
+//
+// The +1 is what makes the detection exact. LimitReader(limit) alone cannot tell
+// "exactly at the limit" from "truncated at the limit" — both yield limit bytes —
+// so it would either reject a legal maximal blob or silently accept a truncated
+// one AS a complete document, and a truncated Yjs update decodes to a SHORTER
+// document with no error. Reading one byte past the limit distinguishes them.
+func readBounded(body io.Reader, limit int64, pointer string) ([]byte, error) {
+	if limit <= 0 {
+		return io.ReadAll(body)
+	}
+	b, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%w: file %q behind the document pointer exceeds the %d-byte checkpoint limit",
+			persistence.ErrCorrupt, pointer, limit)
+	}
+	return b, nil
 }
 
 func readErrBody(r io.Reader) string {

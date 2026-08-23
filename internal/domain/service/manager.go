@@ -76,17 +76,17 @@ type Metrics interface {
 	// and since is how long it has been in that state. It is emitted on EVERY
 	// failed flush, not only at escalation, so the degraded window is visible
 	// before anyone is disconnected (FR-026).
-	DocumentUndurable(consecutive int, since time.Duration)
+	// doc identifies WHICH document, so the reporter can keep per-document state
+	// and publish a correct aggregate. It is deliberately NOT a Prometheus label:
+	// one series per document is unbounded cardinality.
+	DocumentUndurable(doc string, consecutive int, since time.Duration)
 	// DocumentDurabilityRestored reports that a document that had been failing to
 	// persist has succeeded again.
-	DocumentDurabilityRestored()
+	DocumentDurabilityRestored(doc string)
 	// DocumentEscalated reports that repeated persist failures crossed the
 	// threshold and the document was torn down, DISCARDING undurable edits.
 	// undurableFor is how long it had been failing (FR-028).
-	DocumentEscalated(undurableFor time.Duration)
-	// GenerationInvalidated reports that a document's in-memory generation was
-	// poisoned and must be reloaded from storage.
-	GenerationInvalidated()
+	DocumentEscalated(doc string, undurableFor time.Duration)
 	// FanoutPublished is called on each successful cross-pod publish, carrying
 	// the publish latency (R10 fan-out lag).
 	FanoutPublished(lag time.Duration)
@@ -530,6 +530,23 @@ func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content mode
 	stale := m.deleteEpoch != expectedEpoch
 	m.mu.Unlock()
 	if stale {
+		// The room may have been MATERIALIZED for this caller — registered, counted
+		// and started — and this refusal means no cmdJoin will ever follow. The idle
+		// timer is armed only by cmdJoin/cmdLeave/cmdMessage, so without this the
+		// room's goroutine, its Y.Doc, its registry handle and its hub subscription
+		// are held for the life of the process, rooms_active is inflated, and it
+		// keeps applying peer updates and flushing for a document nobody is editing.
+		//
+		// Releasing it directly from here would race a concurrent caller that DID
+		// pass its own epoch check and is about to join. Enqueueing instead makes the
+		// decision on the room's own single-writer loop, where an ordinary cmdLeave
+		// already re-evaluates emptiness and arms the idle timer: a real join queued
+		// ahead of this wins and the room stays, otherwise the room is released by
+		// the path that already owns empty rooms. No new teardown route, and no
+		// race to reason about.
+		if room, ok := v.(*Room); ok && room != nil {
+			room.enqueue(command{kind: cmdLeave})
+		}
 		return nil, errRoomUnavailable
 	}
 	return v.(*Room), nil

@@ -337,31 +337,6 @@ func TestIdleTimeoutZeroReleasesImmediately(t *testing.T) {
 	waitFor(t, "immediate release", func() bool { return mgr.RoomCount() == 0 })
 }
 
-// --- room.go: dispatch cmdPersist ---
-
-// TestDispatchPersistFlushesDirtyDoc asserts the cmdPersist command flushes a
-// dirty doc to the blob store on the run loop (the explicit persist command path,
-// distinct from the debounce timer).
-func TestDispatchPersistFlushesDirtyDoc(t *testing.T) {
-	room := newBareRoom(t)
-	insertText(room.doc, "persist-me ")
-	room.dirty = true
-
-	armNoop := func() {}
-	idle := time.NewTimer(time.Hour)
-	defer idle.Stop()
-	if !room.dispatch(command{kind: cmdPersist}, armNoop, armNoop, idle) {
-		t.Fatal("cmdPersist must keep the room running")
-	}
-	if room.dirty {
-		t.Fatal("cmdPersist did not flush the dirty doc")
-	}
-	store := room.deps.Checkpoint.(*persistinprocess.Store)
-	if _, err := store.LoadCheckpoint(context.Background(), "unit"); err != nil {
-		t.Fatalf("cmdPersist did not write stored state: %v", err)
-	}
-}
-
 // --- room.go: evictAwareness nil-frame guard ---
 
 // TestEvictAwarenessFansRemovalForTrackedMember asserts evictAwareness builds and

@@ -99,13 +99,13 @@ func TestEnqueueGivesUpWhenTheProducerContextExpires(t *testing.T) {
 	r.lc.state.Store(int32(stateActive))
 	// A full buffer with no run loop draining it: every send must take the slow path.
 	r.commands = make(chan command, 1)
-	r.commands <- command{kind: cmdPersist}
+	r.commands <- command{kind: cmdLeave}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
-	if r.enqueueCtx(ctx, command{kind: cmdPersist}) {
+	if r.enqueueCtx(ctx, command{kind: cmdLeave}) {
 		t.Fatal("enqueue succeeded against a full buffer with no consumer")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -122,7 +122,7 @@ func TestEnqueueRefusesOnceTheRoomLeavesActive(t *testing.T) {
 
 	for _, state := range []roomState{stateMaterializing, stateDraining, stateClosed} {
 		r.lc.state.Store(int32(state))
-		if r.enqueue(command{kind: cmdPersist}) {
+		if r.enqueue(command{kind: cmdLeave}) {
 			t.Fatalf("enqueue accepted work while the room was %v; only an Active room may take new commands", state)
 		}
 	}

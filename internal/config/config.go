@@ -355,6 +355,13 @@ func loadAdapterConfig(cfg *Config) error {
 	if err := loadCheckpointStoreConfig(cfg); err != nil {
 		return err
 	}
+	// LAST, on purpose: a deployment missing FILE_SERVICE_URL should be told THAT,
+	// by the loader that owns it, rather than being told its topology is
+	// unsupported because the index half happens to be wrong too. This check is
+	// about a pair that is individually well-formed and jointly broken.
+	if err := rejectEphemeralIndexBehindDurableBlobs(cfg); err != nil {
+		return err
+	}
 	return loadAuthConfig(cfg)
 }
 
@@ -375,14 +382,49 @@ func loadAdapterConfig(cfg *Config) error {
 // store), so refusing this pair removes no capability. Multi-pod durable operation
 // returns when an ownership mechanism does.
 func rejectUnsupportedTopology(cfg *Config) error {
-	if cfg.HubMode != HubRedis || cfg.CheckpointStore != CheckpointStoreFileService {
-		return nil
+	if cfg.HubMode == HubRedis && cfg.CheckpointStore == CheckpointStoreFileService {
+		return unsupportedRedisDurablePair()
 	}
+	return nil
+}
+
+func unsupportedRedisDurablePair() error {
 	return fmt.Errorf(
 		"unsupported topology: HUB_MODE=redis with CHECKPOINT_STORE=file-service has no document ownership mechanism, " +
 			"so every pod flushes the whole document and two pods that diverge overwrite each other, " +
 			"silently discarding edits the later writer never received; " +
 			"supported: a single pod (HUB_MODE=inmemory) with CHECKPOINT_STORE=file-service")
+}
+
+// rejectEphemeralIndexBehindDurableBlobs is checked AFTER the redis pair above,
+// because a deployment that gets both wrong should be told about the fan-out
+// problem first: that one is a data-loss race between pods, this one is a startup
+// misconfiguration, and the operator fixing them needs the worse diagnosis first.
+func rejectEphemeralIndexBehindDurableBlobs(cfg *Config) error {
+	// A DURABLE blob store behind an EPHEMERAL document index is not a topology,
+	// it is a silent total outage.
+	//
+	// The in-process index starts empty on every boot and Join refuses any id it
+	// has never heard of. So every single connection is refused with
+	// ErrDocumentUnknown, which is deliberately rendered as close 1008 "forbidden"
+	// — indistinguishable on the wire from an authorization failure, and treated by
+	// client-web as TERMINAL and never retried. Meanwhile /healthz stays green and
+	// the startup log prints a topology that looks entirely plausible.
+	//
+	// It is reachable by omitting, renaming or misspelling ONE variable, because
+	// METADATA_STORE is the one selector that still defaults. HUB_MODE and
+	// CHECKPOINT_STORE were both made mandatory for exactly this failure mode; this
+	// closes the same hole for the pair rather than changing that default, so the
+	// intentional standalone configuration (in-memory index AND in-process blobs)
+	// keeps working untouched.
+	if cfg.CheckpointStore == CheckpointStoreFileService && cfg.MetadataStore == MetadataStoreInMemory {
+		return fmt.Errorf(
+			"unsupported topology: CHECKPOINT_STORE=file-service with METADATA_STORE=inmemory stores documents durably " +
+				"behind an index that is empty on every restart, so every connection is refused as an unknown document " +
+				"— reported to clients as a permission failure, never retried, while the process looks healthy; " +
+				"set METADATA_STORE=rabbitmq for the durable topology, or CHECKPOINT_STORE=inline for standalone")
+	}
+	return nil
 }
 
 func loadHubConfig(cfg *Config) error {

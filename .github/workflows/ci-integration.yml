@@ -67,7 +67,15 @@ jobs:
       # than the management API's statistics interval, and a 30s first tier — was
       # deleted along with the tiers themselves, so this lane is now bounded by the
       # work rather than by RabbitMQ's own clocks.
+      # -race is the point of running these tags in CI at all. The two-pod fan-out,
+      # materialization-race, lifecycle and JS-interop suites exist to prove the
+      # single-writer, hub and teardown invariants, and they are the ONLY suites the
+      # untagged lane never builds — so without this they were the concurrency tests
+      # nothing race-checked anywhere in CI. The Makefile sets GOFLAGS := -race for
+      # the same targets locally, so this also removes a local/CI divergence.
       - name: Integration + e2e + coverage gate (≥95%)
+        env:
+          GOTESTFLAGS: -race -count=1
         run: ./.scripts/coverage-gate.sh 95.0
 
       - name: Upload coverage profile

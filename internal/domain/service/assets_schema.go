@@ -122,6 +122,20 @@ func cloneDoc(src *ycrdt.Doc, guid string) (*ycrdt.Doc, error) {
 	return dst, nil
 }
 
+// validateStoredContent applies the cold-load locator check that belongs to this
+// document's content type. One entry point so a new content type cannot quietly
+// inherit "no validation" by being absent from a conditional.
+func validateStoredContent(doc *ycrdt.Doc, content model.ContentType) error {
+	switch content {
+	case model.ContentTypeWhiteboard:
+		return validateAssetsRoot(doc)
+	case model.ContentTypeMemo:
+		return validateMemoImages(doc)
+	default:
+		return nil
+	}
+}
+
 // memoRoot is the fragment y-prosemirror binds a memo to.
 const memoRoot = "default"
 

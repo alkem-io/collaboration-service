@@ -59,7 +59,9 @@ ports. Adapters implement them:
   single pod (`HUB_MODE=inmemory`) with the durable store.
 - `metadatastore/{inmemory,rabbitmq}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
-- `auth/{open,authzeval}` — `Auth` (handshake authN) + `AuthZ` (per-document)
+- `auth/{header,open,authzeval}` — `Auth` (handshake authN: `header` is the Alkemio
+  production adapter, `open` is standalone) + `AuthZ` (per-document: `authzeval` /
+  `open`)
 
 ### Ports (cross-repo contracts)
 
@@ -67,7 +69,7 @@ ports. Adapters implement them:
 |---|---|
 | `hub.Hub` | `specs/003-go-yjs-core-port/contracts/hub.md` (multi-pod fan-out) |
 | `MetadataStore` | `.../contracts/persistence-ports.md` (metadata/index) |
-| `BlobStore` | `.../contracts/persistence-ports.md` (content-blob) |
+| `persistence.CheckpointStore` | `.../contracts/persistence-ports.md` (content-blob) — the CORE's contract, implemented by `persistence/{inprocess,fileservice}`; there is no `BlobStore` port in this repo |
 | `Auth` | `.../contracts/ws-protocol.md` (handshake AuthN) |
 | `AuthZ` | `.../contracts/ws-protocol.md` (per-document AuthZ, evaluated once per session) |
 | lifecycle main queue | frozen argument table, mirrored by `server` — see `internal/adapter/inbound/lifecycle/topology.go` |

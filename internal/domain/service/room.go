@@ -94,7 +94,6 @@ const (
 	cmdJoin cmdKind = iota
 	cmdLeave
 	cmdMessage
-	cmdPersist
 	cmdClose
 	// cmdCloseDeleted reacts to the owner deleting the document, on the run loop:
 	// disconnect clients (session-end/document-deleted) and release the room. It
@@ -613,14 +612,24 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 		// before this existed would otherwise reload forever, which is exactly the
 		// client discard-and-reseed loop.
 		//
-		// Whiteboards only: applyConvention creates the files root for whiteboards
-		// and an XmlFragment for memos, and inspecting a root MATERIALIZES it, so
-		// validating a memo here would add a files map to a document that should not
-		// have one.
-		if r.content == model.ContentTypeWhiteboard {
-			if verr := validateAssetsRoot(doc); verr != nil {
-				return nil, fmt.Errorf("stored document %s violates the assets-root contract: %w", id, verr)
-			}
+		// BOTH content types, each through its own validator.
+		//
+		// This was whiteboard-only, justified by "inspecting a root MATERIALIZES it,
+		// so validating a memo here would add a files map to a document that should
+		// not have one". That reasoning was true when it was written and is not true
+		// now: validateMemoImages reads the memo's OWN XmlFragment root, which
+		// applyConvention has just materialized on the line above, and touches
+		// nothing else. It cannot add a files map because it never looks at one.
+		//
+		// Leaving memos out left them with no cold-load check at all, so a memo
+		// carrying a legacy inline data: src — from the client generation that still
+		// had the dataURL paste fallback, or migrated from the old service — loaded
+		// happily, poisoned the shadow, and then had EVERY subsequent update rejected
+		// against pre-existing poison. The client discards its generation, reloads
+		// server state, and reloads the same poison: precisely the discard-and-reseed
+		// loop this check exists to prevent, running forever.
+		if verr := validateStoredContent(doc, r.content); verr != nil {
+			return nil, fmt.Errorf("stored document %s violates the assets-root contract: %w", id, verr)
 		}
 		return doc, nil
 	})
@@ -883,10 +892,6 @@ func (r *Room) run() {
 				armSave()
 			}
 
-		case <-r.handle.Done():
-			r.teardownInvalidated()
-			return
-
 		case <-saveTimer.C:
 			r.persistNow()
 			// persistNow can tear this room down: a flush failing past the threshold
@@ -979,9 +984,6 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 
 	case cmdMessage:
 		r.handleMessageCmd(cmd, armSave, armIdle)
-
-	case cmdPersist:
-		r.persistNow()
 
 	case cmdCloseDeleted:
 		// No flush hook. The owner deleted the document and `server` already removed
@@ -1560,6 +1562,25 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		return false
 	}
 
+	// A write from a member that may not write is refused the same way, and for the
+	// same reason: silence is what makes it dangerous. The sender applied the
+	// struct locally and, told nothing, keeps writing at k+1, k+2 against a server
+	// that never received k — every one of them pending behind the missing struct,
+	// forever. It needs the same drop-and-resync recovery the schema branch above
+	// triggers, so it gets the same signal.
+	//
+	// This reports the CURRENT capability; it does not change it. Restoring write
+	// access is a separate question and deliberately not answered here.
+	if outcome.rejectedNotWritable {
+		if ctrl := encodeControl(model.ControlMessage{
+			Kind:  model.ControlUpdateRejected,
+			Error: "update rejected: this session is read-only",
+		}); ctrl != nil {
+			r.sendTo(src, ctrl)
+		}
+		return false
+	}
+
 	if outcome.applied {
 		// A collaborator just wrote: record activity (resets the inactivity
 		// downgrade timer) and record the actor for the contribution window.
@@ -1630,6 +1651,13 @@ func (r *Room) applyWouldExceedMaxDocBytes(update []byte) bool {
 		return false
 	}
 	scratch := newRoomDoc(string(r.id))
+	// A Doc registers handlers and accelerators, so abandoning one leaks a whole
+	// document — the invariant cloneDoc states in this same package and honours.
+	// This function returns on five separate paths and every one of them abandoned
+	// the scratch, on a hot path: past half of MaxDocBytes the cheap skip stops
+	// firing and this runs on EVERY mutating update. Deferring covers all five,
+	// including the two that return early on an encode failure.
+	defer scratch.Destroy()
 	curr, err := ycrdt.EncodeStateAsUpdateV2(r.doc, nil)
 	if err != nil {
 		r.logger.Error("budget check: encoding live doc failed", zap.String("doc", string(r.id)), zap.Error(err))
@@ -1893,20 +1921,6 @@ func (r *Room) armIdleTimer(idleTimer *time.Timer) {
 		return
 	}
 	idleTimer.Reset(r.cfg.IdleTimeout)
-}
-
-// teardownInvalidated tears the room down after the registry poisoned this
-// document's generation. It does NOT flush: the in-memory copy may have diverged
-// from durable state, and writing a document of doubtful integrity over good
-// stored content is precisely the failure the teardown-flush matrix exists to
-// prevent (FR-011a). New acquisitions reload from persistence.
-func (r *Room) teardownInvalidated() {
-	r.logger.Warn("document generation invalidated; tearing down without persist",
-		zap.String("doc", string(r.id)))
-	r.metrics.GenerationInvalidated()
-	// Same client-visible outcome as escalation: this generation is abandoned
-	// without being persisted, so edits since the last flush are lost.
-	r.teardown(model.NewSessionEnd(model.CodeEditsNotSaved), nil)
 }
 
 // releaseIfEmpty releases an idle room that has no members left, reporting

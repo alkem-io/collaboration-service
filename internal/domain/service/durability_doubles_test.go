@@ -87,7 +87,7 @@ type undurableSample struct {
 	connClosedSoFar int
 }
 
-func (m *durabilityMetrics) DocumentUndurable(consecutive int, since time.Duration) {
+func (m *durabilityMetrics) DocumentUndurable(_ string, consecutive int, since time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.undurable = append(m.undurable, undurableSample{
@@ -95,13 +95,13 @@ func (m *durabilityMetrics) DocumentUndurable(consecutive int, since time.Durati
 	})
 }
 
-func (m *durabilityMetrics) DocumentDurabilityRestored() {
+func (m *durabilityMetrics) DocumentDurabilityRestored(string) {
 	m.mu.Lock()
 	m.restored++
 	m.mu.Unlock()
 }
 
-func (m *durabilityMetrics) DocumentEscalated(undurableFor time.Duration) {
+func (m *durabilityMetrics) DocumentEscalated(_ string, undurableFor time.Duration) {
 	m.mu.Lock()
 	m.escalated = append(m.escalated, undurableFor)
 	m.mu.Unlock()

@@ -323,21 +323,6 @@ func TestContributionPayloadShape(t *testing.T) {
 	}
 }
 
-func TestInfoReplyOptionalFields(t *testing.T) {
-	// maxCollaborators and isMultiUser are optional (whiteboard omits isMultiUser;
-	// both omit maxCollaborators when unknown).
-	raw, _ := json.Marshal(InfoReply{Read: true, Update: false})
-	if contains(string(raw), "maxCollaborators") || contains(string(raw), "isMultiUser") {
-		t.Errorf("unset optionals leaked: %s", raw)
-	}
-	maxColl := 8
-	multi := true
-	raw, _ = json.Marshal(InfoReply{Read: true, Update: true, MaxCollaborators: &maxColl, IsMultiUser: &multi})
-	if !contains(string(raw), `"maxCollaborators":8`) || !contains(string(raw), `"isMultiUser":true`) {
-		t.Errorf("set optionals missing: %s", raw)
-	}
-}
-
 func TestConnectValidates(t *testing.T) {
 	if _, _, err := Connect(Config{Queue: "q"}); err == nil {
 		t.Error("expected Connect without URL to error")

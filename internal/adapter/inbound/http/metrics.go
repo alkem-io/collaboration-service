@@ -98,12 +98,19 @@ var (
 	// undurable right now", which a monotonic counter cannot answer.
 	UndurableFlushFailures = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "collaboration_undurable_flush_failures",
-		Help: "Consecutive failed flushes for the most recently failing document (0 when durable).",
+		Help: "Consecutive failed flushes for the WORST currently-failing document (0 when all durable).",
+	})
+	// UndurableDocuments is how many documents are undurable right now. It is what
+	// distinguishes "one room is struggling" from "the store is down", which the
+	// two worst-case gauges below cannot express on their own.
+	UndurableDocuments = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "collaboration_undurable_documents",
+		Help: "Documents currently accepting edits they cannot persist (0 when all durable).",
 	})
 	// UndurableSeconds is how long the current undurable window has lasted.
 	UndurableSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "collaboration_undurable_seconds",
-		Help: "Seconds the most recently failing document has been accepting edits it cannot persist (0 when durable).",
+		Help: "Seconds the WORST currently-failing document has been accepting edits it cannot persist (0 when all durable).",
 	})
 	// DurabilityEscalationsTotal counts rooms torn down after repeated persist
 	// failures, DISCARDING their unsaved edits. Any non-zero value is data loss,
@@ -120,11 +127,6 @@ var (
 		Help:    "How long an escalated document had been undurable before its edits were discarded.",
 		Buckets: prometheus.ExponentialBuckets(1, 2, 10),
 	})
-	// GenerationInvalidationsTotal counts poisoned in-memory generations.
-	GenerationInvalidationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "collaboration_generation_invalidations_total",
-		Help: "Document generations poisoned and reloaded from storage.",
-	})
 )
 
 // InitMetrics registers the service collectors on the dedicated registry,
@@ -138,10 +140,10 @@ func InitMetrics() {
 			ConnectionsActive,
 			SnapshotsTotal,
 			UndurableFlushFailures,
+			UndurableDocuments,
 			UndurableSeconds,
 			DurabilityEscalationsTotal,
 			EscalationUndurableSeconds,
-			GenerationInvalidationsTotal,
 			FanoutTotal,
 			FanoutLagSeconds,
 			ContributingActors,
@@ -181,6 +183,50 @@ func (PrometheusMetrics) SnapshotSaved() { SnapshotsTotal.WithLabelValues("saved
 // SnapshotFailed counts a failed snapshot persist.
 func (PrometheusMetrics) SnapshotFailed() { SnapshotsTotal.WithLabelValues("error").Inc() }
 
+// undurableDocs tracks which documents are CURRENTLY failing to persist, so the
+// exported gauges can describe the platform rather than whichever room reported
+// last.
+//
+// Why a registry and not a label: one series per document is unbounded
+// cardinality, the anti-pattern ContributingActors already documents. Why a
+// registry and not a bare gauge: a bare Set() is last-writer-wins, so a HEALTHY
+// document's recovery zeroed a DIFFERENT document's active failure — on a pod
+// serving many rooms the alarm oscillated to 0 on every unrelated success and
+// `collaboration_undurable_seconds > 0` never fired, which is precisely the
+// blindness FR-026/SC-013 exist to remove.
+//
+// The map is bounded by the number of documents currently undurable, not by the
+// number that ever existed: entries are removed on recovery and on escalation.
+var (
+	undurableMu   sync.Mutex
+	undurableDocs = map[string]undurableEntry{}
+)
+
+type undurableEntry struct {
+	consecutive int
+	since       time.Duration
+}
+
+// publishUndurableLocked recomputes the exported aggregate from the registry.
+// The gauges report the WORST currently-undurable document, which is the
+// question an operator is actually asking ("is anything undurable right now, and
+// how bad is it"). Max rather than sum: summing seconds across documents would
+// grow with room count and mean nothing.
+func publishUndurableLocked() {
+	worstFailures, worstSeconds := 0, 0.0
+	for _, e := range undurableDocs {
+		if e.consecutive > worstFailures {
+			worstFailures = e.consecutive
+		}
+		if secs := e.since.Seconds(); secs > worstSeconds {
+			worstSeconds = secs
+		}
+	}
+	UndurableFlushFailures.Set(float64(worstFailures))
+	UndurableSeconds.Set(worstSeconds)
+	UndurableDocuments.Set(float64(len(undurableDocs)))
+}
+
 // DocumentUndurable publishes the degraded-durability window: how many
 // consecutive flushes have failed and how long the document has been accepting
 // edits it cannot persist.
@@ -191,30 +237,39 @@ func (PrometheusMetrics) SnapshotFailed() { SnapshotsTotal.WithLabelValues("erro
 // the first thing an operator learns is that users were dropped. Gauges rather
 // than counters: the question is "is anything undurable right now, and for how
 // long", which a monotonically increasing counter cannot answer.
-func (PrometheusMetrics) DocumentUndurable(consecutive int, since time.Duration) {
-	UndurableFlushFailures.Set(float64(consecutive))
-	UndurableSeconds.Set(since.Seconds())
+func (PrometheusMetrics) DocumentUndurable(doc string, consecutive int, since time.Duration) {
+	undurableMu.Lock()
+	defer undurableMu.Unlock()
+	undurableDocs[doc] = undurableEntry{consecutive: consecutive, since: since}
+	publishUndurableLocked()
 }
 
-// DocumentDurabilityRestored clears the degraded-durability gauges.
-func (PrometheusMetrics) DocumentDurabilityRestored() {
-	UndurableFlushFailures.Set(0)
-	UndurableSeconds.Set(0)
+// DocumentDurabilityRestored clears THIS document from the degraded set. It must
+// not clear the gauges outright: another document may still be failing, and
+// zeroing a live alarm because an unrelated room recovered is the bug this
+// registry exists to prevent.
+func (PrometheusMetrics) DocumentDurabilityRestored(doc string) {
+	undurableMu.Lock()
+	defer undurableMu.Unlock()
+	delete(undurableDocs, doc)
+	publishUndurableLocked()
 }
 
 // DocumentEscalated counts a room torn down for repeated persist failures,
 // recording how long it had been undurable. This is the DATA LOSS signal — the
 // unsaved edits were discarded — so it is deliberately its own counter rather
 // than another "error" label on SnapshotsTotal (FR-028, SC-016).
-func (PrometheusMetrics) DocumentEscalated(undurableFor time.Duration) {
+func (PrometheusMetrics) DocumentEscalated(doc string, undurableFor time.Duration) {
 	DurabilityEscalationsTotal.Inc()
-	UndurableSeconds.Set(0)
-	UndurableFlushFailures.Set(0)
 	EscalationUndurableSeconds.Observe(undurableFor.Seconds())
+	// The room is gone, so this document is no longer undurable — it is lost. Drop
+	// it from the set and republish, WITHOUT zeroing gauges another still-failing
+	// document may own.
+	undurableMu.Lock()
+	defer undurableMu.Unlock()
+	delete(undurableDocs, doc)
+	publishUndurableLocked()
 }
-
-// GenerationInvalidated counts a poisoned in-memory generation.
-func (PrometheusMetrics) GenerationInvalidated() { GenerationInvalidationsTotal.Inc() }
 
 // FanoutPublished counts a cross-pod publish and records its lag (R10).
 func (PrometheusMetrics) FanoutPublished(lag time.Duration) {

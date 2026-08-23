@@ -280,6 +280,9 @@ func TestRabbitMQEscapesCredentials(t *testing.T) {
 
 func TestFileServiceRequiresSettings(t *testing.T) {
 	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
 	if _, err := Load(); err == nil {
 		t.Fatal("CHECKPOINT_STORE=file-service without settings: expected error")
 	}
@@ -288,6 +291,9 @@ func TestFileServiceRequiresSettings(t *testing.T) {
 func TestFileServiceLoadsSettings(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("FILE_SERVICE_AUTHORIZATION_ID", "auth-uuid")
@@ -312,6 +318,9 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "-1")
@@ -325,6 +334,9 @@ func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "0")
@@ -624,6 +636,12 @@ func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
 			if tc.key == "MAX_UPLOAD_SIZE" {
 				t.Setenv("CHECKPOINT_STORE", "file-service")
+				t.Setenv("METADATA_STORE", "rabbitmq")
+				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+				t.Setenv("RABBITMQ_HOST", "rmq")
+				t.Setenv("METADATA_STORE", "rabbitmq")
+				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+				t.Setenv("RABBITMQ_HOST", "rmq")
 				t.Setenv("FILE_SERVICE_URL", "http://file-service:4003")
 				t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket")
 			}
@@ -724,6 +742,9 @@ func TestUnsupportedTopologyFailsStartup(t *testing.T) {
 	t.Setenv("HUB_MODE", "redis")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
 	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
 
@@ -742,14 +763,19 @@ func TestUnsupportedTopologyFailsStartup(t *testing.T) {
 // not reject the combinations that ARE supported. Without this, a check that
 // refused everything would pass the test above.
 func TestSupportedTopologiesStillLoad(t *testing.T) {
-	cases := []struct{ name, hub, checkpoint string }{
-		{"single-pod durable", "inmemory", "file-service"},
-		{"multi-pod non-durable", "redis", "inline"},
-		{"single-pod non-durable", "inmemory", "inline"},
+	// The metadata store is part of the topology, not an independent knob: durable
+	// blobs require a durable index, because an in-process index is empty on every
+	// boot and would refuse every connection as an unknown document.
+	cases := []struct{ name, hub, checkpoint, metadata string }{
+		{"single-pod durable", "inmemory", "file-service", "rabbitmq"},
+		{"multi-pod non-durable", "redis", "inline", "inmemory"},
+		{"single-pod non-durable", "inmemory", "inline", "inmemory"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("METADATA_STORE", "inmemory")
+			t.Setenv("METADATA_STORE", c.metadata)
+			t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+			t.Setenv("RABBITMQ_HOST", "rmq")
 			t.Setenv("HUB_MODE", c.hub)
 			t.Setenv("REDIS_URL", "redis://localhost:6379")
 			t.Setenv("CHECKPOINT_STORE", c.checkpoint)

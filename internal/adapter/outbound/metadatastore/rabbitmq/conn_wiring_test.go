@@ -3,8 +3,10 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -23,6 +25,7 @@ type setupChan struct {
 
 	declareErrAt int // 1-based index of the QueueDeclare call that should fail; 0 = none
 	declareCalls int
+	consumeCalls int
 	consumeErr   error
 }
 
@@ -50,11 +53,32 @@ func (s *setupChan) Consume(queue, _ string, autoAck, exclusive, _, _ bool, _ am
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.consumed, s.autoAck, s.exclusive = queue, autoAck, exclusive
+	s.consumeCalls++
 	if s.consumeErr != nil {
 		return nil, s.consumeErr
 	}
 	s.deliveries = make(chan amqp.Delivery, 1)
 	return s.deliveries, nil
+}
+
+// consumeCount reports how many times the client has attached a reply consumer.
+// A second attach is the observable signature of the supervisor re-attaching.
+func (s *setupChan) consumeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consumeCalls
+}
+
+// dropDeliveries closes the live deliveries channel, which is exactly what
+// amqp091 does when the broker drops the connection or the channel faults.
+func (s *setupChan) dropDeliveries() {
+	s.mu.Lock()
+	d := s.deliveries
+	s.deliveries = nil
+	s.mu.Unlock()
+	if d != nil {
+		close(d)
+	}
 }
 
 func (s *setupChan) PublishWithContext(context.Context, string, string, bool, bool, amqp.Publishing) error {
@@ -192,5 +216,75 @@ func TestConnectRejectsIncompleteConfigAndDialFailure(t *testing.T) {
 	withFakeRPCBroker(t, nil, errors.New("connection refused"))
 	if _, _, err := Connect(Config{URL: "amqp://unreachable", Queue: "q"}); err == nil {
 		t.Fatal("Connect must surface a dial failure")
+	}
+}
+
+// TestClientReattachesAfterTheBrokerDropsTheReplyConsumer is the regression for a
+// permanent-outage bug: one broker blip bricked the metadata store for the whole
+// life of the process.
+//
+// consumeReplies returns when the deliveries channel closes — a broker restart,
+// failover, upgrade, or channel fault. failAllPending then marked the client
+// closed and NOTHING ever re-dialled, because Connect started a bare
+// `go c.consumeReplies(...)` with no supervisor. Every later Call returned
+// "rabbitmq reply consumer closed" forever, so no client could join any document
+// and every live room flushed, failed, escalated and DISCARDED its unsaved edits
+// about a minute later.
+//
+// The sibling lifecycle consumer already supervises exactly this
+// (lifecycle/conn.go run/reattach), so this is restoring an established pattern,
+// not new machinery.
+//
+// Non-vacuity: delete the reattach loop from run() and this fails at the
+// consumeCount check — the client never re-attaches. Keep the loop but forget to
+// clear `detached` on adopt and it fails at the final Call, which would still be
+// rejected fast as though the client were dead.
+func TestClientReattachesAfterTheBrokerDropsTheReplyConsumer(t *testing.T) {
+	ch := &setupChan{}
+	withFakeRPCBroker(t, &rpcFakeConn{ch: ch}, nil)
+
+	client, _, err := Connect(Config{
+		URL:   "amqp://stub",
+		Queue: "alkemio-collaboration",
+		// Short so the test does not wait out a production backoff.
+		ReattachBackoff: 5 * time.Millisecond,
+		// Short so the post-reattach Call below surfaces as a TIMEOUT (proving the
+		// request was published) rather than making the test slow.
+		RequestTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	if got := ch.consumeCount(); got != 1 {
+		t.Fatalf("consume attaches before the drop = %d, want 1", got)
+	}
+
+	// The broker drops the connection.
+	ch.dropDeliveries()
+
+	// The supervisor must re-attach on its own.
+	deadline := time.Now().Add(2 * time.Second)
+	for ch.consumeCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("client never re-attached after the broker dropped the reply consumer (consume attaches = %d, want 2); one broker blip bricks the metadata store for the process lifetime", ch.consumeCount())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// And it must accept work again. A re-attached client PUBLISHES and then waits
+	// for a reply the fake never sends, so the correct outcome is an rpc timeout.
+	// A client still marked detached would instead reject the call outright,
+	// without publishing.
+	err = client.Call(context.Background(), PatternFetch, FetchData{ID: "doc-1"}, nil)
+	if err == nil {
+		t.Fatal("Call after re-attach: want an rpc timeout from the silent fake, got nil")
+	}
+	if strings.Contains(err.Error(), "consumer closed") {
+		t.Fatalf("Call after re-attach failed fast as though still detached: %v", err)
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("Call after re-attach = %v, want an rpc timeout (proving it published)", err)
 	}
 }

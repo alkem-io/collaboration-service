@@ -34,7 +34,6 @@ var durabilitySignals = []string{
 	"collaboration_undurable_seconds",
 	"collaboration_durability_escalations_total",
 	"collaboration_escalation_undurable_seconds",
-	"collaboration_generation_invalidations_total",
 }
 
 // TestNoPersistenceSignalWasLostInTheRebuild is T069 / FR-025 / SC-014.
@@ -98,11 +97,10 @@ func TestEveryMetricsHookMovesItsSeries(t *testing.T) {
 		{"ConnOpened", "collaboration_connections_active", m.ConnOpened},
 		{"SnapshotSaved", "collaboration_snapshots_total", m.SnapshotSaved},
 		{"SnapshotFailed", "collaboration_snapshots_total", m.SnapshotFailed},
-		{"DocumentUndurable", "collaboration_undurable_flush_failures", func() { m.DocumentUndurable(3, time.Second) }},
-		{"DocumentUndurable", "collaboration_undurable_seconds", func() { m.DocumentUndurable(4, 5*time.Second) }},
-		{"DocumentEscalated", "collaboration_durability_escalations_total", func() { m.DocumentEscalated(time.Second) }},
-		{"DocumentEscalated", "collaboration_escalation_undurable_seconds", func() { m.DocumentEscalated(2 * time.Second) }},
-		{"GenerationInvalidated", "collaboration_generation_invalidations_total", m.GenerationInvalidated},
+		{"DocumentUndurable", "collaboration_undurable_flush_failures", func() { m.DocumentUndurable("doc-inv", 3, time.Second) }},
+		{"DocumentUndurable", "collaboration_undurable_seconds", func() { m.DocumentUndurable("doc-inv", 4, 5*time.Second) }},
+		{"DocumentEscalated", "collaboration_durability_escalations_total", func() { m.DocumentEscalated("doc-inv", time.Second) }},
+		{"DocumentEscalated", "collaboration_escalation_undurable_seconds", func() { m.DocumentEscalated("doc-inv", 2*time.Second) }},
 		{"FanoutFailed", "collaboration_fanout_total", m.FanoutFailed},
 		{"FanoutPublished", "collaboration_fanout_lag_seconds", func() { m.FanoutPublished(3 * time.Millisecond) }},
 		{"ContributingActors", "collaboration_contributing_actors_per_window", func() { m.ContributingActors(4) }},
@@ -130,11 +128,11 @@ func TestEveryMetricsHookMovesItsSeries(t *testing.T) {
 		{"ConnClosed", "collaboration_connections_active", m.ConnOpened, m.ConnClosed},
 		{
 			"DocumentDurabilityRestored", "collaboration_undurable_flush_failures",
-			func() { m.DocumentUndurable(7, 9*time.Second) }, m.DocumentDurabilityRestored,
+			func() { m.DocumentUndurable("doc-inv", 7, 9*time.Second) }, func() { m.DocumentDurabilityRestored("doc-inv") },
 		},
 		{
 			"DocumentDurabilityRestored", "collaboration_undurable_seconds",
-			func() { m.DocumentUndurable(7, 9*time.Second) }, m.DocumentDurabilityRestored,
+			func() { m.DocumentUndurable("doc-inv", 7, 9*time.Second) }, func() { m.DocumentDurabilityRestored("doc-inv") },
 		},
 	} {
 		c.setup()
@@ -189,10 +187,9 @@ func exerciseEveryMetricsHook() {
 	m.ConnClosed()
 	m.SnapshotSaved()
 	m.SnapshotFailed()
-	m.DocumentUndurable(1, time.Second)
-	m.DocumentDurabilityRestored()
-	m.DocumentEscalated(2 * time.Second)
-	m.GenerationInvalidated()
+	m.DocumentUndurable("doc-inv", 1, time.Second)
+	m.DocumentDurabilityRestored("doc-inv")
+	m.DocumentEscalated("doc-inv", 2*time.Second)
 	m.FanoutPublished(3 * time.Millisecond)
 	m.FanoutFailed()
 	m.ContributingActors(4)

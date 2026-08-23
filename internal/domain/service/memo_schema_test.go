@@ -186,9 +186,9 @@ func TestMemoPoisonOnTheRealRoomPath(t *testing.T) {
 		setMemoImage(t, d, "data:image/png;base64,iVBORw0KGgo=")
 	})
 
-	// Drain the run loop deterministically: the poison is queued, a persist goes
+	// Drain the run loop deterministically: the poison is queued, a no-op command goes
 	// behind it, and a third join behind that only returns once both have run.
-	room.enqueue(command{kind: cmdPersist})
+	room.enqueue(command{kind: cmdLeave})
 	barrier := newFakeClient(t)
 	barrier.join(mgr, doc, model.ContentTypeMemo)
 

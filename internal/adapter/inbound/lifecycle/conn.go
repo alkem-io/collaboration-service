@@ -267,11 +267,31 @@ func (c *Consumer) pollDepths(every time.Duration) {
 	}
 }
 
-// adopt installs a session as the live attachment.
-func (c *Consumer) adopt(s *session) {
+// adopt installs a session as the live attachment, or REFUSES and reports false
+// when Close has already run.
+//
+// The refusal is the point. openSession is not cancellable, so Close can complete
+// while a re-attach is inside it — Close reads and closes the OLD attachment, then
+// the re-attach installs a brand new live connection that Close has already walked
+// past. Nothing would ever close that one: the connection and its consume
+// goroutine outlive the process shutdown, and the consumer keeps acking
+// document.deleted events into a Manager that is already closed.
+//
+// Re-checking under the SAME lock that publishes the fields is what makes this
+// safe. Split across two acquisitions, Close could observe the old attachment
+// between the check and the write and the leak returns.
+func (c *Consumer) adopt(s *session) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed != nil {
+		select {
+		case <-c.closed:
+			return false
+		default:
+		}
+	}
 	c.conn, c.ch = s.conn, s.ch
+	return true
 }
 
 // live reads the current attachment. The lock is for Close, which runs on the
@@ -320,7 +340,13 @@ func (c *Consumer) reattach() *session {
 				zap.Duration("backoff", c.reattachBackoff), zap.Error(err))
 			continue
 		}
-		c.adopt(sess)
+		if !c.adopt(sess) {
+			// Close won the race. Release what we just opened rather than leaking a
+			// live connection past shutdown.
+			_ = sess.ch.Close()
+			_ = sess.conn.Close()
+			return nil
+		}
 		c.logger.Info("lifecycle consumer re-attached to the broker")
 		return sess
 	}

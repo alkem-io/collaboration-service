@@ -58,7 +58,7 @@ func (s *countingStore) FenceMode() persistence.FenceMode { return s.inner.Fence
 // dirtyRoomWithRegistry builds a started room, backed by a shared registry so the
 // test can invalidate the document out from under it, and leaves it dirty with
 // unsaved content.
-func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.InProcessRegistry, *countingStore) {
+func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *countingStore) {
 	t.Helper()
 	deps := newTestDeps()
 	store := newCountingStore()
@@ -78,34 +78,7 @@ func dirtyRoomWithRegistry(t *testing.T, id model.DocumentID) (*Room, *memory.In
 	}
 	insertText(room.doc, "unsaved-content")
 	room.dirty = true
-	return room, reg, store
-}
-
-// TestTeardownDoesNotFlushAnInvalidatedDocument is the FR-011a ratchet for the
-// dangerous half of the matrix. When the registry poisons a document's
-// generation, the in-memory copy may have diverged from durable state, so the
-// room must tear down WITHOUT persisting — writing it would overwrite good
-// stored content with content of unknown provenance.
-//
-// Non-vacuity: change the invalidation case in run() to teardown(r.persistNow)
-// and the Put count becomes 1, tripping the assertion.
-func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
-	room, reg, store := dirtyRoomWithRegistry(t, "doc-invalidated")
-	startRoom(room)
-
-	if err := reg.Invalidate(context.Background(), backend.DocumentID("doc-invalidated")); err != nil {
-		t.Fatalf("Invalidate: %v", err)
-	}
-
-	select {
-	case <-room.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("invalidation did not tear the room down")
-	}
-
-	if n := store.saves.Load(); n != 0 {
-		t.Fatalf("an invalidated document was persisted %d time(s); a poisoned generation must NOT be written over stored content", n)
-	}
+	return room, store
 }
 
 // TestIdleReleaseFlushesAGoodDocument is the other half of the matrix: a room
@@ -120,7 +93,7 @@ func TestTeardownDoesNotFlushAnInvalidatedDocument(t *testing.T) {
 // Non-vacuity: change releaseIfEmpty to teardown(nil) and the Put count becomes
 // 0, tripping the assertion.
 func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
-	room, _, store := dirtyRoomWithRegistry(t, "doc-idle")
+	room, store := dirtyRoomWithRegistry(t, "doc-idle")
 
 	if !room.releaseIfEmpty(time.NewTimer(time.Hour), time.NewTimer(time.Hour)) {
 		t.Fatal("an empty room must be released")
@@ -148,7 +121,7 @@ func TestIdleReleaseFlushesAGoodDocument(t *testing.T) {
 // TestReleaseIfEmptyKeepsARoomWithMembers guards the condition itself: the idle
 // timer firing while members are still attached must NOT release the room.
 func TestReleaseIfEmptyKeepsARoomWithMembers(t *testing.T) {
-	room, _, _ := dirtyRoomWithRegistry(t, "doc-populated")
+	room, _ := dirtyRoomWithRegistry(t, "doc-populated")
 	room.members[1] = roomMember{id: 1, conn: &captureConn{}}
 
 	if room.releaseIfEmpty(time.NewTimer(time.Hour), time.NewTimer(time.Hour)) {

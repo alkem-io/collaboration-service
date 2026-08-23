@@ -68,7 +68,6 @@ func TestInvShutdownAbortNoGaugeUnderflow(t *testing.T) {
 	}
 }
 
-func (m *gaugeMetrics) DocumentUndurable(int, time.Duration) {}
-func (m *gaugeMetrics) DocumentDurabilityRestored()          {}
-func (m *gaugeMetrics) DocumentEscalated(time.Duration)      {}
-func (m *gaugeMetrics) GenerationInvalidated()               {}
+func (m *gaugeMetrics) DocumentUndurable(string, int, time.Duration) {}
+func (m *gaugeMetrics) DocumentDurabilityRestored(string)            {}
+func (m *gaugeMetrics) DocumentEscalated(string, time.Duration)      {}

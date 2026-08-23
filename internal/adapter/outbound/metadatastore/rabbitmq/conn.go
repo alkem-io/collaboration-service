@@ -23,7 +23,18 @@ type Config struct {
 	Queue string
 	// RequestTimeout bounds a request/reply RPC (legacy default 5s).
 	RequestTimeout time.Duration
+	// ReattachBackoff paces the supervisor's re-attach attempts after the broker
+	// drops the connection or the channel faults. Zero uses
+	// DefaultReattachBackoff.
+	ReattachBackoff time.Duration
 }
+
+// DefaultReattachBackoff paces re-attach attempts. It matches the sibling
+// lifecycle consumer's default: long enough not to hammer a broker that is still
+// coming back, short enough that a restart is absorbed well inside the flush
+// escalation window (5 failures on a 2/4/8/16/30s ladder, ~60s) that would
+// otherwise discard unsaved edits.
+const DefaultReattachBackoff = 2 * time.Second
 
 // amqpChannel is the publish surface the Client uses, narrowed so Call/Emit can
 // be unit-tested with a fake channel (the real *amqp.Channel satisfies it).
@@ -78,18 +89,75 @@ var dialRPC = func(url string) (rpcConn, error) {
 // requests to the server queue with correlationId + replyTo and matches replies
 // on a per-connection reply queue. It satisfies the store's rpc interface.
 type Client struct {
-	conn        rpcConn
-	ch          amqpChannel
-	replyQ      string
-	serverQueue string
-	timeout     time.Duration
+	cfg             Config
+	serverQueue     string
+	timeout         time.Duration
+	reattachBackoff time.Duration
+
+	// shutdown is closed by Close. It stops the supervisor and makes the
+	// detached state terminal; without it, Close during a broker outage would
+	// race the re-attach loop and leave a live connection behind.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 
 	mu      sync.Mutex
 	pending map[string]chan nestReply
-	// closed is set once the reply consumer exits (failAllPending): the reply
-	// queue is gone, so a later Call would publish but never receive its reply.
-	// Check it at waiter registration so such a Call fails fast, not on timeout.
-	closed bool
+	// conn, ch and replyQ are REPLACED on every re-attach, so they are guarded by
+	// mu and must be snapshotted under it rather than read directly.
+	conn   rpcConn
+	ch     amqpChannel
+	replyQ string
+	// detached is set when the reply consumer exits (failAllPending): the reply
+	// queue is gone, so a Call would publish but never receive its reply. Check it
+	// at waiter registration so such a Call fails fast, not on timeout. The
+	// supervisor CLEARS it on a successful re-attach — it marks "no reply path
+	// right now", not "dead forever".
+	detached bool
+}
+
+// session is one live attachment: a connection, its channel, the exclusive reply
+// queue declared on it, and the delivery stream. Re-attaching replaces all four
+// together, which is why they travel as a unit.
+type session struct {
+	conn       rpcConn
+	ch         setupChannel
+	replyQ     string
+	deliveries <-chan amqp.Delivery
+}
+
+// openSession dials, opens a channel, declares the exclusive reply queue and the
+// durable server queue, and starts consuming replies. Every failure path closes
+// what it had already opened, so a failed attempt leaks nothing.
+func openSession(cfg Config) (*session, error) {
+	conn, err := dialRPC(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("dial rabbitmq: %w", err)
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("open channel: %w", err)
+	}
+	// Exclusive, auto-delete reply queue (the NestJS replyTo target).
+	replyQ, err := ch.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("declare reply queue: %w", err)
+	}
+	// Ensure the server queue exists (durable, matching the legacy services).
+	if _, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil); err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("declare server queue: %w", err)
+	}
+	deliveries, err := ch.Consume(replyQ.Name, "", true, true, false, false, nil)
+	if err != nil {
+		_ = ch.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("consume reply queue: %w", err)
+	}
+	return &session{conn: conn, ch: ch, replyQ: replyQ.Name, deliveries: deliveries}, nil
 }
 
 // deliver routes a reply to the goroutine waiting on its correlation id (the
@@ -109,9 +177,9 @@ func (c *Client) deliver(corrID string, reply nestReply) bool {
 	return true
 }
 
-// Connect dials RabbitMQ, opens a channel, declares an exclusive reply queue,
-// and starts consuming replies. The returned Client is the rpc transport a Store
-// is built over; close it on shutdown.
+// Connect opens the first session and starts the supervisor that keeps it open.
+// The returned Client is the rpc transport a Store is built over; close it on
+// shutdown.
 func Connect(cfg Config) (*Client, *Store, error) {
 	if cfg.URL == "" {
 		return nil, nil, fmt.Errorf("rabbitmq metadata store: URL is required")
@@ -119,51 +187,114 @@ func Connect(cfg Config) (*Client, *Store, error) {
 	if cfg.Queue == "" {
 		return nil, nil, fmt.Errorf("rabbitmq metadata store: Queue is required")
 	}
-	conn, err := dialRPC(cfg.URL)
+	sess, err := openSession(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial rabbitmq: %w", err)
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("open channel: %w", err)
-	}
-	// Exclusive, auto-delete reply queue (the NestJS replyTo target).
-	replyQ, err := ch.QueueDeclare("", false, true, true, false, nil)
-	if err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("declare reply queue: %w", err)
-	}
-	// Ensure the server queue exists (durable, matching the legacy services).
-	if _, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil); err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("declare server queue: %w", err)
+		return nil, nil, err
 	}
 
 	timeout := cfg.RequestTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	backoff := cfg.ReattachBackoff
+	if backoff <= 0 {
+		backoff = DefaultReattachBackoff
+	}
 	c := &Client{
-		conn:        conn,
-		ch:          ch,
-		replyQ:      replyQ.Name,
-		serverQueue: cfg.Queue,
-		timeout:     timeout,
-		pending:     make(map[string]chan nestReply),
+		cfg:             cfg,
+		conn:            sess.conn,
+		ch:              sess.ch,
+		replyQ:          sess.replyQ,
+		serverQueue:     cfg.Queue,
+		timeout:         timeout,
+		reattachBackoff: backoff,
+		shutdown:        make(chan struct{}),
+		pending:         make(map[string]chan nestReply),
 	}
-
-	deliveries, err := ch.Consume(replyQ.Name, "", true, true, false, false, nil)
-	if err != nil {
-		_ = ch.Close()
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("consume reply queue: %w", err)
-	}
-	go c.consumeReplies(deliveries)
+	go c.run(sess)
 
 	return c, newWithRPC(c), nil
+}
+
+// run supervises the attachment. consumeReplies returns when the deliveries
+// channel closes — the broker dropped the connection, or the channel faulted.
+// Without this loop that first failure is terminal: the client marks itself
+// detached and no Call can ever succeed again, so no client can join any
+// document and every live room escalates to discarding its unsaved edits about a
+// minute later, while the process stays healthy in every other respect.
+//
+// This mirrors the lifecycle consumer's supervisor deliberately: two AMQP
+// clients in one binary should not have two different answers to "the broker
+// restarted".
+func (c *Client) run(sess *session) {
+	for {
+		c.consumeReplies(sess.deliveries)
+		// Release whatever is still open on the dead session before re-attaching,
+		// so a channel fault does not leak the connection under it.
+		_ = sess.ch.Close()
+		_ = sess.conn.Close()
+
+		next := c.reattach()
+		if next == nil {
+			return // Close was called.
+		}
+		sess = next
+	}
+}
+
+// reattach re-opens a session on a bounded backoff until it succeeds or the
+// client is closed. It retries forever by design: the alternative is a live
+// process whose metadata store is permanently dead.
+func (c *Client) reattach() *session {
+	for {
+		select {
+		case <-c.shutdown:
+			return nil
+		case <-time.After(c.reattachBackoff):
+		}
+		sess, err := openSession(c.cfg)
+		if err != nil {
+			continue
+		}
+		// Close can land while openSession is running, and openSession is not
+		// cancellable. Adopting unconditionally would install a live connection
+		// that Close has already walked past, leaking it and its consumer goroutine
+		// past shutdown — so adopt re-checks under the same lock and refuses.
+		if !c.adopt(sess) {
+			_ = sess.ch.Close()
+			_ = sess.conn.Close()
+			return nil
+		}
+		return sess
+	}
+}
+
+// adopt installs a new session as the live one and clears the detached flag, or
+// refuses and reports false when Close has already run. The shutdown check and
+// the field writes happen under ONE lock acquisition: split across two, Close
+// could observe the old session, and the adopt could then publish the new one.
+func (c *Client) adopt(sess *session) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.shutdown:
+		return false
+	default:
+	}
+	c.conn = sess.conn
+	c.ch = sess.ch
+	c.replyQ = sess.replyQ
+	c.detached = false
+	return true
+}
+
+// live snapshots the current publish surface. conn/ch/replyQ are replaced on
+// every re-attach, so a Call must take them together under the lock rather than
+// reading fields that can change between the publish and the reply-to it names.
+func (c *Client) live() (amqpChannel, string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ch, c.replyQ, c.detached
 }
 
 // consumeReplies dispatches each reply to the goroutine waiting on its
@@ -186,14 +317,15 @@ func (c *Client) consumeReplies(deliveries <-chan amqp.Delivery) {
 }
 
 // failAllPending drains every outstanding waiter with an error reply and marks
-// the client closed, used when the reply consumer exits (channel/connection drop)
+// the client DETACHED, used when the reply consumer exits (channel/connection drop)
 // so no Call is left hanging until its timeout. Each waiter channel is buffered
 // (cap 1) and removed from pending under the lock, so the send never blocks and a
-// late reply cannot double-deliver. Setting closed under the same lock fails any
-// subsequent Call fast — its reply could never arrive.
+// late reply cannot double-deliver. Setting detached under the same lock fails
+// any subsequent Call fast — its reply could never arrive on the dead session.
+// The supervisor clears the flag once it re-attaches.
 func (c *Client) failAllPending() {
 	c.mu.Lock()
-	c.closed = true
+	c.detached = true
 	waiters := make([]chan nestReply, 0, len(c.pending))
 	for corrID, waiter := range c.pending {
 		waiters = append(waiters, waiter)
@@ -215,12 +347,17 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 
 	waiter := make(chan nestReply, 1)
 	c.mu.Lock()
-	if c.closed {
-		// Reply consumer has exited (broker/channel drop): a publish now would never
-		// get its reply and would only block until the timeout — fail fast instead.
+	if c.detached {
+		// No reply path right now (broker/channel drop, supervisor re-attaching): a
+		// publish would never get its reply and would only block until the timeout —
+		// fail fast instead. This is transient; the caller retries.
 		c.mu.Unlock()
 		return fmt.Errorf("rabbitmq reply consumer closed")
 	}
+	// Snapshot the publish surface with the registration, under ONE lock: a
+	// re-attach between them would publish on the new channel while naming the old
+	// reply queue, and the reply would be delivered to a queue nobody consumes.
+	ch, replyQ := c.ch, c.replyQ
 	c.pending[corrID] = waiter
 	c.mu.Unlock()
 	defer func() {
@@ -232,7 +369,7 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	if err := c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
+	if err := ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
 		ContentType: "application/json",
 		// Persistent marks the request durable so an ACCEPTED message survives a
 		// broker restart (the server queue is durable). Broker ACCEPTANCE itself is
@@ -241,7 +378,7 @@ func (c *Client) Call(ctx context.Context, pattern string, data, reply any) erro
 		// lost request is never a silent success — no publisher confirms needed.
 		DeliveryMode:  amqp.Persistent,
 		CorrelationId: corrID,
-		ReplyTo:       c.replyQ,
+		ReplyTo:       replyQ,
 		Body:          body,
 	}); err != nil {
 		return fmt.Errorf("publish request: %w", err)
@@ -269,7 +406,11 @@ func (c *Client) Emit(ctx context.Context, pattern string, data any) error {
 	if err != nil {
 		return err
 	}
-	return c.ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
+	ch, _, _ := c.live()
+	if ch == nil {
+		return fmt.Errorf("rabbitmq channel unavailable")
+	}
+	return ch.PublishWithContext(ctx, "", c.serverQueue, false, false, amqp.Publishing{
 		ContentType: "application/json",
 		// Persistent marks the event durable so an ACCEPTED message survives a broker
 		// restart. Emit is fire-and-forget (no reply, no publisher confirm), so broker
@@ -281,13 +422,33 @@ func (c *Client) Emit(ctx context.Context, pattern string, data any) error {
 	})
 }
 
-// Close tears down the channel and connection.
+// Close stops the supervisor and tears down the live channel and connection.
+//
+// Closing `shutdown` BEFORE taking the lock is what makes this safe against an
+// in-flight re-attach: adopt re-checks shutdown under the same lock, so either
+// this call sees the new session and closes it, or adopt refuses and reattach
+// closes it itself. Neither order leaks the connection.
 func (c *Client) Close() error {
-	if c.ch != nil {
-		_ = c.ch.Close()
+	// A Client built directly (unit tests exercising Call/Emit without a
+	// supervisor) has no shutdown channel; closing nil would panic. Guarding here
+	// keeps the zero value usable rather than forcing every such test to know
+	// about the supervisor.
+	c.shutdownOnce.Do(func() {
+		if c.shutdown != nil {
+			close(c.shutdown)
+		}
+	})
+	c.mu.Lock()
+	ch, conn := c.ch, c.conn
+	// A Call racing Close must fail fast rather than publish onto a channel this
+	// is about to close.
+	c.detached = true
+	c.mu.Unlock()
+	if ch != nil {
+		_ = ch.Close()
 	}
-	if c.conn != nil {
-		return c.conn.Close()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

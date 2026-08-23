@@ -29,6 +29,12 @@ type syncOutcome struct {
 	// socket stays open, but the sender must resync before writing again: its
 	// refused struct leaves a gap in its own clock sequence.
 	rejectedSchema bool
+	// rejectedNotWritable is true when a mutating update arrived from a member
+	// that may not write (a viewer, or a collaborator downgraded mid-session by
+	// the inactivity sweep). Like rejectedSchema it refuses the WRITE, not the
+	// writer, and the sender must resync before writing again — the refused
+	// struct leaves the same gap in its clock sequence.
+	rejectedNotWritable bool
 }
 
 // dispatchSync classifies one framed sync message (SyncStep1 / SyncStep2 /
@@ -77,7 +83,11 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 		// origin; the update observer fans the delta to the other members and skips
 		// the sender.
 		if !canMutate {
-			return syncOutcome{mutating: true, applied: false}, nil
+			// Refuse the write and SAY SO. Dropping it silently left the sender
+			// believing its edit had landed: it applied the struct locally, so its
+			// next update sits at clock k+1 against a server that never received k,
+			// stays pending forever, and the two documents never reconverge.
+			return syncOutcome{mutating: true, applied: false, rejectedNotWritable: true}, nil
 		}
 		// Enforce MaxDocBytes BEFORE committing to the live doc (FR-024): an
 		// oversized update must never mutate or broadcast the authoritative doc and
