@@ -330,7 +330,16 @@ type ControlMessage struct {
 	RequestID string `json:"requestId,omitempty"`
 	// Version is the persisted snapshot version for ControlSaved.
 	Version int `json:"version,omitempty"`
-	// Error is a human-readable reason for ControlSaveError (never secrets).
+	// Error is a human-readable reason on any control that refuses or reports a
+	// failure. NEVER secrets, and never a stable identifier: clients branch on
+	// Kind (and on Code for a session end), never on this prose, so it may be
+	// reworded freely.
+	//
+	// Carried today by ControlSaveError (a flush failed), ControlUpdateRejected (a
+	// write was refused — schema violation, or a session that may not write), and
+	// ControlPersistFailed (a durability request cannot be satisfied). Listed
+	// because the set has already drifted twice; the RULE is what governs, so a
+	// new refusal kind should carry it without needing this comment changed.
 	Error string `json:"error,omitempty"`
 	// ReadOnly is the viewer/collaborator state for ControlReadOnlyState. It is a
 	// pointer so the wire distinguishes three states: absent (nil — this frame
