@@ -336,7 +336,11 @@ func (r *Room) flushContributionNow() {
 // enqueueDeadline backstops a producer blocked on a full command channel (002
 // FR-008): the loop stays drained because every handler is bounded, so this rarely
 // fires, but a producer must never wait forever on a wedged loop.
-const enqueueDeadline = 30 * time.Second
+// A var, not a const, ONLY so a test can shorten it: the backpressure path is
+// otherwise unreachable inside a test's patience, and leaving it untested is what
+// let a lifecycle refusal and a genuine backpressure refusal share one code path.
+// Production never assigns it.
+var enqueueDeadline = 30 * time.Second
 
 // enqueue submits a command to the run loop, returning false if the room has torn
 // down or the deadline backstop elapses (so producers never block forever on a full
@@ -345,37 +349,85 @@ func (r *Room) enqueue(cmd command) bool {
 	return r.enqueueCtx(context.Background(), cmd)
 }
 
+// enqueueOutcome distinguishes WHY a command was refused, because the two reasons
+// mean opposite things to the sender.
+//
+// A LIFECYCLE refusal means the room is tearing down, and teardown will send this
+// member its own authoritative, document-scoped session end (server-shutdown,
+// document-deleted, edits-not-saved). A BACKPRESSURE refusal means the room is
+// alive and simply could not take the frame in time — nobody else is going to
+// mention it.
+//
+// Collapsing them into one bool is what let a member-scoped TRANSIENT
+// "update-not-accepted" be emitted during a real teardown and win the race against
+// the document-scoped TERMINAL end that followed, so a deletion or a data-loss
+// escalation could reach the user as "try again".
+type enqueueOutcome int
+
+const (
+	enqueueAdmitted enqueueOutcome = iota
+	// enqueueRefusedInactive: the room left Active. Teardown owns the ending; the
+	// caller must NOT announce one of its own.
+	enqueueRefusedInactive
+	// enqueueRefusedBackpressure: the room is running but the command buffer stayed
+	// full past the caller's context or the deadline backstop. Nothing else will
+	// tell the client, so the caller must.
+	enqueueRefusedBackpressure
+)
+
+// enqueueWithReason submits a command and reports the outcome, for the one caller
+// that has to act differently on each.
+func (r *Room) enqueueWithReason(ctx context.Context, cmd command) enqueueOutcome {
+	if !r.lc.is(stateActive) {
+		return enqueueRefusedInactive
+	}
+	select {
+	case r.commands <- cmd:
+		return enqueueAdmitted
+	case <-r.done:
+		return enqueueRefusedInactive
+	default:
+	}
+	t := time.NewTimer(enqueueDeadline)
+	defer t.Stop()
+	select {
+	case r.commands <- cmd:
+		return enqueueAdmitted
+	case <-r.done:
+		return enqueueRefusedInactive
+	case <-ctx.Done():
+		return r.classifyRefusal()
+	case <-t.C:
+		return r.classifyRefusal()
+	}
+}
+
+// classifyRefusal decides what a timed-out enqueue MEANS, at the moment it is
+// reported rather than at the moment it started.
+//
+// The pre-block check is not sufficient. A producer can enter the block while the
+// room is Active, the room can begin tearing down during the block, and the
+// deadline can then fire BEFORE done closes — a window bounded by however long
+// teardown's final flush takes, which is exactly the seconds-long window the
+// terminal-precedence bug lived in. Reporting that as backpressure would let
+// Forward emit its member-scoped transient end during a teardown, which is the
+// bug this whole distinction exists to remove.
+//
+// Re-reading the lifecycle here costs one atomic load on a path that has already
+// waited out a deadline.
+func (r *Room) classifyRefusal() enqueueOutcome {
+	if !r.lc.is(stateActive) {
+		return enqueueRefusedInactive
+	}
+	return enqueueRefusedBackpressure
+}
+
 // enqueueCtx submits a command to the run loop, returning false if the room has torn
 // down (state left Active) OR the producer's context/deadline elapses before a
 // buffer slot frees. The state check refuses new work BEFORE done is closed, so a
 // tearing-down room rejects producers early and Join/CloseDeleted retry into a fresh room.
 func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
-	if !r.lc.is(stateActive) {
-		return false
-	}
-	// Fast path: an immediate send when the buffer has space — the common case, no timer.
-	select {
-	case r.commands <- cmd:
-		return true
-	case <-r.done:
-		return false
-	default:
-	}
-	// Slow path: the command buffer is full. Bounded-block so a producer (Forward /
-	// Leave / CloseDeleted) is never wedged behind a stuck loop — it gives up at the
-	// caller's ctx (e.g. the lifecycle handler timeout) or the deadline backstop.
-	t := time.NewTimer(enqueueDeadline)
-	defer t.Stop()
-	select {
-	case r.commands <- cmd:
-		return true
-	case <-r.done:
-		return false
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return false
-	}
+	return r.enqueueWithReason(ctx, cmd) == enqueueAdmitted
 }
 
 // RoomConfig carries the per-room tunables (R7 save cadence, idle release).

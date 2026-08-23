@@ -432,7 +432,14 @@ func TestOnePersistResolvesEveryParkedBarrier(t *testing.T) {
 // frame queues a second end.
 func TestARefusedFrameIsPoisonedAndTypedClosed(t *testing.T) {
 	room := newBareRoom(t)
-	room.lc.state.Store(int32(stateDraining)) // every enqueue is refused
+	// GENUINE BACKPRESSURE, not a lifecycle refusal: the room is ACTIVE and simply
+	// cannot take the frame, because the buffer is full and nothing is draining it.
+	// That distinction is the whole point — a lifecycle refusal is teardown's to
+	// announce, and this code must not compete with it.
+	room.lc.state.Store(int32(stateActive))
+	room.commands = make(chan command, 1)
+	room.commands <- command{kind: cmdLeave} // full, no consumer
+	enqueueDeadlineForTest(t, 20*time.Millisecond)
 	conn := &recordingConn{}
 	session := &Session{room: room, id: 1, conn: conn}
 
@@ -803,4 +810,144 @@ func (c *recordingConn) outcome(id string) *model.ControlMessage {
 		}
 	}
 	return nil
+}
+
+// enqueueDeadlineForTest shortens the backpressure backstop for one test, so the
+// refusal path is reachable without a 30-second wait. Restored on cleanup.
+func enqueueDeadlineForTest(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := enqueueDeadline
+	enqueueDeadline = d
+	t.Cleanup(func() { enqueueDeadline = prev })
+}
+
+// TestATeardownEndingIsNeverOverriddenByATransientRefusal is the regression for a
+// defect that would have reported DATA LOSS AS A RETRY.
+//
+// Room.enqueue answered one bool for two different situations: the room left
+// Active (teardown in progress) and the command buffer stayed full (backpressure).
+// Forward treated both as a dropped update and emitted a member-scoped TRANSIENT
+// `update-not-accepted`, then closed the connection's terminal boundary.
+//
+// A teardown's final flush takes real time, so a socket frame arriving during it
+// hits the lifecycle refusal — and the transient end raced AHEAD of the
+// authoritative one. The connection's terminal boundary then REFUSED the real
+// ending. An owner deletion (document-deleted, terminal) or an escalation
+// (edits-not-saved, terminal — the user's work is gone) would reach the client as
+// "try again later", and the client would cheerfully reconnect.
+//
+// Teardown is the sole owner of a session's ending. A lifecycle refusal announces
+// NOTHING; only genuine backpressure does, because in that case the room is alive
+// and nobody else will say anything.
+//
+// Non-vacuity: make Forward emit on enqueueRefusedInactive as well and this fails
+// — the member sees update-not-accepted instead of, or ahead of, the real end.
+func TestATeardownEndingIsNeverOverriddenByATransientRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code model.SessionEndCode
+	}{
+		{"owner deleted the document", model.CodeDocumentDeleted},
+		{"escalation discarded unsaved edits", model.CodeEditsNotSaved},
+		{"graceful shutdown", model.CodeServerShutdown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			room := newBareRoom(t)
+			conn := &recordingConn{}
+			res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator)
+			if res.err != nil {
+				t.Fatalf("handleJoin: %v", res.err)
+			}
+			session := &Session{room: room, id: res.id, conn: conn}
+
+			// ONE REAL TEARDOWN, with its flush GATED so the late frame lands inside
+			// the genuine window. beginTeardown owns the move to Draining and the same
+			// teardown emits the authoritative end — the two halves are not
+			// synthesized separately, because the bug lives in their overlap.
+			lateFrameHandled := make(chan struct{})
+			go func() {
+				room.teardown(model.NewSessionEnd(tc.code), func() {
+					// We are INSIDE teardown: beginTeardown has already set Draining and
+					// the authoritative end has NOT been sent yet. This is exactly the
+					// window a real final flush holds open for seconds.
+					session.Forward([]byte("a frame that arrives mid-teardown"))
+					close(lateFrameHandled)
+				})
+			}()
+
+			select {
+			case <-lateFrameHandled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the gated flush never ran")
+			}
+			select {
+			case <-room.done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("teardown did not complete")
+			}
+
+			if got := conn.endCode(); got != tc.code {
+				t.Fatalf("the client was told %q, want the authoritative %q; a late frame's transient end won the terminal boundary and the real reason was refused", got, tc.code)
+			}
+			if conn.sawEndCode(model.CodeUpdateNotAccepted) {
+				t.Fatal("a member-scoped transient end was delivered during teardown; a deletion or data loss would read to the user as a retry")
+			}
+			// The frame was still LOST, so the session is still poisoned — the fix
+			// changes who announces the ending, not whether the update survived.
+			if !session.dropped.Load() {
+				t.Fatal("the late frame was silently accepted; it was refused and must poison the session")
+			}
+		})
+	}
+}
+
+// endCode reports the code of the FIRST session end delivered, or "" if none.
+func (c *recordingConn) endCode() model.SessionEndCode {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended == nil {
+		return ""
+	}
+	return c.ended.Code
+}
+
+// sawEndCode reports whether any session-end CONTROL carried this code.
+func (c *recordingConn) sawEndCode(code model.SessionEndCode) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.controls {
+		if m.Kind == model.ControlSessionEnd && m.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// TestARefusalDuringTeardownIsClassifiedByCurrentLifecycle covers the residual
+// race in the classification itself.
+//
+// A producer can enter the blocking wait while the room is ACTIVE, the room can
+// begin tearing down during that wait, and the deadline can fire BEFORE done
+// closes — a window as long as teardown's final flush. Classifying by the
+// PRE-BLOCK check would call that backpressure and let Forward emit its
+// member-scoped transient end mid-teardown, which is the precedence bug returning
+// through the timeout path.
+//
+// Non-vacuity: make classifyRefusal return enqueueRefusedBackpressure
+// unconditionally and this fails.
+func TestARefusalDuringTeardownIsClassifiedByCurrentLifecycle(t *testing.T) {
+	room := newBareRoom(t)
+
+	// Active when the producer starts waiting.
+	room.lc.state.Store(int32(stateActive))
+	if got := room.classifyRefusal(); got != enqueueRefusedBackpressure {
+		t.Fatalf("an ACTIVE room's timeout classified as %v, want backpressure", got)
+	}
+
+	// The room begins tearing down while the producer is still blocked. done has
+	// NOT closed yet — that is the window.
+	room.lc.state.Store(int32(stateDraining))
+	if got := room.classifyRefusal(); got != enqueueRefusedInactive {
+		t.Fatalf("a timeout during teardown classified as %v, want inactive; Forward would emit a competing transient end and the authoritative one would be refused", got)
+	}
 }
