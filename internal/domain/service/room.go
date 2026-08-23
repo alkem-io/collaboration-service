@@ -1566,8 +1566,17 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	// same reason: silence is what makes it dangerous. The sender applied the
 	// struct locally and, told nothing, keeps writing at k+1, k+2 against a server
 	// that never received k — every one of them pending behind the missing struct,
-	// forever. It needs the same drop-and-resync recovery the schema branch above
-	// triggers, so it gets the same signal.
+	// forever.
+	//
+	// WHAT THIS GUARANTEES IS THE SIGNAL, NOT THE RECOVERY. The service truthfully
+	// reports that the write was refused; what a client does with that is the
+	// client's. Today that differs by surface: the whiteboard consumes
+	// update-rejected and discards its generation to resync
+	// (client-web useCollab.ts), while the memo editor's control handler does not
+	// handle the kind at all (client-web useCollaboration.ts handles saved,
+	// save-error and read-only-state, then falls through). So a memo client is
+	// told and does not act — a known client-side residual with a separate owner,
+	// not something this branch can fix or should pretend away.
 	//
 	// This reports the CURRENT capability; it does not change it. Restoring write
 	// access is a separate question and deliberately not answered here.

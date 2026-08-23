@@ -64,8 +64,14 @@ func TestACleanReadOnlyJoinIsNotToldItsEditWasRejected(t *testing.T) {
 //
 // The concrete producer is an established collaborator downgraded mid-session by
 // the inactivity sweep, with edits in flight. It reuses the existing
-// update-rejected signal, which clients already handle by dropping their
-// generation and resyncing.
+// update-rejected signal.
+//
+// WHAT IS ASSERTED HERE IS THE SIGNAL. Client recovery is not universal and this
+// test does not claim it is: the whiteboard consumes update-rejected and resyncs,
+// while the memo control handler ignores the kind entirely. A memo client is
+// therefore told and does not yet act — a client-side residual with its own
+// owner. The service's obligation is to stop being silent, and that is what this
+// pins.
 //
 // SCOPE: this asserts the client is TOLD. It deliberately does NOT assert any
 // restoration of write access — reporting a capability and changing one are
