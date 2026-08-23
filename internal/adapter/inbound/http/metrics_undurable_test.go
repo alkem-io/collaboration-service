@@ -128,9 +128,16 @@ func TestEscalationClearsOnlyTheEscalatedDocument(t *testing.T) {
 // survives its own teardown and undurable_documents stays at 2.
 func TestAClosedRoomStopsBeingCountedUndurable(t *testing.T) {
 	m := PrometheusMetrics{}
+	// RoomClosed decrements the process-global RoomsActive gauge, and its contract
+	// is exactly once per room that was counted open. Every RoomClosed below is
+	// therefore paired with a RoomOpened, and cleanup uses
+	// DocumentDurabilityRestored — which touches only the registry — so this test
+	// cannot leave the shared gauge negative for whatever runs next.
+	m.RoomOpened()
+	m.RoomOpened()
 	t.Cleanup(func() {
-		m.RoomClosed("doc-A")
-		m.RoomClosed("doc-B")
+		m.DocumentDurabilityRestored("doc-A")
+		m.DocumentDurabilityRestored("doc-B")
 	})
 
 	// Two failing documents. A is worse.
@@ -162,19 +169,54 @@ func TestAClosedRoomStopsBeingCountedUndurable(t *testing.T) {
 	}
 }
 
-// TestClosingANeverUndurableRoomIsHarmless pins that the drop is a no-op for the
-// overwhelmingly common case, so every room teardown can call it unconditionally
-// and an escalation followed by a teardown removes twice without harm.
+// TestEscalationThenTeardownRemovesOnce pins the idempotence that matters in
+// production: an escalating room removes its own entry, and the teardown that
+// follows removes again. The second removal must be a no-op for the registry.
+//
+// It is expressed as escalate-then-ONE-paired-RoomClosed rather than as two
+// RoomClosed calls, because RoomClosed is not idempotent — it decrements
+// RoomsActive — and a test that called it twice would be asserting idempotence of
+// something that does not have it, while corrupting a process-global gauge.
+func TestEscalationThenTeardownRemovesOnce(t *testing.T) {
+	m := PrometheusMetrics{}
+	m.RoomOpened()
+	m.RoomOpened()
+	t.Cleanup(func() {
+		m.DocumentDurabilityRestored("doc-escalated")
+		m.DocumentDurabilityRestored("doc-still-failing")
+	})
+
+	m.DocumentUndurable("doc-escalated", 5, 60*time.Second)
+	m.DocumentUndurable("doc-still-failing", 1, 3*time.Second)
+
+	// Escalation removes it once...
+	m.DocumentEscalated("doc-escalated", 60*time.Second)
+	// ...and the teardown that follows removes it again.
+	m.RoomClosed("doc-escalated")
+
+	if got := gaugeValue(t, UndurableDocuments); got != 1 {
+		t.Fatalf("undurable documents = %v, want 1; the second removal must be a no-op, not a corruption", got)
+	}
+	if got := gaugeValue(t, UndurableFlushFailures); got != 1 {
+		t.Fatalf("flush failures = %v, want 1 (the still-failing document's)", got)
+	}
+
+	m.RoomClosed("doc-still-failing")
+}
+
+// TestClosingANeverUndurableRoomIsHarmless pins that the registry drop is a no-op
+// for the overwhelmingly common case, so every room teardown can call it
+// unconditionally without disturbing a live alarm elsewhere on the pod.
 func TestClosingANeverUndurableRoomIsHarmless(t *testing.T) {
 	m := PrometheusMetrics{}
-	t.Cleanup(func() { m.RoomClosed("doc-failing") })
+	m.RoomOpened()
+	t.Cleanup(func() { m.DocumentDurabilityRestored("doc-failing") })
 
 	m.DocumentUndurable("doc-failing", 3, 30*time.Second)
 	m.RoomClosed("doc-healthy-never-failed")
-	m.RoomClosed("doc-healthy-never-failed") // twice: still a no-op
 
 	if got := gaugeValue(t, UndurableDocuments); got != 1 {
-		t.Fatalf("undurable documents = %v, want 1; closing unrelated healthy rooms must not disturb a live alarm", got)
+		t.Fatalf("undurable documents = %v, want 1; closing an unrelated healthy room must not disturb a live alarm", got)
 	}
 	if got := gaugeValue(t, UndurableFlushFailures); got != 3 {
 		t.Fatalf("flush failures = %v, want 3", got)
