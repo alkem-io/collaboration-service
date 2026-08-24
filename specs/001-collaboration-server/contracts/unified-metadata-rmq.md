@@ -91,15 +91,54 @@ Reply:
 
 Not found: `{ "found": false }`. Error: `{ "found": false, "error": "<reason>" }`.
 
-### `collaboration-delete` — request/reply
+### `collaboration-delete` — request/reply  *(**RETIRED** — this service no longer issues it)*
 
-Purge the index row on the owner-delete cascade. **Idempotent** — deleting an
-absent row is success.
+> **RETIRED.** `collaboration-service` speaks no delete pattern: `port.MetadataStore`
+> is read/upsert only ("There is no Delete: `server` owns the row and removes it").
+>
+> OWNERSHIP MOVED, and the ORDER is why. `server` deletes the row, the profile, the
+> bucket and the blob, and only THEN publishes `document.deleted`. By the time this
+> service sees the event there is nothing left to purge, so `cmdCloseDeleted` closes
+> the room and evicts — it "deletes nothing and does not flush". A delete call from
+> here would either be a no-op or, worse, race the owner's own cascade.
+>
+> The shape below is preserved rather than deleted so a reader who meets the pattern
+> name in an older branch, a broker trace, or a `server` consumer learns why it went.
+>
+> A CONSUMER MAY OR MAY NOT EXIST ON ANY GIVEN `server` BRANCH, and that is
+> deliberately not asserted here: Release-A-era branches carry a handler for this
+> pattern, its removal is `server`'s own cleanup on `server`'s own schedule, and a
+> statement about which branches have it today would be wrong the moment either
+> side moves. What is durable is the CONTRACT: this pattern is not part of it,
+> nothing here produces it, and any surviving handler is independently retireable
+> without reference to this service.
 
 Request `data`: `{ "id": "<documentId>" }`
 Reply: `{ "success": true }` or `{ "success": false, "error": "<reason>" }`.
 
-### `collaboration-info` — request/reply  *(consumed in Wave 3, T013/T014)*
+### `collaboration-info` — request/reply  *(**RETIRED** — this service no longer issues it)*
+
+> **RETIRED under KISS-018.** The requester side is deleted: `PatternInfo`,
+> `InfoData` and `InfoReply` are gone from `contract.go`.
+>
+> WHY, and it is not merely disuse. The capability this pattern would carry —
+> whether an actor may read or update, and how many collaborators a document
+> allows — is ALREADY OWNED by the authorization-evaluation-service, which decides
+> per actor, per document, once per session, before the room is materialized.
+> Wiring this in would install a SECOND authorization-shaped decision point beside
+> it: two sources deciding who may participate, disagreeing whenever the metadata
+> row and the policy drift.
+>
+> The per-document connection cap it also carried is not a security boundary
+> either. A private document refuses other actors at the authorization gate and
+> never reaches a count check; a document others may legitimately read would have
+> them refused on arrival order instead. So `MAX_CONNS_PER_ROOM` remains a global
+> resource limit and nothing is lost.
+>
+> As with `collaboration-delete`, the shape below is preserved rather than deleted.
+> Whether a consumer exists on any given `server` branch is deliberately not
+> asserted: this pattern is not part of the contract, nothing here produces it, and
+> any surviving handler is independently retireable on `server`'s own schedule.
 
 Collaborator-mode inputs, carried forward from both legacy `info` patterns and
 **unified**: whiteboard's `{read, update, maxCollaborators}` plus the optional

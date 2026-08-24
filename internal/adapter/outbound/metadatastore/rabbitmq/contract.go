@@ -5,14 +5,35 @@
 // (collaborative-document-service's collaboration-document-save/-fetch and
 // whiteboard-collaboration-service's save/fetch) — OPEN-3.
 //
-// CROSS-REPO CONTRACT: the consumer side lives in the Alkemio `server` repo and
-// IS IMPLEMENTED as of the 006 work — see server's
-// src/services/collaboration-integration/collaboration-integration.controller.ts
-// (@MessagePattern SAVE/FETCH/DELETE/INFO over Transport.RMQ). It reached
-// `server` on feat/006-collab-content-unification, so a check against `develop`
-// alone will suggest it is missing; it is not. The wire shape is the NestJS RMQ
-// request/reply envelope { pattern, data, id } with AMQP correlationId +
-// replyTo, so a NestJS @MessagePattern handler consumes it natively.
+// CROSS-REPO CONTRACT: the consumer side lives in the Alkemio `server` repo —
+// src/services/collaboration-integration/collaboration-integration.controller.ts.
+// WHICH `server` BRANCHES CARRY IT IS NOT ASSERTED HERE, and a reader who does not
+// find it on the branch they happen to have checked out has learned nothing about
+// this contract: branch placement moves, merges, and is renamed, so any sentence
+// naming one is stale the moment either side advances. What is durable is the wire
+// shape — the NestJS RMQ request/reply envelope { pattern, data, id } with AMQP
+// correlationId + replyTo, so a NestJS @MessagePattern handler consumes it
+// natively.
+//
+// WHAT THIS SIDE SPEAKS is exactly the three patterns listed below: save, fetch,
+// and the fire-and-forget contribution event. Two further patterns exist in the
+// contract's history — DELETE and INFO — and this service issues NEITHER. Whether
+// a handler for them survives on any given `server` branch is not asserted here:
+// it is `server`'s to retire on its own schedule, and naming a branch state would
+// be stale as soon as either side moved. They are simply not part of what this
+// package speaks:
+//
+//	DELETE  retired: `server` owns the index row and removes it, along with the
+//	        profile, bucket and blob, BEFORE publishing document.deleted — so
+//	        there is nothing left for this service to purge on arrival.
+//	INFO    retired under KISS-018: the capability it carried is already owned by
+//	        the authorization-evaluation-service, which decides per actor and per
+//	        document. Wiring it would install a second authorization-shaped
+//	        decision point beside that one.
+//
+// Naming them here rather than omitting them is deliberate: a reader who finds
+// those handlers in `server`, or these pattern names anywhere in its history, should
+// learn from THIS file that the absence is a decision and not an oversight.
 //
 // Changing any payload or pattern below is therefore a BREAKING cross-repo
 // change requiring a matching `server` change, not a local edit.
