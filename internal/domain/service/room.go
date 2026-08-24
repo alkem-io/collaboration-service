@@ -240,10 +240,16 @@ type Room struct {
 	// blank OwnerRef, and a wholesale-replace metadata store (in-memory) wipes the
 	// pre-registered owner_ref the delete cascade keys off.
 	ownerRef string
-	// bucketID is the document's own storage bucket, loaded from metadata and
-	// passed to CheckpointStore.SaveCheckpoint so each snapshot is persisted into the document's
-	// own bucket (not a single flat platform bucket). Empty in standalone /
-	// no-metadata mode, where the checkpoint store falls back to its configured bucket.
+	// bucketID is the document's own storage bucket. It does NOT travel on
+	// SaveCheckpointRequest — that carries no bucket. The room loads it from the
+	// document's metadata on materialization and carries it forward on every
+	// metadata persist, and the file-service store's pointer resolver reads it
+	// back off that row when a first save needs somewhere to create the blob.
+	//
+	// The point of the round-trip is that each snapshot lands in the document's
+	// own bucket rather than a single flat platform bucket. There is NO configured
+	// fallback: when it is empty the file-service store refuses the first save
+	// rather than writing the blob somewhere the delete cascade will never reach.
 	bucketID string
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the

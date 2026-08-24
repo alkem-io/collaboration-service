@@ -183,11 +183,11 @@ const DefaultLifecycleQueue = "alkemio-collaboration-lifecycle"
 // FileServiceConfig configures the file-service blob backend.
 type FileServiceConfig struct {
 	BaseURL string
-	// StorageBucketID is the FALLBACK snapshot bucket (standalone / no-metadata).
-	// The normal path uploads each snapshot into the document's OWN bucket,
-	// carried per document on the collaboration-fetch metadata.
-	StorageBucketID string
-	MaxUploadSize   int64
+	// MaxUploadSize caps one snapshot. There is NO bucket setting: every snapshot
+	// is written into the document's OWN bucket, carried per document on the
+	// collaboration-fetch metadata. A document whose row names no bucket is
+	// refused at save time rather than redirected to a deployment-wide one.
+	MaxUploadSize int64
 }
 
 // AuthConfig holds the handshake auth settings common to both auth modes.
@@ -479,9 +479,8 @@ func loadCheckpointStoreConfig(cfg *Config) error {
 		return fmt.Errorf("MAX_UPLOAD_SIZE must be >= 0 (0 uses file-service's default ceiling)")
 	}
 	cfg.FileService = FileServiceConfig{
-		BaseURL:         os.Getenv("FILE_SERVICE_URL"),
-		StorageBucketID: os.Getenv("FILE_SERVICE_STORAGE_BUCKET_ID"),
-		MaxUploadSize:   maxUpload,
+		BaseURL:       os.Getenv("FILE_SERVICE_URL"),
+		MaxUploadSize: maxUpload,
 	}
 	// No authorizationId is configured: snapshots are internal blobs whose access
 	// is governed by the document's own authz and the (unauthenticated) internal
@@ -489,11 +488,11 @@ func loadCheckpointStoreConfig(cfg *Config) error {
 	// without an authorizationId so the row's authz column is NULL — file's
 	// UNIQUE(authorizationId) permits many NULLs, so every snapshot persists (a
 	// reused fixed id would admit only one row per bucket).
-	// FILE_SERVICE_STORAGE_BUCKET_ID is the FALLBACK bucket only; the normal path
-	// uploads into the document's own bucket (per-document, from the
-	// collaboration-fetch metadata).
-	if cfg.FileService.BaseURL == "" || cfg.FileService.StorageBucketID == "" {
-		return fmt.Errorf("CHECKPOINT_STORE=file-service requires FILE_SERVICE_URL, FILE_SERVICE_STORAGE_BUCKET_ID")
+	// Only the URL. There is no bucket env: the destination bucket is per document
+	// and comes from the collaboration-fetch metadata, so a deployment-wide value
+	// would have nothing correct to say.
+	if cfg.FileService.BaseURL == "" {
+		return fmt.Errorf("CHECKPOINT_STORE=file-service requires FILE_SERVICE_URL")
 	}
 	return nil
 }

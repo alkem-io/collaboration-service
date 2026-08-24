@@ -295,7 +295,6 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
-	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("FILE_SERVICE_AUTHORIZATION_ID", "auth-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "1048576")
 	cfg, err := Load()
@@ -322,7 +321,6 @@ func TestMaxUploadSizeRejectsNegative(t *testing.T) {
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
-	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "-1")
 	if _, err := Load(); err == nil {
 		t.Fatal("MAX_UPLOAD_SIZE=-1: expected a fail-fast error (negative disables the cap), got nil")
@@ -338,7 +336,6 @@ func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
-	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "0")
 	cfg, err := Load()
 	if err != nil {
@@ -640,7 +637,6 @@ func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
 				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 				t.Setenv("RABBITMQ_HOST", "rmq")
 				t.Setenv("FILE_SERVICE_URL", "http://file-service:4003")
-				t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket")
 			}
 			if _, err := Load(); err == nil {
 				t.Fatalf("%s=%q must fail startup rather than silently falling back to a default", tc.key, tc.value)
@@ -743,7 +739,6 @@ func TestUnsupportedTopologyFailsStartup(t *testing.T) {
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
-	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
 
 	_, err := Load()
 	if err == nil {
@@ -777,7 +772,6 @@ func TestSupportedTopologiesStillLoad(t *testing.T) {
 			t.Setenv("REDIS_URL", "redis://localhost:6379")
 			t.Setenv("CHECKPOINT_STORE", c.checkpoint)
 			t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
-			t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
 			if _, err := Load(); err != nil {
 				t.Fatalf("%s must still load: %v", c.name, err)
 			}
@@ -797,9 +791,8 @@ func TestNumericEnvRejectsMalformed(t *testing.T) {
 		{key: "MAX_DOC_BYTES", val: "not-a-number"},
 		{key: "SAVE_DEBOUNCE_MILLIS", val: "12.5"},
 		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
-			"CHECKPOINT_STORE":               "file-service",
-			"FILE_SERVICE_URL":               "http://files:4000",
-			"FILE_SERVICE_STORAGE_BUCKET_ID": "bucket-1",
+			"CHECKPOINT_STORE": "file-service",
+			"FILE_SERVICE_URL": "http://files:4000",
 		}},
 		{key: "AUTH_BREAKER_TIMEOUT_SECONDS", val: "soon", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
 			"AUTH_MODE": "header", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
@@ -904,5 +897,44 @@ func TestOpenModeNeedsNoTokenHeader(t *testing.T) {
 	}
 	if cfg.Auth.ActorIDHeader != "" {
 		t.Errorf("Auth.ActorIDHeader = %q, want empty", cfg.Auth.ActorIDHeader)
+	}
+}
+
+// TestFileServiceNeedsOnlyTheURL is the config half of removing the fallback
+// bucket. FILE_SERVICE_STORAGE_BUCKET_ID is gone: the destination bucket is per
+// document and arrives on the collaboration-fetch metadata, so a deployment-wide
+// value had nothing correct to say. Requiring an env nothing reads is worse than
+// useless — an operator sets it, believes it means something, and it does not.
+//
+// Non-vacuity: restore `|| cfg.FileService.StorageBucketID == ""` to the
+// requirement and this fails — Load rejects a valid file-service deployment.
+func TestFileServiceNeedsOnlyTheURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("file-service with only FILE_SERVICE_URL must boot: %v", err)
+	}
+	if cfg.FileService.BaseURL != "http://fs:4003" {
+		t.Errorf("BaseURL = %q", cfg.FileService.BaseURL)
+	}
+}
+
+// TestFileServiceStillRequiresTheURL is the positive control for the test above:
+// dropping the bucket requirement must not have loosened the URL requirement. A
+// file-service store with no base URL cannot save anything, and must not boot.
+func TestFileServiceStillRequiresTheURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("CHECKPOINT_STORE=file-service with no FILE_SERVICE_URL must fail startup")
 	}
 }

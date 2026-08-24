@@ -57,10 +57,16 @@ type PointerResolver interface {
 	// It MUST report ErrNoPointer when the document has no file yet.
 	Pointer(ctx context.Context, id backend.DocumentID) (pointer, bucket string, err error)
 	// Record persists a newly created pointer, immediately after the file is
-	// created. NOT once per document: SaveCheckpoint recreates the file under a new
-	// id if the old one has vanished out of band, and records that id too. Record
-	// is the SOLE writer of ContentPointer — nothing else may set it, or a stale
-	// value elsewhere would point the document at a missing file.
+	// created. It runs on a document's FIRST save — the ErrNoPointer path — and
+	// not on rewrites, which address the existing file by id.
+	//
+	// It does NOT run for a pointed-at file that has vanished out of band.
+	// SaveCheckpoint REFUSES that case with ErrCorrupt rather than creating a
+	// replacement, because recreating would swap a missing referenced checkpoint
+	// for whatever the room happens to hold and hide the corruption.
+	//
+	// Record is the SOLE writer of ContentPointer — nothing else may set it, or a
+	// stale value elsewhere would point the document at a missing file.
 	Record(ctx context.Context, id backend.DocumentID, pointer string) error
 }
 
@@ -74,8 +80,6 @@ var ErrNoPointer = errors.New("fileservice: document has no file pointer yet")
 type Config struct {
 	// BaseURL is the file-service root, e.g. http://file-service:4003.
 	BaseURL string
-	// FallbackBucketID is used when the resolver reports no per-document bucket.
-	FallbackBucketID string
 	// MaxUploadSize caps a snapshot in bytes. It MUST stay below file-service's
 	// own request-body limit: a document sitting exactly on the limit encodes to
 	// slightly more once v2 framing is added, so it would pass our budget check
@@ -179,8 +183,33 @@ func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpoi
 		return 0, fmt.Errorf("resolving file pointer: %w", err)
 	}
 
+	// NO FALLBACK BUCKET, and deliberately so. An empty bucket here is not a
+	// configuration gap to paper over: the resolver REACHED the index, found the
+	// document's row, and that row named no owning bucket. The only thing a
+	// fallback could do is pick a different owner than the one the data says.
+	//
+	// The cost is OWNERSHIP AND LIFECYCLE. A snapshot written into a
+	// deployment-wide bucket is never reached by the document's delete cascade,
+	// which walks the document's OWN bucket, so the content outlives the document
+	// as an orphan. Piling every document's snapshot into one shared bucket is
+	// also the arrangement this store was deliberately moved off, after it caused
+	// snapshot collision and content loss.
+	//
+	// It is NOT an access-control problem, and must not be described as one: a
+	// snapshot is created with NO authorizationId (the row's authz column is
+	// NULL), so the destination bucket confers no authorization on it either way.
+	//
+	// This is a data-integrity condition, not a transient one: no retry invents an
+	// owner. It surfaces through the ordinary save-failure path, so the room
+	// escalates and members are told their edits are not saved — which is TRUE,
+	// and is the outcome worth having over a silently misfiled write.
+	//
+	// NOT covered here: a resolver that could not reach the index at all. That
+	// returns its own error above and never arrives with an empty bucket.
 	if bucket == "" {
-		bucket = s.cfg.FallbackBucketID
+		return 0, fmt.Errorf(
+			"%w: document %q has an index row but no owning storage bucket; refusing to create its first snapshot",
+			persistence.ErrCorrupt, req.DocumentID)
 	}
 	created, err := s.create(ctx, bucket, req.Update)
 	if err != nil {

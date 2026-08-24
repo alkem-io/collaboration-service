@@ -220,3 +220,41 @@ func TestMissingDocumentIDRejected(t *testing.T) {
 		t.Fatalf("empty id: status = %d, want 400", rr.Code)
 	}
 }
+
+// TestCreateDocumentCarriesTheStorageBucket asserts the create body's
+// storageBucketId reaches the metadata row.
+//
+// The field is create-path METADATA PARITY with the bus pre-register, which
+// carries the same bucket: production gets it from `server` over RMQ, and this
+// surface is what the raw-config file-service e2e fixture uses. It is NOT a
+// supported standalone file-service deployment — config.Load rejects
+// CHECKPOINT_STORE=file-service with METADATA_STORE=inmemory, so that pairing is
+// reachable only by building a Config value directly, as the e2e does.
+//
+// Dropping the field silently on the way through would leave that fixture's rows
+// bucket-less, and a file-service save for a bucket-less row is refused rather
+// than misfiled into a shared bucket where the blob would outlive the document as
+// an orphan (the delete cascade walks the document's OWN bucket).
+//
+// Non-vacuity: remove `StorageBucketID: req.StorageBucketID` from the meta
+// literal in Create and this fails on an empty bucket.
+func TestCreateDocumentCarriesTheStorageBucket(t *testing.T) {
+	lc := &fakeLifecycle{}
+	r := newCollabRouter(&CollabAPIHandler{Lifecycle: lc})
+
+	body := strings.NewReader(`{"contentType":"memo","storageBucketId":"bucket-42"}`)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/collab/doc-b", body))
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if len(lc.registered) != 1 {
+		t.Fatalf("registered %d documents, want 1", len(lc.registered))
+	}
+	if got := lc.registered[0].StorageBucketID; got != "bucket-42" {
+		t.Errorf("StorageBucketID = %q, want %q — without it a file-service save for this row is refused", got, "bucket-42")
+	}
+}

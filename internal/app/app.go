@@ -237,9 +237,8 @@ func lifecycleQueue(cfg *config.Config) string {
 func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.CheckpointStore, error) {
 	if cfg.CheckpointStore == config.CheckpointStoreFileService {
 		return persistfileservice.New(persistfileservice.Config{
-			BaseURL:          cfg.FileService.BaseURL,
-			FallbackBucketID: cfg.FileService.StorageBucketID,
-			MaxUploadSize:    cfg.FileService.MaxUploadSize,
+			BaseURL:       cfg.FileService.BaseURL,
+			MaxUploadSize: cfg.FileService.MaxUploadSize,
 		}, metapointer.New(metadata))
 	}
 	return persistinprocess.New(), nil

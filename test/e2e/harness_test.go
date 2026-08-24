@@ -146,7 +146,15 @@ func ensureDocument(t *testing.T, wsBase, documentID, contentType string) {
 	if _, loaded := e2eCreated.LoadOrStore(httpBase+"|"+documentID, struct{}{}); loaded {
 		return
 	}
-	body, err := json.Marshal(map[string]string{"contentType": contentType})
+	// Every e2e document is registered WITH its storage bucket, because that is
+	// the only place a bucket can come from: snapshots are written into the
+	// document's own bucket and there is no deployment-wide fallback, so a
+	// file-service save for a bucket-less row is refused. Harmless for the inline
+	// checkpoint store, which never looks at it.
+	body, err := json.Marshal(map[string]string{
+		"contentType":     contentType,
+		"storageBucketId": e2eStorageBucketID,
+	})
 	if err != nil {
 		t.Fatalf("marshal create body: %v", err)
 	}
@@ -165,6 +173,13 @@ func ensureDocument(t *testing.T, wsBase, documentID, contentType string) {
 		t.Fatalf("create %s: status = %d, want 201", documentID, resp.StatusCode)
 	}
 }
+
+// e2eStorageBucketID is the storage bucket every e2e document is registered
+// under. In production `server` supplies the document's own bucket on the
+// metadata row over RMQ; this raw-config fixture has no bus, so it supplies the
+// same field through the create API instead. A file-service save for a row with
+// no bucket is refused rather than misfiled into a shared bucket.
+const e2eStorageBucketID = "11111111-1111-1111-1111-111111111111"
 
 // e2eActorIDHeader is the dedicated, gateway-owned header the e2e configs name
 // as AUTH_TOKEN_HEADER. It matches the Alkemio deployment. It deliberately is

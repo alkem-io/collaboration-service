@@ -60,6 +60,22 @@ type CreateDocumentRequest struct {
 	// (collaboration-save) carries the same field, so the standalone REST path
 	// keeps parity with it.
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
+	// StorageBucketID is the storage bucket that OWNS this document's snapshot
+	// blob. Optional. It exists for METADATA PARITY with the bus pre-register,
+	// which carries the same field: in the Alkemio topology `server` owns the row
+	// and supplies the bucket over RMQ, and this create surface is the test/dev
+	// equivalent — it is what the raw-config e2e fixture uses.
+	//
+	// It is NOT evidence of a supported standalone file-service deployment.
+	// config.Load REJECTS CHECKPOINT_STORE=file-service with
+	// METADATA_STORE=inmemory, so that pairing is reachable only by building a
+	// Config value directly, which is what the e2e does.
+	//
+	// Where it IS consulted, the blob is created in this bucket and nowhere else:
+	// there is no deployment-wide fallback, and a file-service save for a document
+	// whose row names no bucket is refused rather than written somewhere the
+	// document's delete cascade will never reach.
+	StorageBucketID string `json:"storageBucketId,omitempty"`
 }
 
 // CreateDocumentResponse is returned by POST /collab/{documentId}: the registered
@@ -145,6 +161,7 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ContentType:           content,
 		OwnerRef:              req.OwnerRef,
 		AuthorizationPolicyID: req.AuthorizationPolicyID,
+		StorageBucketID:       req.StorageBucketID,
 	}
 	if err := h.Lifecycle.PreRegister(r.Context(), meta); err != nil {
 		ErrorResponse{Error: "failed to register document"}.Render(w, http.StatusInternalServerError)

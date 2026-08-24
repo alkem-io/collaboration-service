@@ -85,9 +85,9 @@ type FetchReply struct {
 	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
 	// the server FetchOutputData.storageBucketId). The file-service checkpoint store
 	// uploads each snapshot into THIS bucket so blobs co-locate with the
-	// document rather than a single flat platform bucket. Absent for documents
-	// the server cannot resolve a bucket for; the checkpoint store then falls back to
-	// its configured bucket.
+	// document rather than a single flat platform bucket. Absent for a document
+	// `server` cannot resolve a bucket for — and that is a REFUSED save, not a
+	// diverted one: the checkpoint store has no fallback bucket.
 	StorageBucketID string `json:"storageBucketId,omitempty"`
 	OwnerRef        string `json:"ownerRef,omitempty"`
 	Error           string `json:"error,omitempty"`

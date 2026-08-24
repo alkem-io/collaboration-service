@@ -14,7 +14,8 @@ import (
 
 // TestPointerReturnsTheDocumentsOwnBucket carries forward the property that used
 // to live in the service package's persist_bucket_test: a document's snapshot goes
-// into the document's OWN storage bucket, not a single configured fallback.
+// into the document's OWN storage bucket. There is no configured fallback left to
+// contrast it against: an empty bucket is now a refused save.
 //
 // The mechanism moved (FR-018a): the room used to thread the bucket into
 // CheckpointStore.SaveCheckpoint; now the store resolves it here, from the index row the server

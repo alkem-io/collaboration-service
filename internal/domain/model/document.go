@@ -54,8 +54,8 @@ type Metadata struct {
 	// profile.storageBucket.id, carried on collaboration-fetch). The
 	// file-service checkpoint store persists each snapshot into this per-document
 	// bucket so blobs co-locate with the document's other media rather than
-	// piling into one flat platform bucket. Empty in standalone / no-metadata
-	// mode, where the checkpoint store falls back to its configured bucket.
+	// piling into one flat platform bucket. If it is empty that store REFUSES the
+	// first save — there is no configured fallback bucket to divert to.
 	StorageBucketID string
 	// OwnerRef is the parent Alkemio entity that owns this document's
 	// lifecycle; the delete cascade keys off it (FR-023).

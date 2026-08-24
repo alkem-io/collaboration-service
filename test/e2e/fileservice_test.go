@@ -183,9 +183,8 @@ func fileServiceConfig(baseURL string) *config.Config {
 	cfg := standaloneConfig()
 	cfg.CheckpointStore = config.CheckpointStoreFileService
 	cfg.FileService = config.FileServiceConfig{
-		BaseURL:         baseURL,
-		StorageBucketID: "11111111-1111-1111-1111-111111111111",
-		MaxUploadSize:   32 << 20,
+		BaseURL:       baseURL,
+		MaxUploadSize: 32 << 20,
 	}
 	return cfg
 }

@@ -198,7 +198,7 @@ func newStoreWithResolver(t *testing.T) (*Store, *stubFileService, *mapResolver)
 	// Per-document buckets in production; one shared bucket here makes the dedup
 	// path REACHABLE, so the 409 branch is genuinely exercised.
 	res := &mapResolver{pointers: map[backend.DocumentID]string{}, bucket: "bucket-test"}
-	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "bucket-test"}, res)
+	store, err := New(Config{BaseURL: srv.URL}, res)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestSaveDoesNotForkOnServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	res := &mapResolver{pointers: map[backend.DocumentID]string{"doc-1": "file-existing"}, bucket: "b"}
-	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "b"}, res)
+	store, err := New(Config{BaseURL: srv.URL}, res)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestSaveFailsWhenThePointerCannotBeRecorded(t *testing.T) {
 	stub := newStub()
 	srv := httptest.NewServer(stub.handler())
 	t.Cleanup(srv.Close)
-	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "b"}, failingRecorder{})
+	store, err := New(Config{BaseURL: srv.URL}, failingRecorder{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -432,7 +432,7 @@ func storeAgainst(t *testing.T, h http.HandlerFunc, pointers map[backend.Documen
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	res := &mapResolver{pointers: pointers, bucket: "bucket-test"}
-	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "bucket-test"}, res)
+	store, err := New(Config{BaseURL: srv.URL}, res)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestSaveRejectsAnOversizeSnapshotBeforeUploading(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
 	t.Cleanup(srv.Close)
 	res := &mapResolver{pointers: map[backend.DocumentID]string{}, bucket: "bucket-test"}
-	store, err := New(Config{BaseURL: srv.URL, FallbackBucketID: "bucket-test", MaxUploadSize: 8}, res)
+	store, err := New(Config{BaseURL: srv.URL, MaxUploadSize: 8}, res)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

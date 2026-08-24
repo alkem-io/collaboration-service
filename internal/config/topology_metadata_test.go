@@ -73,7 +73,6 @@ func TestTheEphemeralIndexPairIsRejectedThroughLoad(t *testing.T) {
 	t.Setenv("CHECKPOINT_STORE", "file-service")
 	t.Setenv("METADATA_STORE", "inmemory")
 	t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
-	t.Setenv("FILE_SERVICE_STORAGE_BUCKET_ID", "bucket-1")
 	t.Setenv("AUTH_MODE", "open")
 
 	if _, err := Load(); err == nil {
