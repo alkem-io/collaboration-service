@@ -437,7 +437,7 @@ func (r *Room) enqueueCtx(ctx context.Context, cmd command) bool {
 }
 
 // RoomConfig carries the per-room tunables (R7 save cadence, idle release).
-// Values come from configuration; the defaults are standalone-friendly.
+// Values come from configuration; the defaults suit tests and local development.
 type RoomConfig struct {
 	// SaveDebounce is the time from the first dirty mutation until a snapshot
 	// is persisted (R7; 2000ms default, configurable). The timer
@@ -544,7 +544,7 @@ func DefaultLimits() Limits {
 	}
 }
 
-// DefaultRoomConfig is the Wave-1 standalone default cadence, with the Wave-3
+// DefaultRoomConfig is the Wave-1 default cadence, with the Wave-3
 // limit/presence defaults (epic R9, OPEN-4) layered on.
 func DefaultRoomConfig() RoomConfig {
 	return RoomConfig{

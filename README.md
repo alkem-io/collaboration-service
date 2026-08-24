@@ -11,9 +11,12 @@ service over one CRDT protocol (Yjs). It replaces both
 
 Transport is **raw WebSocket + y-protocols** (sync + awareness) at
 `wss://<host>/collab/<documentId>`. Horizontal scaling (fan-out), persistence
-(metadata + blob), and auth are **optional pluggable ports**: a single binary
-with zero external dependencies by default; Redis fan-out, file-service blob
-offload, and the authorization-evaluation-service for the Alkemio deployment.
+(metadata + blob), and auth sit behind **pluggable ports** for testability and
+bounded adapter choice. The supported Alkemio deployment is integrated: the
+authoritative index is in `server` via RabbitMQ, durable content is in
+file-service, and authN/authZ use `header` + `authzeval`. Durable deployment
+today is one pod with the in-process hub — Redis fan-out with file-service is
+rejected at startup until the service has a multi-pod ownership mechanism.
 
 This is **WS-C** of the `003-unify-collab-yjs` epic. The cross-repo spec is the
 source of truth:
@@ -49,7 +52,10 @@ codec), vendored via a module `replace` in [go.mod](./go.mod).
 
 ```bash
 make build        # build ./bin/collaboration-service
-make run          # run with standalone defaults (port 4006, open auth, inline blob)
+# The two backend selectors are MANDATORY and have no default, so `make run`
+# alone fails by design. This is the explicit tests/local fixture — non-durable,
+# open auth, never a deployment:
+HUB_MODE=inmemory CHECKPOINT_STORE=inline make run
 make test         # race-enabled unit tests + coverage summary
 make lint         # golangci-lint
 make setup-hooks  # install the .githooks pre-commit hook
@@ -61,7 +67,7 @@ Configuration is via environment variables — see [.env.example](./.env.example
 
 | Path | Purpose |
 |---|---|
-| `GET /healthz` | Liveness/readiness probe |
+| `GET /healthz` | Process-alive probe (does NOT check Redis/RabbitMQ/file-service/authzeval) |
 | `GET /metrics` | Prometheus scrape |
 | `GET /collab/{documentId}` | WebSocket collaboration (one document per connection) |
 

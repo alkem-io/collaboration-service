@@ -8,6 +8,8 @@ components:
           type: string
         ownerRef:
           type: string
+        storageBucketId:
+          type: string
       type: object
     http.CreateDocumentResponse:
       properties:
@@ -43,10 +45,12 @@ info:
     service over one CRDT protocol (Yjs): memos (Y.XmlFragment) and whiteboards
     (id-keyed Y.Map) share a single document namespace. Transport is raw
     WebSocket + y-protocols (sync + awareness) at /collab/{documentId};
-    horizontal scaling (fan-out), persistence (metadata + blob), and auth are
-    optional pluggable ports — single-binary standalone by default.
+    horizontal scaling (fan-out), persistence (metadata + blob), and auth sit
+    behind pluggable ports. The supported Alkemio deployment is integrated:
+    the authoritative index is in server via RabbitMQ, durable content is in
+    file-service, and authN/authZ use header + authzeval.
 
-    This spec covers only the operational/standalone HTTP surface; the live
+    This spec covers only the operational + document-create HTTP surface; the live
     collaboration protocol is the WebSocket contract in
     specs/003-unify-collab-yjs/contracts/ws-protocol.md.
   license:
@@ -93,10 +97,14 @@ paths:
   /healthz:
     get:
       description: |-
-        ServeHealthz is the readiness/liveness handler. With persistence and fan-out
-        being optional pluggable ports (single-binary standalone default), the
-        Phase-1 skeleton reports process-alive only; dependency probes (DB/Redis/bus,
-        when configured) are added alongside their adapters (tasks T004–T006).
+        ServeHealthz reports PROCESS-ALIVE ONLY. It returns 200 as long as the HTTP
+        server is serving, and proves nothing about the configured backends: a green
+        /healthz does NOT mean Redis, RabbitMQ, file-service or the
+        authorization-evaluation-service are reachable.
+
+        Stated flatly because the previous wording promised dependency probes "added
+        alongside their adapters" — every one of those adapters now exists and no probe
+        was added, so the comment read as a plan while describing the finished state.
       operationId: http.ServeHealthz
       responses:
         "200":
@@ -105,4 +113,4 @@ paths:
               schema:
                 $ref: '#/components/schemas/http.HealthResponse'
           description: OK
-      summary: ServeHealthz is the readiness/liveness handler.
+      summary: ServeHealthz reports PROCESS-ALIVE ONLY.

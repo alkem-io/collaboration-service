@@ -40,12 +40,13 @@ import (
 )
 
 // App is the assembled, ready-to-serve collaboration service: the HTTP handler
-// (operational endpoints + the collaboration WebSocket + the standalone REST
-// API) bound to a started room Manager, plus a Close that releases every live
-// room and tears down the backends that hold connections.
+// (operational endpoints + the collaboration WebSocket + the optional no-bus
+// document-create REST endpoint, tests/local) bound to a started room Manager,
+// plus a Close that releases every live room and tears down the backends that
+// hold connections.
 type App struct {
 	// Handler is the chi router serving /healthz, /metrics, /collab/{id} (WS),
-	// and the optional standalone create endpoint.
+	// and the optional no-bus document-create REST endpoint (tests/local).
 	Handler http.Handler
 	// Manager is the started room registry; the lifecycle consumer and the REST
 	// API drive it. Exposed for the e2e suite to assert room state directly.
@@ -95,9 +96,10 @@ func (a *App) Close() {
 // buildDeps selects a concrete adapter per outbound port from configuration and
 // assembles the domain dependency set (T004.4/T005.6/T006.4). It returns a
 // cleanup that closes the backends that hold connections (redis/rabbitmq)
-// on shutdown. The standalone defaults (inmemory / inline / open) keep the
-// service a single zero-dependency binary (SC-012); any other selection wires the
-// matching durable adapter, failing fast if its config is incomplete.
+// on shutdown. The in-process selections (inmemory / inline / open) let the
+// service run with nothing else present, which is the tests/local fixture and
+// not a deployment (SC-012); any other selection wires the matching integrated
+// adapter, failing fast if its config is incomplete.
 
 func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), error) {
 	var closers []func()
@@ -160,7 +162,7 @@ func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hu
 
 // buildMetadata selects the MetadataStore and, for the Alkemio (rabbitmq) bus,
 // the Contributor that publishes the north-star contribution event over the same
-// bus (T013). A nil Contributor (standalone) defaults to a domain no-op.
+// bus (T013). A nil Contributor (no bus wired) defaults to a domain no-op.
 func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, port.Contributor, error) {
 	switch cfg.MetadataStore {
 	case config.MetadataStoreRabbitMQ:
@@ -175,16 +177,26 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 		// contribution event), so analytics ride the same bus.
 		return store, store, nil
 	default:
-		// Standalone in-process store: the zero-dep path (SC-012).
+		// In-process store: the tests/local path, not durable (SC-012).
 		return metainmem.New(), nil, nil
 	}
 }
 
-// startLifecycle starts the RabbitMQ lifecycle consumer (document.deleted cascade,
-// document.deleted) on the Alkemio bus, registering its closer.
-// It is a no-op in standalone mode — the create/delete HTTP API replaces the bus
-// events there (T015/T016). A failure to connect is fatal in Alkemio mode (the
-// cascade is a correctness requirement: no orphan documents).
+// startLifecycle starts the RabbitMQ lifecycle consumer on the Alkemio bus,
+// registering its closer. The consumer handles EXACTLY ONE pattern,
+// `document.deleted` — there is no `document.created` and no other inbound
+// lifecycle event; anything else on the queue is rejected as poison. On a delete
+// it CLOSES AND EVICTS the live room and deletes nothing durable: `server` has
+// already removed the row, profile, bucket and blob before it publishes.
+//
+// With no bus wired there is no lifecycle consumer at all. The only substitute is
+// the optional document-create endpoint, which is a tests/local surface; there is
+// NO delete route to stand in for the event.
+//
+// A failure to connect is therefore fatal in Alkemio mode for a narrower reason
+// than a cascade: without the consumer a document deleted upstream would stay
+// live and editable in this process, with clients still writing into a room whose
+// document no longer exists.
 //
 // The consumer binds the DEDICATED lifecycle queue (cfg.RabbitMQ.LifecycleQueue),
 // NOT the metadata-store RPC queue. RabbitMQ round-robins a queue across its consumers,
@@ -329,10 +341,13 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		CollabHandler: collab,
 		Logger:        logger,
 	}
-	// The standalone create endpoint is the no-bus equivalent of document creation
-	// (T016). In Alkemio/rabbitmq mode the server owns document lifecycle over the
-	// bus (the lifecycle consumer), so this unauthenticated endpoint must NOT be
-	// exposed — leaving CollabAPI nil omits the REST surface entirely.
+	// The document-create endpoint is the no-bus (tests/local) substitute for
+	// creation (T016). In Alkemio/rabbitmq mode `server` owns document creation and
+	// the authoritative index, which this service reads and writes OUTBOUND over
+	// collaboration-fetch/-save RPC; the dedicated INBOUND lifecycle consumer
+	// handles deletion notification only. So this unauthenticated endpoint must NOT
+	// be exposed — leaving CollabAPI nil omits the REST surface entirely, which
+	// also makes Manager.PreRegister unreachable in that mode.
 	//
 	// When AuthZ is authzeval (AUTHZ_MODE=authzeval, independent of the AuthN
 	// mode), a create MUST carry an authorizationPolicyId — an empty one registers

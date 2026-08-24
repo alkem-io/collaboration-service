@@ -81,7 +81,7 @@ func (r *Room) sendModeDowngrade(m roomMember, reason model.CollaboratorModeReas
 // just elapsed: the set of distinct actor ids that mutated the document (FR-014).
 // It always sets the Prometheus gauge (via Metrics) and, in Alkemio mode, fires
 // the RabbitMQ contribution event (via the Contributor port); a no-op contributor
-// makes the bus emission free in standalone. The window set is then reset. An
+// makes the bus emission free when no bus is wired. The window set is then reset. An
 // empty window still sets the gauge to 0 but emits no bus event (nothing to log).
 func (r *Room) flushContribution(ctx context.Context) {
 	detached := r.detachContributors()

@@ -1,14 +1,18 @@
 // Package main boots the Alkemio collaboration-service: it loads configuration,
 // assembles the hexagon via internal/app (domain service + selected adapters,
-// the operational HTTP surface, the collaboration WebSocket endpoint, and the
-// standalone REST API / RabbitMQ lifecycle consumer), and serves until
+// the operational HTTP surface, the collaboration WebSocket endpoint, and —
+// depending on mode — either the optional no-bus document-create REST endpoint
+// for tests/local, or the RabbitMQ lifecycle consumer that handles upstream
+// document deletion in the integrated deployment), and serves until
 // SIGINT/SIGTERM triggers a graceful shutdown that releases every live room
 // (persisting a final snapshot each).
 //
-// The standalone-default adapters (single-pod fan-out, in-process metadata/blob,
-// open auth) keep this a single zero-dependency binary; any durable backend is
-// selected purely by configuration (SC-012). The composition root lives in
-// internal/app so cmd/server and the e2e suite boot through identical wiring.
+// The in-process adapters (single-pod fan-out, in-process metadata/blob, open
+// auth) let the binary run with nothing else present, which is what the test
+// suite and the local development loop use — not a supported deployment. The
+// integrated backends are selected purely by configuration (SC-012). The
+// composition root lives in internal/app so cmd/server and the e2e suite boot
+// through identical wiring.
 package main
 
 import (

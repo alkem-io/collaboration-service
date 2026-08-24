@@ -1,6 +1,7 @@
 // Package open is the in-process Auth + AuthZ adapter for development and
 // tests: it authenticates every connection as an anonymous identity and grants
-// every privilege, so the service runs as a single zero-dependency binary.
+// every privilege, so the service can run with no auth infrastructure present.
+// It is never a deployment option.
 //
 // The Alkemio composition splits the two roles across sibling packages: the
 // `header` adapter is handshake AuthN (it trusts the gateway-stamped actor id),

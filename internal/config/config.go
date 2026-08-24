@@ -33,8 +33,9 @@ const (
 type MetadataStoreMode string
 
 const (
-	// MetadataStoreInMemory keeps the document index in-process — the zero-dependency
-	// standalone default (boots with no bus or DB, SC-012).
+	// MetadataStoreInMemory keeps the document index in-process — the tests/local
+	// default (boots with no bus or DB, SC-012). Not a deployment option: the
+	// authoritative index belongs to `server`.
 	MetadataStoreInMemory MetadataStoreMode = "inmemory"
 	// MetadataStoreRabbitMQ rides the existing server save/fetch bus (Alkemio).
 	MetadataStoreRabbitMQ MetadataStoreMode = "rabbitmq"
@@ -58,8 +59,8 @@ const (
 	// AuthModeHeader trusts the actor id stamped in the gateway header
 	// (option (a), gateway-terminated; the Alkemio prod default).
 	AuthModeHeader AuthMode = "header"
-	// AuthModeOpen authenticates everyone anonymously — the zero-dependency
-	// standalone default.
+	// AuthModeOpen authenticates everyone anonymously — tests/local only, never a
+	// deployment option.
 	AuthModeOpen AuthMode = "open"
 )
 
@@ -71,8 +72,8 @@ const (
 	// AuthZModeEval delegates per-document read/update-content decisions to the
 	// authorization-evaluation-service (h2c + gobreaker, fail-closed).
 	AuthZModeEval AuthZMode = "authzeval"
-	// AuthZModeOpen grants every privilege — the zero-dependency standalone
-	// default (AuthZ bypassed).
+	// AuthZModeOpen grants every privilege — tests/local only, never a deployment
+	// option (AuthZ bypassed).
 	AuthZModeOpen AuthZMode = "open"
 )
 
@@ -87,7 +88,7 @@ type Config struct {
 	MetadataStore MetadataStoreMode
 	// CheckpointStore selects the checkpoint-store adapter. REQUIRED; no default.
 	CheckpointStore CheckpointStoreMode
-	// AuthMode selects the handshake-AuthN adapter (open default for standalone).
+	// AuthMode selects the handshake-AuthN adapter (open default for tests/local).
 	AuthMode AuthMode
 	// AuthZMode selects the per-document-AuthZ adapter, independently of AuthMode
 	// (Wave 5). Derived from AuthMode when AUTHZ_MODE is unset.
@@ -210,9 +211,9 @@ type AuthZEvalConfig struct {
 	BreakerHalfOpenMaxReqs  int
 }
 
-// Load assembles the Config from environment variables, applying the
-// standalone-friendly defaults (single-pod, inline blob, open auth) and
-// validating every enumerated selection. Returns an error naming the offending
+// Load assembles the Config from environment variables, applying the tests/local
+// defaults (single-pod, inline blob, open auth) and validating every enumerated
+// selection. Returns an error naming the offending
 // variable on the first invalid value — the process is expected to exit rather
 // than run half-configured.
 func Load() (*Config, error) {
@@ -263,7 +264,7 @@ func Load() (*Config, error) {
 
 	// Populate + fail-fast validate the settings for whichever non-default
 	// adapter each selection asks for (constitution §XV: no half-configured
-	// runs). The standalone defaults (inmemory / inline / open) need nothing.
+	// runs). The tests/local selections (inmemory / inline / open) need nothing.
 	if err := loadAdapterConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -277,7 +278,7 @@ func Load() (*Config, error) {
 }
 
 // Default limit/presence values (epic R9, OPEN-4) — kept in sync with the domain
-// service.DefaultRoomConfig so config and core agree on the standalone defaults.
+// service.DefaultRoomConfig so config and core agree on the same defaults.
 const (
 	// MaxDocBytes is capped BELOW file-service's 32 MiB request-body limit on
 	// PUT /internal/file/{id}/content, not at it. A document sitting exactly on a
@@ -415,14 +416,14 @@ func rejectEphemeralIndexBehindDurableBlobs(cfg *Config) error {
 	// METADATA_STORE is the one selector that still defaults. HUB_MODE and
 	// CHECKPOINT_STORE were both made mandatory for exactly this failure mode; this
 	// closes the same hole for the pair rather than changing that default, so the
-	// intentional standalone configuration (in-memory index AND in-process blobs)
+	// intentional tests/local configuration (in-memory index AND in-process blobs)
 	// keeps working untouched.
 	if cfg.CheckpointStore == CheckpointStoreFileService && cfg.MetadataStore == MetadataStoreInMemory {
 		return fmt.Errorf(
 			"unsupported topology: CHECKPOINT_STORE=file-service with METADATA_STORE=inmemory stores documents durably " +
 				"behind an index that is empty on every restart, so every connection is refused as an unknown document " +
 				"— reported to clients as a permission failure, never retried, while the process looks healthy; " +
-				"set METADATA_STORE=rabbitmq for the durable topology, or CHECKPOINT_STORE=inline for standalone")
+				"set METADATA_STORE=rabbitmq for the durable topology, or CHECKPOINT_STORE=inline for tests and local development")
 	}
 	return nil
 }
@@ -624,8 +625,8 @@ func parseCheckpointStore(v string) (CheckpointStoreMode, error) {
 		// save rather than at boot.
 		//
 		// So the key is required and local/test configuration says inline out loud.
-		// This deliberately gives up zero-CONFIG standalone; zero-DEPENDENCY
-		// standalone is unaffected (CHECKPOINT_STORE=inline needs nothing running).
+		// This deliberately gives up zero-CONFIG local startup; running with nothing
+		// else present is unaffected (CHECKPOINT_STORE=inline needs no backend).
 		return "", fmt.Errorf("CHECKPOINT_STORE must be set explicitly to one of inline, file-service; there is no default (inline is the non-durable in-process store for tests and local development, file-service is the durable one)")
 	default:
 		// FAIL, never fall back. buildCheckpoint answers anything it does not

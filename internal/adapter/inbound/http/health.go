@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-// HealthResponse is the body returned by the liveness/readiness endpoints.
+// HealthResponse is the body returned by the process-alive endpoint (/healthz).
 type HealthResponse struct {
 	Status string `json:"status"`
 }
@@ -17,10 +17,14 @@ func (r HealthResponse) Render(w http.ResponseWriter, code int) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// ServeHealthz is the readiness/liveness handler. With persistence and fan-out
-// being optional pluggable ports (single-binary standalone default), the
-// Phase-1 skeleton reports process-alive only; dependency probes (DB/Redis/bus,
-// when configured) are added alongside their adapters (tasks T004–T006).
+// ServeHealthz reports PROCESS-ALIVE ONLY. It returns 200 as long as the HTTP
+// server is serving, and proves nothing about the configured backends: a green
+// /healthz does NOT mean Redis, RabbitMQ, file-service or the
+// authorization-evaluation-service are reachable.
+//
+// Stated flatly because the previous wording promised dependency probes "added
+// alongside their adapters" — every one of those adapters now exists and no probe
+// was added, so the comment read as a plan while describing the finished state.
 func ServeHealthz(w http.ResponseWriter, _ *http.Request) {
 	HealthResponse{Status: "ok"}.Render(w, http.StatusOK)
 }

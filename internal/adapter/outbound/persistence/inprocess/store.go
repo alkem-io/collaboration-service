@@ -1,10 +1,10 @@
 // Package inprocess is an in-memory persistence.CheckpointStore: one current
 // document state per id, replaced on every save.
 //
-// It backs the in-process path — the test suite, the local development loop
-// (real editors, no Alkemio infrastructure), and the documented zero-dependency
-// smoke test (constitution §III). It carries NO durability guarantee across a
-// restart and must never be presented as a deployment option.
+// It backs the tests/local fixture — the test suite, the local development loop
+// (real editors, no Alkemio infrastructure), and the zero-dependency smoke test
+// (constitution §III). It carries NO durability guarantee across a restart and
+// must never be presented as a deployment option.
 //
 // It deliberately mirrors the SHAPE of the file-service store rather than being
 // a convenient in-memory log: one blob per document, no envelope, replaced on

@@ -67,7 +67,7 @@ type Auth interface {
 // the authorization-evaluation-service (h2c HTTP/2 POST /internal/auth/evaluate,
 // or NATS). It is evaluated ONCE per WebSocket
 // session, before the room is materialized, and holds until that socket closes. The 'open' adapter
-// grants everything for standalone use.
+// grants everything, for tests and local development only.
 //
 // Maps to: contracts/ws-protocol.md ("AuthZ per document … viewer-vs-
 // collaborator").
@@ -83,7 +83,7 @@ type AuthZ interface {
 // Contributor emits the north-star contribution event (FR-014): the per-window
 // set of actor ids that mutated a document. In the Alkemio deployment the
 // rabbitmq adapter publishes the `collaboration-contribution` event so server
-// analytics stay unbroken; standalone uses a no-op so a contribution flush costs
+// analytics stay unbroken; a no-bus run uses a no-op so a contribution flush costs
 // nothing without a bus. The Prometheus gauge is always emitted by the domain
 // independently of this port.
 //

@@ -83,10 +83,12 @@ info:
     service over one CRDT protocol (Yjs): memos (Y.XmlFragment) and whiteboards
     (id-keyed Y.Map) share a single document namespace. Transport is raw
     WebSocket + y-protocols (sync + awareness) at /collab/{documentId};
-    horizontal scaling (fan-out), persistence (metadata + blob), and auth are
-    optional pluggable ports — single-binary standalone by default.
+    horizontal scaling (fan-out), persistence (metadata + blob), and auth sit
+    behind pluggable ports. The supported Alkemio deployment is integrated:
+    the authoritative index is in server via RabbitMQ, durable content is in
+    file-service, and authN/authZ use header + authzeval.
 
-    This spec covers only the operational/standalone HTTP surface; the live
+    This spec covers only the operational + document-create HTTP surface; the live
     collaboration protocol is the WebSocket contract in
     specs/003-unify-collab-yjs/contracts/ws-protocol.md.
   version: 0.1.0

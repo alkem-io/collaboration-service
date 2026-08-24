@@ -1,14 +1,14 @@
 // Package service is the application core of the collaboration-service hexagon:
 // room lifecycle (lazy materialize on connect, release on idle, close on delete),
 // y-protocols sync + awareness orchestration, debounced snapshot persistence,
-// presence/limits, and the document-delete cascade. It depends only on the
+// presence/limits, and the reaction to an upstream document delete (close and
+// evict the live room; this package deletes nothing durable). It depends only on the
 // domain ports (internal/domain/port) and types (internal/domain/model) — never
 // on a concrete adapter.
 //
-// This is the Phase-1 (provisioning) skeleton: the package exists, compiles,
-// and declares the dependency surface. The room-lifecycle, sync, persistence,
-// presence, and lifecycle behavior land with tasks T007–T016 of
-// specs/003-unify-collab-yjs/tasks/collaboration-service.md.
+// The room-lifecycle, sync, persistence, presence and delete-reaction behavior
+// (T007–T016 of specs/003-unify-collab-yjs/tasks/collaboration-service.md) is
+// IMPLEMENTED here; this is no longer a provisioning skeleton.
 package service
 
 import (
@@ -45,7 +45,7 @@ type Deps struct {
 	// AuthZ evaluates per-document grants (auth-evaluation-service / open).
 	AuthZ port.AuthZ
 	// Contributor emits the north-star contribution event in Alkemio mode
-	// (rabbitmq); nil defaults to a no-op so standalone pays nothing (T013).
+	// (rabbitmq); nil defaults to a no-op so a no-bus run pays nothing (T013).
 	Contributor port.Contributor
 	// Registry owns in-process document identity, coalesced acquisition, eviction
 	// and invalidation. It is the CRDT core's own contract, which §II makes the
@@ -57,7 +57,7 @@ type Deps struct {
 	Registry memory.Registry
 }
 
-// noopContributor is the standalone default used when Deps.Contributor is nil:
+// noopContributor is the no-bus default used when Deps.Contributor is nil:
 // it drops the contribution event, so a room without an Alkemio bus pays nothing
 // for a window flush (the Prometheus gauge is still emitted by the domain).
 type noopContributor struct{}

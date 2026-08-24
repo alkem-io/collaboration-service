@@ -29,7 +29,9 @@ import (
 
 // Pattern names the lifecycle events the server emits (NestJS @EventPattern).
 const (
-	// PatternDocumentDeleted is the owner-delete cascade trigger.
+	// PatternDocumentDeleted signals that `server` has ALREADY completed the
+	// owner-delete cascade. It is this service's cue to close and evict the live
+	// room, not a cascade it performs.
 	PatternDocumentDeleted = "document.deleted"
 )
 

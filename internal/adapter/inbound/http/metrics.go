@@ -1,5 +1,5 @@
 // Package http is the inbound HTTP adapter: the chi v5 router that exposes the
-// operational surface (liveness, readiness, Prometheus metrics) and mounts the
+// operational surface (process-alive probe, Prometheus metrics) and mounts the
 // inbound WebSocket collaboration endpoint. It owns no business logic — handlers
 // translate HTTP to domain calls and back.
 package http

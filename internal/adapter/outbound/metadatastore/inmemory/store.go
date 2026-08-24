@@ -42,14 +42,19 @@ func (s *Store) Load(_ context.Context, id model.DocumentID) (model.Metadata, er
 // across backends. This matters because two callers Save partial rows:
 //   - a per-snapshot persist (Room.persist) carries content_pointer but
 //     historically blank lifecycle fields; and
-//   - a (re)delivered document.created pre-register carries owner_ref/content_type
-//     but a blank content_pointer.
+//   - a pre-register (Manager.PreRegister, reached only from the no-bus
+//     document-create HTTP handler) carries owner_ref/content_type but a blank
+//     content_pointer.
 //
 // Without "blank = unchanged", a wholesale row replace would let the first snapshot
 // save wipe the pre-registered owner_ref (the delete cascade key, FR-023), and a
-// REDELIVERED document.created wipe the live content_pointer back to "" (orphaning
-// the persisted blob and bumping the version). A non-blank value still wins (a
-// genuine update).
+// REPEATED pre-register — the same document created twice over the HTTP endpoint,
+// or any second Save carrying a blank pointer — wipe the live content_pointer back
+// to "" (orphaning the persisted blob and bumping the version). A non-blank value
+// still wins (a genuine update).
+//
+// The repeat is a plain repeated call, not a broker redelivery: no inbound event
+// reaches this store. The lifecycle consumer handles `document.deleted` only.
 func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

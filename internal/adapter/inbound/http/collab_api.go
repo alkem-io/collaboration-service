@@ -12,8 +12,8 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// CollabLifecycle is the slice of the domain Manager the standalone create API
-// drives (T016). The concrete service.Manager satisfies it.
+// CollabLifecycle is the slice of the domain Manager the no-bus document-create
+// API drives (T016). The concrete service.Manager satisfies it.
 //
 // There is no delete counterpart. `document.deleted` now only closes and evicts a
 // live room — `server` deletes the durable state before publishing — so a
@@ -25,9 +25,11 @@ type CollabLifecycle interface {
 	PreRegister(ctx context.Context, meta model.Metadata) error
 }
 
-// CollabAPIHandler serves the standalone document create REST API for the no-bus
-// deployment (FR-020). In Alkemio mode `server` owns document creation; this HTTP
-// surface is the standalone equivalent.
+// CollabAPIHandler serves the standalone document create REST API — the name of
+// this HTTP surface, not a claim about a supported topology. `001` FR-020 (which
+// made standalone first-class) is SUPERSEDED; in the Alkemio deployment `server`
+// owns document creation, and this surface is what tests and the local
+// development loop use instead.
 type CollabAPIHandler struct {
 	// Lifecycle is the domain manager the handlers drive.
 	Lifecycle CollabLifecycle
@@ -35,7 +37,7 @@ type CollabAPIHandler struct {
 	// (set true in authzeval mode). Without it an empty policy id would register a
 	// document that looks valid but fails EVERY later authorization evaluation
 	// (the authzeval adapter fails closed on an empty policy), so the document is
-	// silently unreachable. In open/standalone mode authZ grants everything, so the
+	// silently unreachable. In open mode authZ grants everything, so the
 	// policy id is genuinely optional and this stays false.
 	RequireAuthorizationPolicy bool
 }
@@ -54,11 +56,11 @@ type CreateDocumentRequest struct {
 	// Optional.
 	OwnerRef string `json:"ownerRef,omitempty"`
 	// AuthorizationPolicyID is the Alkemio authorization policy the per-document
-	// authZ adapter evaluates against (OPEN-1). Optional in open/standalone mode
+	// authZ adapter evaluates against (OPEN-1). Optional in open mode
 	// (authZ grants everything); in authzeval mode it is required for the policy
 	// resolver to evaluate read/update-content. The bus pre-register
-	// (collaboration-save) carries the same field, so the standalone REST path
-	// keeps parity with it.
+	// (collaboration-save) carries the same field, so this create surface keeps
+	// parity with it.
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	// StorageBucketID is the storage bucket that OWNS this document's snapshot
 	// blob. Optional. It exists for METADATA PARITY with the bus pre-register,
@@ -105,13 +107,13 @@ func (r ErrorResponse) Render(w http.ResponseWriter, code int) {
 	_ = json.NewEncoder(w).Encode(r)
 }
 
-// Create pre-registers a document for the standalone (no-bus) deployment: it reads
+// Create pre-registers a document on the no-bus path: it reads
 // the content type from the body (defaulting to memo), writes the metadata row via
 // the Manager, and returns 201. The room itself still materializes lazily on first
 // WebSocket connect — this only seeds the index ahead of time.
 //
 // @Summary     Create (pre-register) a collaboration document
-// @Description Pre-registers a document's metadata for the standalone (no-bus)
+// @Description Pre-registers a document's metadata on the no-bus
 // @Description deployment so it exists in the index ahead of its first connect.
 // @Description NOT MOUNTED in the Alkemio deployment: the route is registered only
 // @Description when METADATA_STORE != rabbitmq, because there `server` owns the row

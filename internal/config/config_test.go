@@ -288,6 +288,15 @@ func TestFileServiceRequiresSettings(t *testing.T) {
 	}
 }
 
+// TestFileServiceLoadsSettings pins the WHOLE file-service input set: a URL and an
+// upload cap, and nothing else.
+//
+// It deliberately sets NO bucket id and NO authorization id. Both envs once
+// existed here and neither is read any more — the destination bucket is
+// per-document from the collaboration-fetch metadata, and a snapshot is created
+// with no authorizationId at all (the row's authz column is NULL). A fixture that
+// exports an ignored variable reads as part of the required contract and would
+// mask a future accidental dependency on it, so the absence is the assertion.
 func TestFileServiceLoadsSettings(t *testing.T) {
 	pinKnownGood(t)
 	t.Setenv("CHECKPOINT_STORE", "file-service")
@@ -295,7 +304,6 @@ func TestFileServiceLoadsSettings(t *testing.T) {
 	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
 	t.Setenv("RABBITMQ_HOST", "rmq")
 	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
-	t.Setenv("FILE_SERVICE_AUTHORIZATION_ID", "auth-uuid")
 	t.Setenv("MAX_UPLOAD_SIZE", "1048576")
 	cfg, err := Load()
 	if err != nil {

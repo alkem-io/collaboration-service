@@ -215,7 +215,7 @@ func (m *Manager) SendBuffer() int {
 
 // JoinRequest is the set of inputs a connection brings when it joins a room: the
 // document id and seed content type, the authenticated identity (nil actor id
-// in open/standalone mode), and the outbound connection port. Bundling them in a
+// in open mode), and the outbound connection port. Bundling them in a
 // struct keeps the call site readable as the Wave-3 presence/authZ inputs grew.
 type JoinRequest struct {
 	// ID is the document to join.
@@ -445,8 +445,13 @@ func (m *Manager) CloseDeleted(ctx context.Context, id model.DocumentID) error {
 }
 
 // PreRegister writes an initial metadata row for a document ahead of its first
-// connect (lifecycle document.created, T015). It is a thin pass-through to the
-// MetadataStore so the standalone HTTP create and the bus event share one path.
+// connect (T016). Its ONLY caller is the no-bus document-create HTTP handler,
+// which is mounted only when METADATA_STORE is not rabbitmq — so this is a
+// tests/local path and is unreachable in the Alkemio deployment, where `server`
+// creates the row and this service reads it over collaboration-fetch.
+//
+// There is no inbound `document.created` event; the lifecycle consumer handles
+// `document.deleted` only. It is a thin pass-through to the MetadataStore.
 func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
 	return m.deps.Metadata.Save(ctx, meta)
 }

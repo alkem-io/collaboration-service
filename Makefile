@@ -39,9 +39,11 @@ vet:
 	$(GO) vet ./...
 
 # Regenerate the OpenAPI spec from the chi router + handler Render methods. The
-# standalone create endpoint (POST /collab/{documentId}) and /healthz are the
-# documented surface; the live collaboration protocol is the WebSocket contract
-# (specs/.../ws-protocol.md), out of scope for OpenAPI.
+# documented surface is /healthz plus the standalone create endpoint
+# (POST /collab/{documentId}) — that is the NAME of the no-bus document-create
+# surface used by tests and local development, not a deployment mode. The live
+# collaboration protocol is the WebSocket contract (specs/.../ws-protocol.md),
+# out of scope for OpenAPI.
 openapi:
 	apispec --dir . --output openapi.yaml --config apispec.yaml
 

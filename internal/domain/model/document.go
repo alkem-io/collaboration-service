@@ -33,7 +33,7 @@ const (
 type DocumentID string
 
 // Metadata is the small, queryable index row for a collaboration document,
-// owned by the Alkemio server (or the standalone metadata store). It records
+// owned by the Alkemio server (or the in-process index in tests/local). It records
 // where the blob lives and who owns the document's lifecycle — never the blob
 // bytes themselves (those live in the checkpoint store behind ContentPointer).
 type Metadata struct {
@@ -48,7 +48,7 @@ type Metadata struct {
 	ContentPointer string
 	// AuthorizationPolicyID is the Alkemio authorization policy this document
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
-	// the authorization-evaluation-service; empty in open/standalone mode.
+	// the authorization-evaluation-service; empty in open mode.
 	AuthorizationPolicyID string
 	// StorageBucketID is the document's OWN storage bucket (its
 	// profile.storageBucket.id, carried on collaboration-fetch). The

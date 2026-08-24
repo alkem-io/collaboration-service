@@ -175,8 +175,9 @@ closes `1011`, so clients keep retrying.
 
 The live collaboration behavior is implemented: room lifecycle, y-protocols
 sync/awareness, the ephemeral channel, persistence with debounced flush + retry +
-escalation, presence, limits, and the owner-delete cascade. Ports, adapters, CI,
-lint, and governance are in place.
+escalation, presence, limits, and the reaction to an upstream owner delete (close
+and evict the live room; `server` has already removed the row, profile, bucket and
+blob before it publishes). Ports, adapters, CI, lint, and governance are in place.
 
 Persistence is durable-by-declaration: `Room.persist` writes a COMPLETE V2
 snapshot and states its codec, the in-process store records the codec beside the
