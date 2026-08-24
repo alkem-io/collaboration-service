@@ -9,14 +9,75 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
+// TestDeleteTombstoneBridgesConfirmedPublishToOwnerRemoval pins the simplified
+// lifecycle ordering: the event is confirmed before server starts deleting, so
+// the metadata row can legitimately still exist when collaboration-service
+// receives it. The temporary tombstone must refuse that otherwise-valid join;
+// after expiry the authoritative metadata row decides again.
+func TestDeleteTombstoneBridgesConfirmedPublishToOwnerRemoval(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	const doc model.DocumentID = "delete-in-progress"
+	if err := mgr.PreRegister(context.Background(), model.Metadata{
+		ID: doc, ContentType: model.ContentTypeMemo,
+	}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("pre-delete eviction: %v", err)
+	}
+
+	client := newFakeClient(t)
+	if _, _, err := mgr.Join(context.Background(), JoinRequest{
+		ID: doc, Content: model.ContentTypeMemo, Identity: client.identity, Conn: client,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("join during delete tombstone = %v, want ErrForbidden", err)
+	}
+	if mgr.RoomCount() != 0 {
+		t.Fatalf("tombstoned join materialized %d room(s)", mgr.RoomCount())
+	}
+
+	// Drive expiry deterministically instead of waiting five minutes.
+	mgr.mu.Lock()
+	mgr.deleteTombstones[doc] = time.Now().Add(-time.Second)
+	mgr.mu.Unlock()
+	if _, _, err := mgr.Join(context.Background(), JoinRequest{
+		ID: doc, Content: model.ContentTypeMemo, Identity: client.identity, Conn: client,
+	}); err != nil {
+		t.Fatalf("join after tombstone expiry: %v", err)
+	}
+}
+
+func TestDuplicateDeleteRenewsTheTombstone(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	const doc model.DocumentID = "duplicate-delete"
+
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	mgr.mu.Lock()
+	first := mgr.deleteTombstones[doc]
+	mgr.mu.Unlock()
+
+	if err := mgr.CloseDeleted(context.Background(), doc); err != nil {
+		t.Fatalf("duplicate delete: %v", err)
+	}
+	mgr.mu.Lock()
+	second := mgr.deleteTombstones[doc]
+	mgr.mu.Unlock()
+
+	if !second.After(first) {
+		t.Fatalf("duplicate did not renew tombstone: first=%s second=%s", first, second)
+	}
+}
+
 // TestAnUnrelatedDeleteCostsOneRetryNotAPermanentRefusal pins the deliberate
 // trade the delete epoch makes.
 //
 // The epoch is Manager-wide, so deleting ANY document invalidates every admission
-// already in flight — including for documents nobody touched. That is the price
-// of not keeping per-id bookkeeping whose correctness depended on how long a
-// delete happened to take. What must never happen is the price becoming
-// permanent: the client reconnects, captures the new epoch, and gets in.
+// already in flight — including for documents nobody touched. That complements
+// the per-id tombstone, which cannot reach a join that crossed its check before
+// the event arrived. What must never happen is the price becoming permanent: the
+// client reconnects, captures the new epoch, and gets in.
 //
 // Non-vacuity: make the epoch monotonically compared (>= instead of !=) and the
 // first Join below stops being refused, collapsing the guarantee this replaced.

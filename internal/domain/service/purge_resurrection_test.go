@@ -82,7 +82,8 @@ func newGatedManager(t *testing.T) (*Manager, *persistinprocess.Store, *gatedMet
 }
 
 // TestAJoinThatPassedExistenceBeforeTheDeleteIsNotAdmitted is the decisive race
-// for the owner-delete slice, and the reason the per-id tombstone was replaced.
+// for the owner-delete slice, and the reason the per-id tombstone is complemented
+// by a monotonic delete epoch.
 //
 // The interleaving is the whole test. A client's Join captures the delete epoch,
 // reads that the document exists — and THEN the owner deletes it. Everything that
@@ -91,10 +92,9 @@ func newGatedManager(t *testing.T) (*Manager, *persistinprocess.Store, *gatedMet
 // materializes a room on a document that no longer exists, seeds it empty because
 // `server` removed the checkpoint, and its first edit flushes content back.
 //
-// The old per-id tombstone caught this only by accident: it was raised for the
-// duration of two backend deletes. Those deletes are gone, so CloseDeleted now
-// returns in microseconds and a duration-based guard catches nothing. The epoch
-// does not depend on duration.
+// The per-id tombstone refuses joins that start after the event, but this join
+// passed that check before the event arrived. The epoch invalidates that stale
+// admission regardless of how long the tombstone remains installed.
 //
 // Non-vacuity: it drives an admitted Join all the way to the harm — a REVISION
 // advance on the seeded checkpoint — so a failure names what came back rather

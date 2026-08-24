@@ -2,13 +2,10 @@
 // Alkemio server's owner-driven document lifecycle events (FR-023) on a dedicated
 // queue.
 //
-// `document.deleted` CLOSES AND EVICTS a live room. It deletes nothing durable.
-// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
-// it enqueues the outbox row that becomes this event (server:
-// memo.service.ts / whiteboard.service.ts — the cascade runs ahead of the
-// transaction that removes the leaf and enqueues), so by the time the event
-// arrives there is nothing here left to delete. A document with no live room is a
-// no-op.
+// `document.deleted` CLOSES AND EVICTS a live room, tombstones its id briefly,
+// and deletes nothing durable. `server` confirms the persistent publish BEFORE
+// starting its owner cascade; the tombstone bridges that short interval. A
+// document with no live room still records the tombstone and otherwise is a no-op.
 //
 // The wire shape is the NestJS event envelope { pattern, data, id }, so a NestJS
 // @EventPattern publisher on the server reaches it natively.
@@ -29,9 +26,9 @@ import (
 
 // Pattern names the lifecycle events the server emits (NestJS @EventPattern).
 const (
-	// PatternDocumentDeleted signals that `server` has ALREADY completed the
-	// owner-delete cascade. It is this service's cue to close and evict the live
-	// room, not a cascade it performs.
+	// PatternDocumentDeleted signals that `server` is starting the owner-delete
+	// cascade. It is this service's cue to tombstone, close and evict the live room,
+	// not a cascade it performs.
 	PatternDocumentDeleted = "document.deleted"
 )
 
@@ -130,10 +127,9 @@ func (c *Consumer) handleDeleted(ctx context.Context, data json.RawMessage) ackA
 		return rejectPoison // malformed payload: record it rather than swallow it.
 	}
 	if err := c.mgr.CloseDeleted(ctx, model.DocumentID(ev.ID)); err != nil {
-		// CloseDeleted is idempotent and deletes nothing durable — `server` has
-		// already removed the entity, profile, bucket and checkpoint before the event
-		// is enqueued. So an error here means only that a still-live room would not
-		// accept the close, which is transient by nature: requeue and try again.
+		// CloseDeleted is idempotent and deletes nothing durable. An error means a
+		// still-live room would not accept the close, which is transient by nature:
+		// requeue and try again.
 		c.logger.Warn("document close/evict was refused by a live room; requeueing the event",
 			zap.String("doc", ev.ID), zap.Error(err))
 		return requeue

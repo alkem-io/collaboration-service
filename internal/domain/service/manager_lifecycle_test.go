@@ -78,11 +78,11 @@ func TestJoinDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	}
 }
 
-// TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue is the same race on the purge
-// path: Manager.Purge's cmdCloseDeleted can land in a room that tears down without running
-// it, so the result channel is never written. The fix selects on room.done and
-// falls through to the idempotent direct durable purge instead of blocking forever.
-func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
+// TestCloseDeletedDoesNotHangWhenRoomTearsDownAfterEnqueue is the same race on
+// the lifecycle path: cmdCloseDeleted can land in a room that tears down without
+// running it, so the result channel is never written. CloseDeleted selects on
+// room.done and treats the already-evicted room as success instead of blocking.
+func TestCloseDeletedDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	m, deps := testManager(t, RoomConfig{SendBuffer: 16, SaveDebounce: time.Hour, IdleTimeout: time.Hour, BackendTimeout: 5 * time.Second})
 	id := model.DocumentID("doc-purge-teardown-race")
 	room := wedgeRoom(t, m, deps, id)
@@ -96,10 +96,10 @@ func TestPurgeDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	select {
 	case err := <-purgeErr:
 		if err != nil {
-			t.Fatalf("Purge should fall through to an idempotent durable purge, got: %v", err)
+			t.Fatalf("CloseDeleted should accept an already-evicted room, got: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Purge hung after the room tore down with its cmdCloseDeleted still unprocessed")
+		t.Fatal("CloseDeleted hung after the room tore down with its command unprocessed")
 	}
 }
 

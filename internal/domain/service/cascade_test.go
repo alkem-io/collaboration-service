@@ -11,12 +11,10 @@ import (
 // TestCloseDeletedEvictsALiveRoomAndDeletesNothing is RED #1 for the owner-delete
 // slice, and the one that pins its whole point.
 //
-// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
-// it enqueues the outbox row that becomes document.deleted (server:
-// memo.service.ts / whiteboard.service.ts run the cascade ahead of the
-// transaction that removes the leaf and enqueues). So by the time this event
-// arrives there is nothing durable left for collab to remove, and issuing a
-// delete would at best be a redundant round-trip against a deleted bucket.
+// `server` confirms document.deleted BEFORE it starts removing the entity,
+// profile, storage bucket and checkpoint blob. This event can therefore arrive
+// while the durable state still exists, but ownership remains with `server` and
+// collab must not race its cascade with a second delete.
 //
 // What collab still owes is the LIVE part: tell the connected clients with the
 // one stable typed code, and evict the room.
@@ -76,10 +74,10 @@ func TestCloseDeletedEvictsALiveRoomAndDeletesNothing(t *testing.T) {
 
 	// The discriminating half: collab touched neither.
 	if _, err := deps.meta.Load(context.Background(), "close-live"); err != nil {
-		t.Fatalf("metadata row was deleted (%v); the row belongs to server, which removed it before publishing", err)
+		t.Fatalf("metadata row was deleted (%v); the row belongs to server", err)
 	}
 	if _, err := deps.storedState(context.Background(), "close-live"); err != nil {
-		t.Fatalf("snapshot was deleted (%v); the blob belongs to file-service, and server removed its bucket before publishing", err)
+		t.Fatalf("snapshot was deleted (%v); the blob belongs to file-service and its bucket cascade belongs to server", err)
 	}
 }
 

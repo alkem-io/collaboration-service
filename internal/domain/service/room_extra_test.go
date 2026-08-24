@@ -27,7 +27,7 @@ func (failingMetaSave) Save(context.Context, model.Metadata) error { return erro
 // ErrNotFound here would instead mean "no such document", which Join now refuses
 // outright — a different failure than the one under test.
 func (failingMetaSave) Load(_ context.Context, id model.DocumentID) (model.Metadata, error) {
-	return model.Metadata{ID: id, ContentType: model.ContentTypeMemo}, nil
+	return model.Metadata{ID: id, ContentType: model.ContentTypeMemo, Migrated: true}, nil
 }
 
 // TestSaveErrorOnMetadataFailure asserts a metadata Save failure (after a

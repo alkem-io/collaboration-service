@@ -13,6 +13,7 @@ import (
 	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
 	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
+	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
 // admissionStore counts the durable reads a join causes, so "nothing was
@@ -141,6 +142,43 @@ func TestADeniedReadNeverMaterializesTheDocument(t *testing.T) {
 	// refused, and asking would be a second call to a backend for no purpose.
 	if seen := authz.seen(); len(seen) != 1 || seen[0] != model.PrivilegeRead {
 		t.Fatalf("evaluations = %v, want exactly one READ", seen)
+	}
+}
+
+type pendingMigrationMetadata struct{ port.MetadataStore }
+
+func (s pendingMigrationMetadata) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
+	meta, err := s.MetadataStore.Load(ctx, id)
+	meta.Migrated = false
+	return meta, err
+}
+
+// TestPendingLegacyDocumentIsRefusedBeforeMaterialization pins the temporary
+// rollout gate: authorized callers cannot cause retained legacy content to open
+// as an empty editable Y.Doc. The same next join succeeds once server atomically
+// publishes the snapshot pointer and migrated=true.
+func TestPendingLegacyDocumentIsRefusedBeforeMaterialization(t *testing.T) {
+	const doc model.DocumentID = "legacy-pending"
+	authz := &scriptedAuthZ{decide: decideBy(true, true)}
+	mgr, store := admissionManager(t, authz, doc)
+	mgr.deps.Metadata = pendingMigrationMetadata{MetadataStore: mgr.deps.Metadata}
+
+	client := newFakeClient(t)
+	session, frames, err := mgr.Join(context.Background(), JoinRequest{
+		ID: doc, Content: model.ContentTypeMemo,
+		Identity: testIdentity("authorized"), Conn: client,
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("join = %v, want ErrForbidden", err)
+	}
+	if session != nil || len(frames) != 0 {
+		t.Fatalf("pending join returned session=%v frames=%d", session, len(frames))
+	}
+	if got := store.loadCount(); got != 0 {
+		t.Fatalf("pending join loaded the checkpoint %d time(s); gate must precede materialization", got)
+	}
+	if got := mgr.RoomCount(); got != 0 {
+		t.Fatalf("pending join left %d live room(s)", got)
 	}
 }
 

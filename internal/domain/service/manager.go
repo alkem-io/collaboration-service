@@ -54,6 +54,12 @@ var ErrForbidden = errors.New("collaboration access denied")
 // path cannot hang process exit.
 const shutdownDrainGrace = 5 * time.Second
 
+// deleteTombstoneTTL bridges the deliberately short interval between the
+// server's confirmed pre-delete publish and its owner-row deletion. Five minutes
+// is long enough for the synchronous cascade while remaining self-healing if the
+// server crashes after publishing and leaves the document intact.
+const deleteTombstoneTTL = 5 * time.Minute
+
 // Metrics is the observability surface the room lifecycle drives: the active
 // room/connection gauges and the snapshot counter (metrics.go). The inbound
 // HTTP adapter owns the concrete Prometheus collectors; the core depends only on
@@ -116,6 +122,10 @@ type Manager struct {
 
 	mu    sync.Mutex
 	rooms map[model.DocumentID]*Room
+	// deleteTombstones temporarily refuse new admissions for a document whose
+	// owner deletion has started. They are process-local by design: a restart also
+	// drops every live room, after which the authoritative metadata lookup decides.
+	deleteTombstones map[model.DocumentID]time.Time
 	// closed is set by Close under mu; acquire refuses new rooms once it is set, so
 	// no room is materialized after the shutdown drain snapshot (002 FR-001).
 	closed bool
@@ -173,12 +183,13 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 		deps.Contributor = noopContributor{}
 	}
 	return &Manager{
-		registry: registry,
-		deps:     deps,
-		cfg:      cfg,
-		metrics:  metrics,
-		logger:   logger,
-		rooms:    make(map[model.DocumentID]*Room),
+		registry:         registry,
+		deps:             deps,
+		cfg:              cfg,
+		metrics:          metrics,
+		logger:           logger,
+		rooms:            make(map[model.DocumentID]*Room),
+		deleteTombstones: make(map[model.DocumentID]time.Time),
 	}
 }
 
@@ -265,6 +276,14 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 	// "the row existed" and "no delete has happened since" is checked against one
 	// point in time. Reading it after would leave the gap this closes.
 	m.mu.Lock()
+	now := time.Now()
+	if expires, tombstoned := m.deleteTombstones[req.ID]; tombstoned {
+		if now.Before(expires) {
+			m.mu.Unlock()
+			return nil, nil, ErrForbidden
+		}
+		delete(m.deleteTombstones, req.ID)
+	}
 	epoch := m.deleteEpoch
 	m.mu.Unlock()
 
@@ -314,25 +333,33 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 // makes this gate survive a process restart and hold regardless of what the
 // client does, which no in-memory marker could.
 //
-// It is what stops a deleted document from coming back on a RECONNECT, and it is
-// the only thing that does: the delete epoch invalidates admissions already in
-// flight, but it is a counter, not a record of which ids are gone — a client
-// connecting a second later captures the current epoch and sails past it. Only
-// this read knows the document no longer exists.
+// It is the durable authority that stops a deleted document from coming back on a
+// RECONNECT after the short in-memory tombstone expires or the process restarts.
+// The delete epoch invalidates admissions already in flight; the tombstone refuses
+// fresh admissions while the owner cascade is expected to finish; only this read
+// ultimately knows whether the document still exists.
 //
-// The two are complementary and neither is redundant. This gate cannot catch a
-// Join that read the row BEFORE the owner deleted it; the epoch cannot catch a
-// Join that starts afterwards.
+// The three checks are complementary. This gate cannot catch a Join that read the
+// row before deletion started; the epoch catches that stale admission; the
+// tombstone catches a fresh Join while the row legitimately still exists.
 //
 // A store error that is NOT not-found fails closed: an unreachable backend must
 // not be read as "the document is gone", which would tear down a live document
 // during an outage.
 func (m *Manager) requireDocument(ctx context.Context, id model.DocumentID) error {
-	if _, err := m.deps.Metadata.Load(ctx, id); err != nil {
+	meta, err := m.deps.Metadata.Load(ctx, id)
+	if err != nil {
 		if isNotFound(err) {
 			return fmt.Errorf("%w: %s", ErrDocumentUnknown, id)
 		}
 		return fmt.Errorf("resolve document %s: %w", id, err)
+	}
+	// Temporary progressive-rollout gate. Authorization has already succeeded,
+	// but retained legacy content is not safe to materialize as an empty Y.Doc.
+	// Use the ordinary refusal on the wire; once the migration atomically stores
+	// the snapshot pointer and flips this marker, the next join succeeds.
+	if !meta.Migrated {
+		return ErrForbidden
 	}
 	return nil
 }
@@ -375,11 +402,11 @@ func (m *Manager) authorizeSession(ctx context.Context, id model.DocumentID, ide
 // disconnects connected clients with session-end/document-deleted and releases
 // the in-memory room. It DELETES NOTHING.
 //
-// `server` removes the entity, profile, storage bucket and checkpoint blob before
-// it enqueues the outbox row that becomes this event, so by the time it arrives
-// the durable state is already gone. Idempotent in both directions: a document
-// with no live room is a no-op, and a repeated event closes an already-closed
-// room without error.
+// `server` confirms this persistent event before starting its synchronous owner
+// cascade. A short per-document tombstone prevents immediate rematerialization
+// while that cascade completes. Idempotent in both directions: a document with no
+// live room is a no-op, and a repeated event closes an already-closed room and
+// renews its tombstone without error.
 //
 // The room (when live) runs its own teardown on its run loop so the Y.Doc's
 // single-writer invariant holds, and that teardown deliberately does NOT flush —
@@ -396,14 +423,23 @@ func (m *Manager) CloseDeleted(ctx context.Context, id model.DocumentID) error {
 	// document the owner deleted. Bumping the epoch here makes that Join refuse
 	// admission instead.
 	//
-	// The Join-time existence gate is the SECOND line of defence, not a
-	// replacement: it refuses an unknown id and server's row is already gone by the
-	// time this event arrives — but a Join that read the row BEFORE the delete has
-	// already passed it, and only the epoch catches that one.
+	// The Join-time tombstone/existence gate is the SECOND line of defence, not a
+	// replacement: it refuses new admissions, but a Join that passed the tombstone
+	// and read the row BEFORE this event has already crossed both checks. Only the
+	// epoch catches that in-flight admission.
+	expires := time.Now().Add(deleteTombstoneTTL)
 	m.mu.Lock()
 	m.deleteEpoch++
+	m.deleteTombstones[id] = expires
 	room, live := m.rooms[id]
 	m.mu.Unlock()
+	time.AfterFunc(deleteTombstoneTTL, func() {
+		m.mu.Lock()
+		if current, ok := m.deleteTombstones[id]; ok && current.Equal(expires) {
+			delete(m.deleteTombstones, id)
+		}
+		m.mu.Unlock()
+	})
 
 	if live {
 		done := make(chan error, 1)
@@ -468,8 +504,8 @@ func (m *Manager) PreRegister(ctx context.Context, meta model.Metadata) error {
 //
 // A delete of an UNRELATED document also refuses, because the epoch is
 // Manager-wide. That is the deliberate trade: a rare, transient retry for one
-// connecting client, in exchange for never needing per-id bookkeeping whose
-// correctness depended on how long a delete happened to take.
+// connecting client in exchange for race-free invalidation of admissions that
+// crossed the per-id tombstone check before the event arrived.
 func (m *Manager) acquire(ctx context.Context, id model.DocumentID, content model.ContentType, expectedEpoch uint64) (*Room, error) {
 	// Materialize OFF the registry lock (002 FR-010): newRoom does backend I/O
 	// (snapshot load, fan-out subscribe) that must NOT run under m.mu, or one

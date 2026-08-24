@@ -26,7 +26,7 @@ import (
 // Maps to: contracts/persistence-ports.md (MetadataStore port) and
 // data-model.md (document metadata/index).
 // It is READ/UPSERT only. There is no Delete: `server` owns the row and removes
-// it itself before publishing document.deleted, so a delete here would be a
+// it itself after confirming document.deleted, so a delete here would be a
 // second writer racing the owner for a row it does not own.
 type MetadataStore interface {
 	// Load returns the index row for a document, or model.ErrNotFound if no

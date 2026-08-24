@@ -83,6 +83,7 @@ Reply:
   "contentType": "memo" | "whiteboard",
   "version": 4,
   "contentPointer": "<locator>",
+  "migrated": true,                   // temporary rollout gate; false is refused before room materialization
   "authorizationPolicyId": "<uuid>",
   "storageBucketId": "<uuid>",        // the document's OWN storage bucket; snapshots persist into it (per-doc bucket)
   "ownerRef": "<parent entity id>"
@@ -96,11 +97,11 @@ Not found: `{ "found": false }`. Error: `{ "found": false, "error": "<reason>" }
 > **RETIRED.** `collaboration-service` speaks no delete pattern: `port.MetadataStore`
 > is read/upsert only ("There is no Delete: `server` owns the row and removes it").
 >
-> OWNERSHIP MOVED, and the ORDER is why. `server` deletes the row, the profile, the
-> bucket and the blob, and only THEN publishes `document.deleted`. By the time this
-> service sees the event there is nothing left to purge, so `cmdCloseDeleted` closes
-> the room and evicts — it "deletes nothing and does not flush". A delete call from
-> here would either be a no-op or, worse, race the owner's own cascade.
+> OWNERSHIP MOVED, and the ORDER is why. Before `server` mutates the row, profile,
+> bucket or blob, it confirms a persistent `document.deleted` publish. This service
+> temporarily tombstones the id, closes the room and evicts it — it "deletes nothing
+> and does not flush" — while `server` completes the owner cascade. A delete call
+> from here would duplicate and race that single owner.
 >
 > The shape below is preserved rather than deleted so a reader who meets the pattern
 > name in an older branch, a broker trace, or a `server` consumer learns why it went.

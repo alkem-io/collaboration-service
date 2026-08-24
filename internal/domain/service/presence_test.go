@@ -497,12 +497,11 @@ func TestDisabledContributionWindowCollectsAndEmitsNothing(t *testing.T) {
 // TestCloseDeletedDoesNotEmitContributionsForADeletedDocument pins that the
 // owner-delete path skips analytics entirely.
 //
-// The row is already gone when this event arrives — `server` removes the entity
-// before enqueueing it — and `server`'s contribution consumer resolves the document
-// id against the memo and whiteboard rows. A deleted document misses both, so the
-// event is discarded and logged as "collaboration-contribution for unknown
-// document". Emitting it is a bus round trip whose only outcome is a warn per
-// delete. The dropped final window is tracked as BASIC-004 in the canonical
+// `server` has begun an owner deletion and the room is being closed without a
+// final content flush. Reporting a final contribution window from that teardown
+// would race the cascade and could attribute activity to a document being removed;
+// it is deliberately skipped. The dropped final window is tracked as BASIC-004 in
+// the canonical
 // remediation ledger (alkem-io/agents-hq ->
 // specs/006-collab-content-unification/kiss-remediation-ledger.md).
 //

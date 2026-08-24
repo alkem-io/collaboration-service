@@ -109,12 +109,9 @@ func gatedManager(t *testing.T, store *gatedStore, doc model.DocumentID) *Manage
 // fresh room down rather than merely refusing to register it, or the room's own
 // timers keep it alive and flushing.
 //
-// The tombstone is raised DIRECTLY rather than by calling CloseDeleted on another
-// goroutine. CloseDeleted no longer deletes anything, so on a document with no
-// live room it returns immediately and lowers the tombstone in the same breath —
-// there is no I/O left to park inside. Raising it here holds the window open
-// deterministically instead of racing an instantaneous call, and it is the same
-// state CloseDeleted puts the Manager in.
+// The delete epoch is raised through CloseDeleted rather than timing this test
+// against the tombstone's five-minute lifetime. The load is deliberately parked
+// so the event lands at the exact admission boundary this test owns.
 func TestACascadeStartingDuringMaterializationLeavesNoLiveRoom(t *testing.T) {
 	store := newGatedStore()
 	const doc model.DocumentID = "cascade-during-materialization"

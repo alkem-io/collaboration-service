@@ -28,7 +28,7 @@ type anyDocumentExists struct{ port.MetadataStore }
 func (a anyDocumentExists) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
 	meta, err := a.MetadataStore.Load(ctx, id)
 	if errors.Is(err, model.ErrNotFound) {
-		return model.Metadata{ID: id}, nil
+		return model.Metadata{ID: id, Migrated: true}, nil
 	}
 	return meta, err
 }

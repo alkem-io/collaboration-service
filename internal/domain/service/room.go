@@ -102,8 +102,8 @@ const (
 	cmdClose
 	// cmdCloseDeleted reacts to the owner deleting the document, on the run loop:
 	// disconnect clients (session-end/document-deleted) and release the room. It
-	// deletes nothing and does not flush — `server` already removed the durable
-	// state before publishing the event (T015).
+	// deletes nothing and does not flush — `server` has begun the owner deletion
+	// and confirmed the event before mutating durable state (T015).
 	cmdCloseDeleted
 	cmdContributionDone
 )
@@ -1067,9 +1067,9 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 		r.handleMessageCmd(cmd, armSave, armIdle)
 
 	case cmdCloseDeleted:
-		// No flush hook. The owner deleted the document and `server` already removed
-		// its checkpoint blob, so persisting here would write content back for a
-		// document that no longer exists — the orphan this path exists to avoid.
+		// No flush hook. The owner deletion has started; persisting while its profile,
+		// bucket and row are being removed races the owner and can only create stale
+		// content or a failed save.
 		r.teardown(model.NewSessionEnd(model.CodeDocumentDeleted), nil)
 		if cmd.done2 != nil {
 			cmd.done2 <- nil
@@ -2397,14 +2397,11 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// NOT on the owner-delete path — and this is a KNOWN CONTRACT GAP, not a
 	// settled design, so it is written down as one.
 	//
-	// What is established: the row is ALREADY GONE before this event ever reaches
-	// the service. `server` removes the entity, profile and bucket and then enqueues
-	// the outbox row that becomes document.deleted, so by the time teardown runs
-	// there is nothing left to resolve against. Its contribution consumer looks the
-	// id up in the memo/whiteboard rows (collaboration-integration.service.ts) and
-	// would discard the event, logging "collaboration-contribution for unknown
-	// document". Emitting from here is a bus round trip whose only outcome is a
-	// warn per delete.
+	// What is established: `server` confirms the lifecycle publish before starting
+	// deletion, but broker confirmation is NOT consumer acknowledgement. When this
+	// teardown runs, the memo/whiteboard row may still exist or may already be gone.
+	// Its contribution consumer looks the id up in those rows, so an emit here would
+	// be timing-dependent: sometimes accepted, sometimes discarded as unknown.
 	//
 	// What is NOT established: that losing it is acceptable. The final partial
 	// window — contributions since the last periodic tick — IS dropped when a
@@ -2412,11 +2409,9 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 	// current contributor map. That the current arrangement cannot emit it
 	// USEFULLY is not the same as saying it should not be emitted at all.
 	//
-	// No ordering INSIDE this funnel can recover it. An earlier draft assumed the
-	// delete happened here and that moving the emit earlier would find the entity
-	// still alive; it does not, because the deletion is the producer's and completes
-	// before the event is published. The only remaining option is producer-side
-	// enrichment — the event carrying what the consumer would otherwise look up.
+	// No ordering INSIDE this funnel can make it reliable. The only deterministic
+	// option is producer-side enrichment — the event carrying what the consumer
+	// would otherwise look up.
 	// That spans repos and is not decided here. Tracked as BASIC-004 in the
 	// canonical remediation ledger — alkem-io/agents-hq ->
 	// specs/006-collab-content-unification/kiss-remediation-ledger.md — which

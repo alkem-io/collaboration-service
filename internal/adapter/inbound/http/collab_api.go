@@ -164,6 +164,7 @@ func (h *CollabAPIHandler) Create(w http.ResponseWriter, r *http.Request) {
 		OwnerRef:              req.OwnerRef,
 		AuthorizationPolicyID: req.AuthorizationPolicyID,
 		StorageBucketID:       req.StorageBucketID,
+		Migrated:              true,
 	}
 	if err := h.Lifecycle.PreRegister(r.Context(), meta); err != nil {
 		ErrorResponse{Error: "failed to register document"}.Render(w, http.StatusInternalServerError)

@@ -221,8 +221,8 @@ func TestCheckpointConformance(t *testing.T) {
 }
 
 // This store implements no Delete. Nothing in the service deletes a checkpoint:
-// `server` removes the storage bucket before it publishes document.deleted, so
-// the blob is already gone by the time collab reacts. The core's
+// `server` owns the storage-bucket cascade and confirms document.deleted before
+// starting it. The core's
 // CheckpointPersistenceDeletion suite therefore has no subject here.
 //
 // --- behaviours the contract cannot express, but this medium requires ---

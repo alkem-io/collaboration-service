@@ -46,6 +46,10 @@ type Metadata struct {
 	// ContentPointer locates the snapshot inside the blob store (inline row
 	// key / file-service object id).
 	ContentPointer string
+	// Migrated is the temporary progressive-rollout admission marker. Existing
+	// legacy rows remain false until their snapshot pointer is published; rows
+	// created by the unified server are true from creation.
+	Migrated bool
 	// AuthorizationPolicyID is the Alkemio authorization policy this document
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
 	// the authorization-evaluation-service; empty in open mode.

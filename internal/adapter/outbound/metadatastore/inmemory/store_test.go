@@ -17,6 +17,9 @@ func TestSaveBumpsVersionOnUpsert(t *testing.T) {
 		t.Fatalf("first Save: %v", err)
 	}
 	first, _ := s.Load(ctx, "d1")
+	if !first.Migrated {
+		t.Fatal("new in-memory document was marked as legacy migration pending")
+	}
 	if first.Version != 1 {
 		t.Errorf("first version = %d, want 1", first.Version)
 	}

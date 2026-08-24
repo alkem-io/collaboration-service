@@ -161,12 +161,10 @@ func TestNewManagerNilMetricsDefaultsToNop(t *testing.T) {
 // TestCloseDeletedOnAColdDocumentDeletesNothing is RED #2 for the owner-delete
 // slice: with no live room there is nothing to close, and nothing to delete.
 //
-// `server` removes the entity, profile, storage bucket and checkpoint blob BEFORE
-// it enqueues the outbox row that becomes document.deleted, so a delete issued
-// here is at best a redundant round-trip against a bucket that is already gone.
-// This seeds durable state that server has NOT deleted and proves collab leaves
-// it entirely alone — the discriminating half, because a store that still deleted
-// would pass a test that only checked for absence.
+// `server` confirms document.deleted BEFORE it starts the owner cascade. This
+// seeds durable state that can therefore still exist when the event arrives and
+// proves collab leaves it entirely alone — the discriminating half, because a
+// store that still deleted would pass a test that only checked for absence.
 //
 // Non-vacuity: restore either durable delete in CloseDeleted and both assertions
 // below fail.
@@ -197,13 +195,13 @@ func TestCloseDeletedOnAColdDocumentDeletesNothing(t *testing.T) {
 		t.Fatalf("metadata row was touched: err=%v; the row belongs to server and collab must not delete it", err)
 	}
 	if _, err := blob.LoadCheckpoint(ctx, "cold"); err != nil {
-		t.Fatalf("checkpoint was touched: err=%v; the blob belongs to file-service and server already removed it in production", err)
+		t.Fatalf("checkpoint was touched: err=%v; the blob belongs to file-service and the owner cascade belongs to server", err)
 	}
 }
 
-// TestPurgeDurableAbsentDocumentIsNoOp asserts deleting a document with no
-// metadata row (and no live room) is a successful no-op (idempotent delete).
-func TestPurgeDurableAbsentDocumentIsNoOp(t *testing.T) {
+// TestCloseDeletedAbsentDocumentInstallsTombstoneWithoutError asserts an event
+// for a document with no live room still succeeds idempotently.
+func TestCloseDeletedAbsentDocumentInstallsTombstoneWithoutError(t *testing.T) {
 	mgr := NewManager(newTestDeps().Deps, fastConfig(), nil, nil)
 	if err := mgr.CloseDeleted(context.Background(), "never-existed"); err != nil {
 		t.Fatalf("deleting an absent document must be a no-op, got: %v", err)

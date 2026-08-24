@@ -23,9 +23,10 @@
 // be stale as soon as either side moved. They are simply not part of what this
 // package speaks:
 //
-//	DELETE  retired: `server` owns the index row and removes it, along with the
-//	        profile, bucket and blob, BEFORE publishing document.deleted — so
-//	        there is nothing left for this service to purge on arrival.
+//	DELETE  retired: `server` owns the index row and the owner cascade. Before it
+//	        mutates that graph it confirms a persistent document.deleted publish;
+//	        this service tombstones the id briefly, closes the room and evicts it,
+//	        but deletes nothing durable.
 //	INFO    retired under KISS-018: the capability it carried is already owned by
 //	        the authorization-evaluation-service, which decides per actor and per
 //	        document. Wiring it would install a second authorization-shaped
@@ -81,6 +82,7 @@ type FetchReply struct {
 	ContentType           string `json:"contentType,omitempty"`
 	Version               int    `json:"version,omitempty"`
 	ContentPointer        string `json:"contentPointer,omitempty"`
+	Migrated              bool   `json:"migrated"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
 	// the server FetchOutputData.storageBucketId). The file-service checkpoint store

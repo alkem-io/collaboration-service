@@ -65,6 +65,9 @@ func (s *Store) Save(_ context.Context, meta model.Metadata) error {
 		meta = coalesceBlank(meta, existing)
 	} else {
 		meta.CreatedAt = now
+		// The no-bus store represents documents created by the current service,
+		// never retained legacy rows awaiting the Alkemio migration.
+		meta.Migrated = true
 		if meta.Version == 0 {
 			meta.Version = 1
 		}
@@ -84,6 +87,9 @@ func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	}
 	if in.ContentPointer == "" {
 		in.ContentPointer = existing.ContentPointer
+	}
+	if existing.Migrated {
+		in.Migrated = true
 	}
 	if in.AuthorizationPolicyID == "" {
 		in.AuthorizationPolicyID = existing.AuthorizationPolicyID

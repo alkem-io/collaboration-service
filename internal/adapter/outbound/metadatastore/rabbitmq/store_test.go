@@ -14,8 +14,7 @@ import (
 )
 
 // fakeRPC captures each Call/Emit and returns scripted replies, so the unified
-// contract shape the adapter publishes is asserted without a live RabbitMQ (the
-// server consumer does not exist yet — OPEN-3 cross-repo follow-up).
+// contract shape the adapter publishes is asserted without a live RabbitMQ.
 type fakeRPC struct {
 	calls []capturedCall
 	emits []capturedCall
@@ -166,6 +165,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		ContentType:           "memo",
 		Version:               2,
 		ContentPointer:        "ptr",
+		Migrated:              true,
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
 		OwnerRef:              "owner",
@@ -184,13 +184,28 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	}
 	if meta.ID != "doc-9" || meta.ContentType != model.ContentTypeMemo ||
 		meta.Version != 2 || meta.ContentPointer != "ptr" ||
-		meta.AuthorizationPolicyID != "pol-1" {
+		!meta.Migrated || meta.AuthorizationPolicyID != "pol-1" {
 		t.Errorf("mapped metadata = %+v", meta)
 	}
 	// The document's own storage bucket must be carried through from the
 	// collaboration-fetch reply so the checkpoint store can persist snapshots into it.
 	if meta.StorageBucketID != "bucket-1" {
 		t.Errorf("StorageBucketID = %q, want bucket-1", meta.StorageBucketID)
+	}
+}
+
+func TestLoadWithoutMigratedMarkerFailsClosed(t *testing.T) {
+	f := &fakeRPC{replies: map[string]any{PatternFetch: map[string]any{
+		"found": true, "contentType": "memo", "contentPointer": "ptr",
+	}}}
+	store := newWithRPC(f)
+
+	meta, err := store.Load(context.Background(), "old-server-reply")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if meta.Migrated {
+		t.Fatal("reply without migrated marker was admitted; missing must fail closed")
 	}
 }
 

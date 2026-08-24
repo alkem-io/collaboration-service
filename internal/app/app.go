@@ -186,17 +186,16 @@ func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, p
 // registering its closer. The consumer handles EXACTLY ONE pattern,
 // `document.deleted` — there is no `document.created` and no other inbound
 // lifecycle event; anything else on the queue is rejected as poison. On a delete
-// it CLOSES AND EVICTS the live room and deletes nothing durable: `server` has
-// already removed the row, profile, bucket and blob before it publishes.
+// it TOMBSTONES, CLOSES AND EVICTS the live room and deletes nothing durable:
+// `server` confirms the event before starting its owner cascade.
 //
 // With no bus wired there is no lifecycle consumer at all. The only substitute is
 // the optional document-create endpoint, which is a tests/local surface; there is
 // NO delete route to stand in for the event.
 //
 // A failure to connect is therefore fatal in Alkemio mode for a narrower reason
-// than a cascade: without the consumer a document deleted upstream would stay
-// live and editable in this process, with clients still writing into a room whose
-// document no longer exists.
+// than a cascade: without the consumer a document being deleted upstream would
+// stay live and editable in this process during and after the owner cascade.
 //
 // The consumer binds the DEDICATED lifecycle queue (cfg.RabbitMQ.LifecycleQueue),
 // NOT the metadata-store RPC queue. RabbitMQ round-robins a queue across its consumers,
@@ -238,9 +237,9 @@ func lifecycleQueue(cfg *config.Config) string {
 // buildCheckpoint selects the persistence adapter.
 //
 // It returns a plain CheckpointStore. The deletion capability was required here
-// only so the owner-delete cascade could erase a snapshot; `server` now deletes
-// the checkpoint blob before publishing document.deleted, so nothing in this
-// service deletes one and nothing needs to assert it can.
+// only so the owner-delete cascade could erase a snapshot; `server` owns that
+// cascade, so nothing in this service deletes one and nothing needs to assert it
+// can.
 //
 // Only two shapes exist. file-service is the deployed one; `inline` resolves to
 // the in-process store, which backs the test suite, the local development loop
