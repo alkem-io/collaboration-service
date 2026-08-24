@@ -12,9 +12,13 @@ CRDT protocol (Yjs)** that replaces both `collaborative-document-service`
 (memos) and `whiteboard-collaboration-service` (whiteboards). Memos are a
 `Y.XmlFragment`; whiteboards are an id-keyed `Y.Map` scene (per-property
 concurrent merge). Transport is raw WebSocket + y-protocols (sync + awareness);
-scaling, persistence, and auth are **optional pluggable ports** — single-binary
-standalone by default, Redis fan-out + file-service blob offload + auth-
-evaluation-service for Alkemio.
+scaling, persistence, and auth sit behind **pluggable ports** for testability and
+bounded adapter choice. The supported Alkemio deployment is integrated: the
+authoritative index is in `server` via RabbitMQ, durable content is in
+file-service, and authentication/authorization use `header` + `authzeval`.
+Durable deployment today is one pod with the in-process hub; Redis fan-out with
+file-service is rejected at startup until the service has a multi-pod ownership
+mechanism (see **Outbound** below).
 
 This is **WS-C** of the `003-unify-collab-yjs` epic.
 
@@ -36,7 +40,7 @@ This is **WS-C** of the `003-unify-collab-yjs` epic.
   document index is `server`'s, reached by RPC over RabbitMQ, and blobs are
   file-service's.
 - **Auth (pluggable)**: handshake AuthN and per-document AuthZ are selected
-  INDEPENDENTLY — `open` (standalone) / `header` (gateway-terminated, the prod
+  INDEPENDENTLY — `open` (tests/local only) / `header` (gateway-terminated, the prod
   default) for AuthN; `open` / `authzeval`
   (authorization-evaluation-service, h2c HTTP/2 or NATS) for AuthZ
 
@@ -60,7 +64,7 @@ ports. Adapters implement them:
 - `metadatastore/{inmemory,rabbitmq}` — `MetadataStore` (document index)
 - `persistence/{inprocess,fileservice}` — `persistence.CheckpointStore` (Y.Doc v2 state)
 - `auth/{header,open,authzeval}` — `Auth` (handshake authN: `header` is the Alkemio
-  production adapter, `open` is standalone) + `AuthZ` (per-document: `authzeval` /
+  production adapter, `open` is tests/local only) + `AuthZ` (per-document: `authzeval` /
   `open`)
 
 ### Ports (cross-repo contracts)
@@ -81,8 +85,9 @@ they have no default, and startup fails naming the missing key and its supported
 values. Defaulting them would let an omitted (or renamed, which is the same thing
 to the process) key boot healthy on the non-durable in-process store and lose
 every document on restart, with nothing in the logs distinguishing "chose inline"
-from "never said". Everything else is standalone-friendly (open auth); a
-zero-dependency run costs one explicit line per selector:
+from "never said". The remaining settings have tests/local defaults; a local
+development run still requires one explicit line per selector. This is a
+development convenience, not a supported deployment topology:
 
 - `PORT` (default 4006)
 - `HUB_MODE` — **required**; `inmemory` | `redis` (redis + `CHECKPOINT_STORE=file-service` is rejected at startup)
@@ -115,8 +120,9 @@ same reason — so the service cannot be used to enumerate which document ids ex
 Only the server's own logs separate `ErrDocumentUnknown` from `ErrForbidden`.
 
 The practical consequence: **create, then collaborate.** Production already works
-this way (the entity long predates any socket). Standalone and tests must register
-the document first, via `POST /collab/{documentId}` or `Manager.PreRegister`.
+this way (the entity long predates any socket). Tests and the local development
+loop must register the document first, via `POST /collab/{documentId}` or
+`Manager.PreRegister`.
 
 **Session ends are typed (`session-end`), never free text.** Every path that ends a
 connection names a `code`, a `scope` (`member` | `document`) and a `disposition`
