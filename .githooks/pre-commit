@@ -2,9 +2,14 @@
 # Pre-commit hook: regenerate the OpenAPI spec when handlers change and check
 # for drift. Install: git config core.hooksPath .githooks (or `make setup-hooks`).
 #
-# No apispec-annotated REST handlers exist yet (WebSocket-first; the standalone
-# create/delete HTTP API is task T016). The openapi block is wired so the gate
-# activates automatically once those handlers land — until then it is a no-op.
+# The openapi gate is LIVE: collab_api.go carries @Summary/@Router annotations,
+# openapi.yaml is generated from them, and apispec.yaml is tuned for that handler.
+# (This comment previously said no annotated handlers existed and the block was a
+# no-op — both halves became false when the standalone create API landed.)
+#
+# NOTE ON SCOPE: this hook does NOT run `golangci-lint run`, which the repo's
+# CLAUDE.md calls mandatory before committing. That gate is enforced in CI
+# (ci-test.yml), not here.
 
 set -e
 

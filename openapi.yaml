@@ -1,0 +1,116 @@
+components:
+  schemas:
+    http.CreateDocumentRequest:
+      properties:
+        authorizationPolicyId:
+          type: string
+        contentType:
+          type: string
+        ownerRef:
+          type: string
+        storageBucketId:
+          type: string
+      type: object
+    http.CreateDocumentResponse:
+      properties:
+        contentType:
+          type: string
+        id:
+          type: string
+      required:
+        - id
+        - contentType
+      type: object
+    http.ErrorResponse:
+      properties:
+        error:
+          type: string
+      required:
+        - error
+      type: object
+    http.HealthResponse:
+      properties:
+        status:
+          type: string
+      required:
+        - status
+      type: object
+info:
+  contact:
+    email: info@alkem.io
+    name: Alkemio Foundation
+    url: https://alkem.io
+  description: |
+    Unified real-time collaboration backend for the Alkemio platform. One Go
+    service over one CRDT protocol (Yjs): memos (Y.XmlFragment) and whiteboards
+    (id-keyed Y.Map) share a single document namespace. Transport is raw
+    WebSocket + y-protocols (sync + awareness) at /collab/{documentId};
+    horizontal scaling (fan-out), persistence (metadata + blob), and auth sit
+    behind pluggable ports. The supported Alkemio deployment is integrated:
+    the authoritative index is in server via RabbitMQ, durable content is in
+    file-service, and authN/authZ use header + authzeval.
+
+    This spec covers only the operational + document-create HTTP surface; the live
+    collaboration protocol is the WebSocket contract in
+    specs/003-unify-collab-yjs/contracts/ws-protocol.md.
+  license:
+    name: EUPL-1.2
+    url: https://opensource.org/licenses/EUPL-1.2
+  title: Alkemio Collaboration Service
+  version: 0.1.0
+openapi: 3.1.1
+paths:
+  /collab/{documentId}:
+    post:
+      operationId: CollabAPI.Create
+      parameters:
+        - in: path
+          name: documentId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/http.CreateDocumentRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.CreateDocumentResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.ErrorResponse'
+          description: Internal Server Error
+  /healthz:
+    get:
+      description: |-
+        ServeHealthz reports PROCESS-ALIVE ONLY. It returns 200 as long as the HTTP
+        server is serving, and proves nothing about the configured backends: a green
+        /healthz does NOT mean Redis, RabbitMQ, file-service or the
+        authorization-evaluation-service are reachable.
+
+        Stated flatly because the previous wording promised dependency probes "added
+        alongside their adapters" — every one of those adapters now exists and no probe
+        was added, so the comment read as a plan while describing the finished state.
+      operationId: http.ServeHealthz
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/http.HealthResponse'
+          description: OK
+      summary: ServeHealthz reports PROCESS-ALIVE ONLY.

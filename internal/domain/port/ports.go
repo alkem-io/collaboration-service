@@ -13,35 +13,21 @@ package port
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// ClusterBroadcaster fans document updates and ephemeral/awareness messages out
-// to other pods so a multi-pod deployment is transparent to clients (a client
-// may connect to any pod). The default adapter is in-memory (single-pod, R4);
-// the Redis adapter publishes on doc:{id} and awareness:{id} channels.
-//
-// Maps to: contracts/ws-protocol.md ("Multi-pod transparent … cross-pod via
-// Redis fan-out (R4)").
-type ClusterBroadcaster interface {
-	// Publish broadcasts a binary payload for a document to every other pod
-	// subscribed to its channel. The local pod delivers to its own clients
-	// directly and MUST NOT receive its own Publish back. ephemeral selects
-	// the awareness:{id} channel (volatile, lossy) versus doc:{id}.
-	Publish(ctx context.Context, id model.DocumentID, payload []byte, ephemeral bool) error
-	// Subscribe registers a handler invoked for every payload other pods
-	// publish for the given document. The returned cancel function tears the
-	// subscription down; it is safe to call once and idempotent thereafter.
-	Subscribe(ctx context.Context, id model.DocumentID, handler func(payload []byte, ephemeral bool)) (cancel func(), err error)
-}
-
 // MetadataStore persists the small, queryable document index (NOT the blob).
-// The default Alkemio adapter rides the existing server RabbitMQ save/fetch
-// pattern, extended with content_pointer + blob_store; the standalone adapter
-// uses Postgres (sqlc/pgx) or a local file.
+// The Alkemio adapter rides the existing server RabbitMQ save/fetch pattern,
+// extended with content_pointer. The in-memory adapter serves the in-process
+// development and test path and is not durable.
 //
 // Maps to: contracts/persistence-ports.md (MetadataStore port) and
 // data-model.md (document metadata/index).
+// It is READ/UPSERT only. There is no Delete: `server` owns the row and removes
+// it itself after confirming document.deleted, so a delete here would be a
+// second writer racing the owner for a row it does not own.
 type MetadataStore interface {
 	// Load returns the index row for a document, or model.ErrNotFound if no
 	// row exists.
@@ -49,51 +35,42 @@ type MetadataStore interface {
 	// Save upserts the index row and bumps its version. It is called on first
 	// save and on every persisted snapshot.
 	Save(ctx context.Context, meta model.Metadata) error
-	// Delete removes the index row on the owner-delete cascade. Idempotent:
-	// deleting an absent row is a no-op (lifecycle-events.md idempotency).
-	Delete(ctx context.Context, id model.DocumentID) error
 }
 
-// BlobStore persists the encoded full Y.Doc v2 snapshot (debounced). The
-// default adapter is inline (blob in the main DB); optional adapters offload to
-// file-service, S3, or local disk. The pointer is opaque to the domain — its
-// shape is the adapter's concern (inline row key / file-service object id / S3
-// key).
+// Auth resolves the connecting principal at the WebSocket handshake from the ONE
+// credential the transport carries: the value of the configured gateway actor-id
+// header. It is authentication only — the per-document grant is AuthZ's job.
 //
-// Maps to: contracts/persistence-ports.md (BlobStore port) and data-model.md
-// (Snapshot, content-blob store).
-type BlobStore interface {
-	// Put stores the encoded snapshot bytes under pointer, overwriting any
-	// previous snapshot (latest-only today).
-	Put(ctx context.Context, pointer string, data []byte) error
-	// Get returns the snapshot bytes for pointer, or model.ErrNotFound when
-	// none has been stored.
-	Get(ctx context.Context, pointer string) ([]byte, error)
-	// Delete removes the snapshot on the owner-delete cascade. Idempotent:
-	// deleting an absent pointer is a no-op.
-	Delete(ctx context.Context, pointer string) error
-}
-
-// Auth resolves the connecting principal at the WebSocket handshake from the
-// Alkemio token/cookie (Oathkeeper/Kratos). It is authentication only — the
-// per-document grant is AuthZ's job. The 'open' adapter authenticates everyone
-// as an anonymous identity for standalone use.
+// A raw string, not a credential struct. There is exactly one credential and two
+// adapters, one of which ignores it; a set-of-credentials type described a
+// direct-validation adapter that has been removed.
 //
 // Maps to: contracts/ws-protocol.md ("AuthN at the handshake").
 type Auth interface {
-	// Authenticate resolves the identity carried by the handshake token. A
-	// non-nil error means the handshake MUST be rejected with 401; it MUST
-	// NOT be downgraded to anonymous.
-	Authenticate(ctx context.Context, token string) (model.Identity, error)
+	// Authenticate resolves the identity carried by the handshake credential. A
+	// non-nil error means the handshake MUST be rejected with 401.
+	//
+	// WHETHER ABSENCE IS A FAILURE IS MODE-DEPENDENT, and the two modes differ on
+	// purpose:
+	//   - `header`: an EMPTY credential means the gateway did not run, which is a
+	//     failed handshake, never an anonymous downgrade. The gateway always
+	//     stamps something — the actor id, or the nil-UUID sentinel for an
+	//     un-credentialed caller — so absence is infrastructure failure.
+	//   - `open`: absence is expected; everyone is anonymous and AuthZ is bypassed.
+	// A credential that is PRESENT but invalid is always a failure (constitution
+	// §V: missing != failed cuts both ways — never treat an invalid credential as
+	// anonymous).
+	Authenticate(ctx context.Context, actorIDCredential string) (model.Identity, error)
 }
 
 // AuthZ evaluates per-document authorization for an authenticated identity via
 // the authorization-evaluation-service (h2c HTTP/2 POST /internal/auth/evaluate,
-// or NATS). It is re-evaluated on document.access_changed. The 'open' adapter
-// grants everything for standalone use.
+// or NATS). It is evaluated ONCE per WebSocket
+// session, before the room is materialized, and holds until that socket closes. The 'open' adapter
+// grants everything, for tests and local development only.
 //
 // Maps to: contracts/ws-protocol.md ("AuthZ per document … viewer-vs-
-// collaborator") and lifecycle-events.md (document.access_changed).
+// collaborator").
 type AuthZ interface {
 	// Evaluate decides whether the identity holds the privilege on the
 	// document. A non-nil error means the question could not be answered;
@@ -101,4 +78,20 @@ type AuthZ interface {
 	// convention) — never treat an error as a healthy denial. A clean denial
 	// is model.AuthDecision{Allowed: false}.
 	Evaluate(ctx context.Context, identity model.Identity, id model.DocumentID, privilege model.Privilege) (model.AuthDecision, error)
+}
+
+// Contributor emits the north-star contribution event (FR-014): the per-window
+// set of actor ids that mutated a document. In the Alkemio deployment the
+// rabbitmq adapter publishes the `collaboration-contribution` event so server
+// analytics stay unbroken; a no-bus run uses a no-op so a contribution flush costs
+// nothing without a bus. The Prometheus gauge is always emitted by the domain
+// independently of this port.
+//
+// Maps to: contracts/unified-metadata-rmq.md (`collaboration-contribution`).
+type Contributor interface {
+	// Contribution publishes the contributing actor ids for a document window
+	// (fire-and-forget). An error is returned to the room so the detached actor
+	// set can be retained for the next periodic attempt; it never breaks live
+	// collaboration.
+	Contribution(ctx context.Context, id model.DocumentID, actorIDs []uuid.UUID) error
 }

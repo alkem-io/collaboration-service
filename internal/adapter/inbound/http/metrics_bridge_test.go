@@ -1,0 +1,171 @@
+package http
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestPrometheusMetricsBridge asserts the room-lifecycle hooks move the
+// Prometheus collectors the /metrics endpoint exposes. It drives the bridge
+// directly (the domain calls these), then scrapes the registry.
+func TestPrometheusMetricsBridge(t *testing.T) {
+	InitMetrics()
+	m := PrometheusMetrics{}
+
+	m.RoomOpened()
+	m.RoomOpened()
+	m.RoomClosed("doc-1")
+	m.ConnOpened()
+	m.ConnClosed()
+	m.ConnOpened()
+	m.SnapshotSaved()
+	m.SnapshotFailed()
+	m.FanoutPublished(2 * time.Millisecond)
+	m.FanoutFailed()
+	m.ContributingActors(3) // north-star contribution histogram (FR-014)
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		"collaboration_rooms_active",
+		"collaboration_connections_active",
+		`collaboration_snapshots_total{outcome="saved"}`,
+		`collaboration_snapshots_total{outcome="error"}`,
+		`collaboration_fanout_total{outcome="published"}`,
+		`collaboration_fanout_total{outcome="error"}`,
+		"collaboration_fanout_lag_seconds",
+		// The contribution metric is now a histogram (not an unlabeled gauge), so
+		// it exposes _bucket/_sum/_count series rather than a single value.
+		"collaboration_contributing_actors_per_window_bucket",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+}
+
+// TestContributingActorsHistogramAggregatesAcrossRooms asserts the contribution
+// metric is a histogram that aggregates per-room/per-window observations rather
+// than an unlabeled gauge that is last-window-wins (one room clobbering another).
+// Three rooms each flush a window; the histogram _count must reflect all three
+// observations, not just the most recent one.
+func TestContributingActorsHistogramAggregatesAcrossRooms(t *testing.T) {
+	InitMetrics()
+	m := PrometheusMetrics{}
+
+	// Baseline _count before this test's observations (the registry is shared).
+	before := histogramCount(t, "collaboration_contributing_actors_per_window")
+
+	// Three independent rooms each flush their window.
+	m.ContributingActors(2) // room A: 2 actors
+	m.ContributingActors(5) // room B: 5 actors
+	m.ContributingActors(1) // room C: 1 actor
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, "collaboration_contributing_actors_per_window_bucket") {
+		t.Fatal("/metrics missing the contribution histogram buckets (is it still a gauge?)")
+	}
+
+	after := histogramCount(t, "collaboration_contributing_actors_per_window")
+	if got := after - before; got != 3 {
+		t.Errorf("histogram _count delta = %d, want 3 (one observation per room — a gauge would be 1, last-window-wins)", got)
+	}
+}
+
+// histogramCount scrapes the shared registry and returns the named histogram's
+// _count value, so a test can assert each flush is a distinct observation.
+func histogramCount(t *testing.T, name string) int {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	prefix := name + "_count "
+	for _, line := range strings.Split(rr.Body.String(), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			var v int
+			if _, err := fmt.Sscanf(strings.TrimPrefix(line, prefix), "%d", &v); err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			return v
+		}
+	}
+	return 0 // not yet observed.
+}
+
+// TestLifecycleObserverBridgeMovesItsSeries asserts the two lifecycle signals
+// reach the collectors, and that depth is a LEVEL rather than a running total.
+//
+// Depth is the signal the dead-letter COUNTER cannot give: a counter only goes
+// up, so the increment that put events in the DLQ scrolls out of the alert window
+// while the events stay there. If depth accumulated instead of replacing, a queue
+// someone had drained would still read as backed up and the alert would never
+// clear.
+func TestLifecycleObserverBridgeMovesItsSeries(t *testing.T) {
+	InitMetrics()
+	o := PrometheusLifecycleObserver{}
+
+	o.EventDeadLettered("document.deleted")
+	o.QueueReadyDepth("lifecycle-q.dlq", 7)
+	o.QueueReadyDepth("lifecycle-q", 2)
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`collaboration_lifecycle_dead_lettered_total{pattern="document.deleted"} 1`,
+		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.dlq"} 7`,
+		`collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+
+	o.QueueReadyDepth("lifecycle-q.dlq", 3)
+	rr = httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rr.Body.String(); !strings.Contains(body, `collaboration_lifecycle_queue_ready_depth{queue="lifecycle-q.dlq"} 3`) {
+		t.Error("a second depth reading did not replace the first; depth must be a level, or a drained queue still reads as backed up")
+	}
+}
+
+// TestDeadLetterBridgeSeparatesPatterns asserts the pattern reaches Prometheus
+// as a distinct label value.
+//
+// The pattern is what makes the counter actionable. The DLQ now holds ONLY
+// envelopes this service can never act on, so every increment is a
+// producer/consumer contract mismatch — and the pattern says WHICH contract:
+// "document.deleted" means a payload shape drifted, while an unrecognised pattern
+// means the producer is emitting something we never agreed to consume.
+func TestDeadLetterBridgeSeparatesPatterns(t *testing.T) {
+	InitMetrics()
+	o := PrometheusLifecycleObserver{}
+
+	// Distinct label values per test: the collector is package-level and
+	// InitMetrics does not reset it, so a shared pattern would carry another
+	// test's increments in and the count assertion would be order-dependent.
+	o.EventDeadLettered("separates.shape.drift")
+	o.EventDeadLettered("separates.shape.drift")
+	o.EventDeadLettered("separates.unrecognised")
+
+	rr := httptest.NewRecorder()
+	MetricsHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`collaboration_lifecycle_dead_lettered_total{pattern="separates.shape.drift"} 2`,
+		`collaboration_lifecycle_dead_lettered_total{pattern="separates.unrecognised"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+}

@@ -1,35 +1,149 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"testing"
+)
 
+// TestLoadDefaults asserts what still defaults once the BACKEND SELECTORS are
+// explicit. Port, AuthN mode and the token header have safe defaults; the
+// selectors that decide where data lives do not — see the four tests below.
 func TestLoadDefaults(t *testing.T) {
+	pinKnownGood(t)
 	t.Setenv("PORT", "")
-	t.Setenv("FANOUT_MODE", "")
-	t.Setenv("METADATA_STORE", "")
-	t.Setenv("BLOB_STORE", "")
 	t.Setenv("AUTH_MODE", "")
 
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load() with no env: unexpected error %v", err)
+		t.Fatalf("Load(): unexpected error %v", err)
 	}
-
-	// Standalone-friendly defaults: single binary, zero external deps.
 	if cfg.Port != 4006 {
 		t.Errorf("default Port = %d, want 4006", cfg.Port)
-	}
-	if cfg.Fanout != FanoutInMemory {
-		t.Errorf("default Fanout = %q, want inmemory", cfg.Fanout)
 	}
 	if cfg.AuthMode != AuthModeOpen {
 		t.Errorf("default AuthMode = %q, want open", cfg.AuthMode)
 	}
+	// EMPTY by default, deliberately. Open mode ignores the credential, so there is
+	// nothing to name; header mode must state its dedicated gateway-owned header
+	// explicitly and fails to load without one. A bearer-style "Authorization"
+	// default existed only to feed a direct-validation adapter that was removed.
+	if cfg.Auth.ActorIDHeader != "" {
+		t.Errorf("default Auth.ActorIDHeader = %q, want empty", cfg.Auth.ActorIDHeader)
+	}
+}
+
+// TestCheckpointStoreIsMandatory is the one that matters most.
+//
+// Defaulting an absent CHECKPOINT_STORE to inline means a deployment that omits
+// the key boots healthy on the NON-DURABLE in-process store and loses every
+// document on restart, with nothing in the logs distinguishing "chose inline"
+// from "never said". The key is therefore required and has no default.
+func TestCheckpointStoreIsMandatory(t *testing.T) {
+	for _, value := range []string{"", " "} {
+		t.Setenv("HUB_MODE", "inmemory")
+		t.Setenv("METADATA_STORE", "inmemory")
+		t.Setenv("CHECKPOINT_STORE", value)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("CHECKPOINT_STORE=%q: expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart", value)
+		}
+		if !strings.Contains(err.Error(), "CHECKPOINT_STORE") {
+			t.Fatalf("the error must name the missing key, got %v", err)
+		}
+		for _, supported := range []string{"inline", "file-service"} {
+			if !strings.Contains(err.Error(), supported) {
+				t.Fatalf("the error must name the supported value %q so the fix travels with the message, got %v", supported, err)
+			}
+		}
+	}
+}
+
+// TestHubModeIsMandatory: an absent HUB_MODE silently running single-pod is a
+// correctness problem for a deployment that believed it had cross-pod fan-out.
+func TestHubModeIsMandatory(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	t.Setenv("HUB_MODE", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("HUB_MODE unset: expected startup to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "HUB_MODE") {
+		t.Fatalf("the error must name the missing key, got %v", err)
+	}
+	for _, supported := range []string{"inmemory", "redis"} {
+		if !strings.Contains(err.Error(), supported) {
+			t.Fatalf("the error must name the supported value %q, got %v", supported, err)
+		}
+	}
+}
+
+// TestExplicitLocalSelectorsRemainSupported: the standalone path costs one line
+// of configuration and still needs nothing running. Zero-DEPENDENCY standalone is
+// intact; only zero-CONFIG was given up.
+func TestExplicitLocalSelectorsRemainSupported(t *testing.T) {
+	t.Setenv("HUB_MODE", "inmemory")
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("explicit local selectors must load: %v", err)
+	}
+	if cfg.HubMode != HubInMemory || cfg.CheckpointStore != CheckpointStoreInline {
+		t.Fatalf("got HubMode=%q CheckpointStore=%q, want inmemory/inline", cfg.HubMode, cfg.CheckpointStore)
+	}
+}
+
+// TestAuthTokenHeaderOverride asserts AUTH_TOKEN_HEADER names the handshake
+// header the WS adapter reads the actor id from — the seam the Alkemio
+// deployment uses to point the handshake at the gateway's resolved actor-id
+// header (X-Alkemio-Actor-Id). The env name is legacy: it supplies a header
+// NAME, and the header carries an actor UUID, not a token.
+func TestAuthTokenHeaderOverride(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): unexpected error %v", err)
+	}
+	if cfg.Auth.ActorIDHeader != "X-Alkemio-Actor-Id" {
+		t.Errorf("Auth.ActorIDHeader = %q, want %q", cfg.Auth.ActorIDHeader, "X-Alkemio-Actor-Id")
+	}
 }
 
 func TestLoadRejectsUnknownEnum(t *testing.T) {
-	t.Setenv("FANOUT_MODE", "kafka")
+	t.Setenv("HUB_MODE", "kafka")
 	if _, err := Load(); err == nil {
-		t.Fatal("Load() with FANOUT_MODE=kafka: expected error, got nil")
+		t.Fatal("Load() with HUB_MODE=kafka: expected error, got nil")
+	}
+}
+
+// TestLoadRejectsUnknownAdapterSelections asserts every pluggable-port selector
+// fails fast on an unrecognised value (§XV: no half-configured runs) — one bad
+// value per selector exercises each parse function's reject branch.
+func TestLoadRejectsUnknownAdapterSelections(t *testing.T) {
+	for _, c := range []struct{ key, val string }{
+		{"METADATA_STORE", "cassandra"},
+		{"CHECKPOINT_STORE", "gcs"},
+		{"AUTH_MODE", "ldap"},
+	} {
+		t.Run(c.key, func(t *testing.T) {
+			// Pin every selector to a known-good value first, then override the one
+			// under test with the bad value — so the rejection is attributable to
+			// this selector and cannot be a false pass from unrelated ambient env.
+			t.Setenv("HUB_MODE", "inmemory")
+			t.Setenv("METADATA_STORE", "inmemory")
+			t.Setenv("CHECKPOINT_STORE", "inline")
+			t.Setenv("AUTH_MODE", "open")
+			t.Setenv(c.key, c.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() with %s=%s: expected error, got nil", c.key, c.val)
+			}
+		})
 	}
 }
 
@@ -37,5 +151,798 @@ func TestLoadRejectsBadPort(t *testing.T) {
 	t.Setenv("PORT", "70000")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() with PORT=70000: expected out-of-range error, got nil")
+	}
+}
+
+func TestRedisRequiresURL(t *testing.T) {
+	t.Setenv("HUB_MODE", "redis")
+	t.Setenv("REDIS_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("HUB_MODE=redis without REDIS_URL: expected error")
+	}
+}
+
+func TestRedisLoadsURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("HUB_MODE", "redis")
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Redis.URL != "redis://localhost:6379" {
+		t.Errorf("Redis.URL = %q", cfg.Redis.URL)
+	}
+}
+
+func TestRabbitMQRequiresQueue(t *testing.T) {
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("METADATA_STORE=rabbitmq without RABBITMQ_QUEUE: expected error")
+	}
+}
+
+func TestRabbitMQAssemblesURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("RABBITMQ_USER", "u")
+	t.Setenv("RABBITMQ_PASSWORD", "p")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantURL := fmt.Sprintf("amqp://%s:%s@rmq:5672/", "u", "p")
+	if cfg.RabbitMQ.URL != wantURL {
+		t.Errorf("RabbitMQ.URL = %q, want %q", cfg.RabbitMQ.URL, wantURL)
+	}
+	if cfg.RabbitMQ.Queue != "alkemio-collaboration" {
+		t.Errorf("RabbitMQ.Queue = %q", cfg.RabbitMQ.Queue)
+	}
+}
+
+// TestLifecycleQueueDefaultsToDedicatedQueue proves the lifecycle consumer gets
+// its OWN queue by default — distinct from the metadata-store RPC queue — so it never
+// round-robin-steals fetch/save RPCs (the shared-queue bug).
+func TestLifecycleQueueDefaultsToDedicatedQueue(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RabbitMQ.LifecycleQueue != DefaultLifecycleQueue {
+		t.Errorf("RabbitMQ.LifecycleQueue = %q, want default %q", cfg.RabbitMQ.LifecycleQueue, DefaultLifecycleQueue)
+	}
+	if cfg.RabbitMQ.LifecycleQueue == cfg.RabbitMQ.Queue {
+		t.Errorf("lifecycle queue %q must differ from metadata-store queue %q", cfg.RabbitMQ.LifecycleQueue, cfg.RabbitMQ.Queue)
+	}
+}
+
+// TestLifecycleQueueOverride proves LIFECYCLE_QUEUE overrides the default.
+func TestLifecycleQueueOverride(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "my-lifecycle-q")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RabbitMQ.LifecycleQueue != "my-lifecycle-q" {
+		t.Errorf("RabbitMQ.LifecycleQueue = %q, want %q", cfg.RabbitMQ.LifecycleQueue, "my-lifecycle-q")
+	}
+}
+
+// TestLifecycleQueueRejectsCollision proves an explicit LIFECYCLE_QUEUE equal to
+// RABBITMQ_QUEUE is rejected at load — re-introducing the shared queue is a
+// configuration error, not silently accepted.
+func TestLifecycleQueueRejectsCollision(t *testing.T) {
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("LIFECYCLE_QUEUE", "alkemio-collaboration")
+	if _, err := Load(); err == nil {
+		t.Fatal("LIFECYCLE_QUEUE == RABBITMQ_QUEUE: expected error, got nil")
+	}
+}
+
+func TestRabbitMQEscapesCredentials(t *testing.T) {
+	pinKnownGood(t)
+	// A password with reserved URL characters must be percent-escaped so the
+	// assembled amqp URL stays well-formed (and parseable by the amqp client).
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "q")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("RABBITMQ_USER", "u@ser")
+	t.Setenv("RABBITMQ_PASSWORD", "p@ss:w/rd")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	u, err := url.Parse(cfg.RabbitMQ.URL)
+	if err != nil {
+		t.Fatalf("assembled amqp URL is not parseable: %q (%v)", cfg.RabbitMQ.URL, err)
+	}
+	if u.User.Username() != "u@ser" {
+		t.Errorf("username round-trip = %q", u.User.Username())
+	}
+	if pw, _ := u.User.Password(); pw != "p@ss:w/rd" {
+		t.Errorf("password round-trip = %q", pw)
+	}
+	if u.Host != "rmq:5672" {
+		t.Errorf("host = %q", u.Host)
+	}
+}
+
+func TestFileServiceRequiresSettings(t *testing.T) {
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	if _, err := Load(); err == nil {
+		t.Fatal("CHECKPOINT_STORE=file-service without settings: expected error")
+	}
+}
+
+// TestFileServiceLoadsSettings pins the WHOLE file-service input set: a URL and an
+// upload cap, and nothing else.
+//
+// It deliberately sets NO bucket id and NO authorization id. Both envs once
+// existed here and neither is read any more — the destination bucket is
+// per-document from the collaboration-fetch metadata, and a snapshot is created
+// with no authorizationId at all (the row's authz column is NULL). A fixture that
+// exports an ignored variable reads as part of the required contract and would
+// mask a future accidental dependency on it, so the absence is the assertion.
+func TestFileServiceLoadsSettings(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	t.Setenv("MAX_UPLOAD_SIZE", "1048576")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.FileService.BaseURL != "http://fs:4003" || cfg.FileService.MaxUploadSize != 1048576 {
+		t.Errorf("FileService = %+v", cfg.FileService)
+	}
+}
+
+// TestMaxUploadSizeRejectsNegative asserts a negative MAX_UPLOAD_SIZE fails fast
+// rather than silently disabling the upload cap. The fileservice Put guard is
+// `limit > 0`, so a negative value would turn oversize rejection OFF (any-size
+// uploads pass) — a safety-limit corruption, not a disable (0 means "use
+// file-service's default ceiling").
+//
+// Non-vacuity: remove the `if maxUpload < 0` guard in loadCheckpointStoreConfig and this
+// test fails — Load returns nil for MAX_UPLOAD_SIZE=-1, admitting an uncapped store.
+func TestMaxUploadSizeRejectsNegative(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	t.Setenv("MAX_UPLOAD_SIZE", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("MAX_UPLOAD_SIZE=-1: expected a fail-fast error (negative disables the cap), got nil")
+	}
+}
+
+// TestMaxUploadSizeZeroIsAllowed asserts 0 is accepted: it is the documented
+// "fall back to file-service's own 32 MiB ceiling" sentinel, not an error.
+func TestMaxUploadSizeZeroIsAllowed(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	t.Setenv("MAX_UPLOAD_SIZE", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("MAX_UPLOAD_SIZE=0 should be accepted (use file-service default): %v", err)
+	}
+	if cfg.FileService.MaxUploadSize != 0 {
+		t.Fatalf("MaxUploadSize = %d, want 0", cfg.FileService.MaxUploadSize)
+	}
+}
+
+// TestUnsupportedCheckpointStoreValuesFailStartup is FR-022f.
+//
+// There are exactly two persistence paths: file-service for production, and the
+// in-process store for the test suite and local development. Anything else must
+// FAIL startup, because buildCheckpoint answers a value it does not recognise
+// with the in-process store — so an unsupported selector brings the service up
+// healthy, serving normally, and losing every document on the next restart.
+//
+// The error must also name the supported values. A bare "invalid value" leaves
+// the operator guessing at the exact moment they most need the answer.
+//
+// Non-vacuity: widen parseCheckpointStore's accepted set and this fails on the missing
+// error; drop the supported names from the message and it fails on the substring
+// checks.
+func TestUnsupportedCheckpointStoreValuesFailStartup(t *testing.T) {
+	pinKnownGood(t)
+	for _, unsupported := range []string{"gdrive", "azure-blob", "memory"} {
+		t.Run(unsupported, func(t *testing.T) {
+			t.Setenv("CHECKPOINT_STORE", unsupported)
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("CHECKPOINT_STORE=%s must fail startup: an unrecognised selector falls back to the non-durable in-process store, so the service comes up healthy and loses every document on restart", unsupported)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "file-service") || !strings.Contains(msg, "inline") {
+				t.Fatalf("the error must name the supported values (file-service / inline), got: %s", msg)
+			}
+		})
+	}
+}
+
+// TestAuthZEvalRequiresServiceURL covers the DERIVED path: header AuthN with
+// AUTHZ_MODE unset resolves AuthZ to authzeval, which cannot run without
+// AUTH_SERVICE_URL. The sibling ...ViaAuthZMode covers the EXPLICIT selection.
+//
+// The error is matched by CONTENT, not merely by being non-nil: an assertion that
+// accepts any error passes when Load fails for an unrelated reason and proves
+// nothing about the requirement this test names.
+func TestAuthZEvalRequiresServiceURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTHZ_MODE", "")
+	t.Setenv("AUTH_SERVICE_URL", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("derived authzeval AuthZ without AUTH_SERVICE_URL: expected error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_SERVICE_URL") {
+		t.Fatalf("error must name the missing setting, got %v", err)
+	}
+}
+
+func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthZEval.BreakerFailureThreshold != 3 || cfg.AuthZEval.BreakerTimeoutSeconds != 15 {
+		t.Errorf("breaker defaults = %+v", cfg.AuthZEval)
+	}
+}
+
+func TestLimitsDefaults(t *testing.T) {
+	pinKnownGood(t)
+	// Clear any ambient limit overrides so the test asserts the built-in defaults
+	// regardless of the runner's environment (getenv treats "" as unset).
+	for _, k := range []string{
+		"MAX_DOC_BYTES", "MAX_CONNS_PER_ROOM", "UPDATE_RATE_PER_SEC", "UPDATE_BURST",
+		"COLLABORATOR_INACTIVITY_SECONDS", "CONTRIBUTION_WINDOW_SECONDS",
+		"IDLE_RELEASE_SECONDS", "SAVE_DEBOUNCE_MILLIS",
+	} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Limits.MaxDocBytes != 30<<20 {
+		t.Errorf("MaxDocBytes = %d, want 30MiB", cfg.Limits.MaxDocBytes)
+	}
+	if cfg.Limits.MaxConnsPerRoom != 50 || cfg.Limits.UpdateRatePerSec != 0 {
+		t.Errorf("limit defaults = %+v", cfg.Limits)
+	}
+	if cfg.Limits.CollaboratorInactivitySeconds != 0 || cfg.Limits.ContributionWindowSeconds != 600 {
+		t.Errorf("presence cadence defaults = %+v", cfg.Limits)
+	}
+	if cfg.Limits.IdleReleaseSeconds != 30 || cfg.Limits.SaveDebounceMillis != 2000 {
+		t.Errorf("room cadence defaults = %+v", cfg.Limits)
+	}
+}
+
+func TestLimitsOverridable(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("MAX_DOC_BYTES", "1048576")
+	t.Setenv("MAX_CONNS_PER_ROOM", "8")
+	t.Setenv("UPDATE_RATE_PER_SEC", "20")
+	t.Setenv("COLLABORATOR_INACTIVITY_SECONDS", "45")
+	t.Setenv("CONTRIBUTION_WINDOW_SECONDS", "90")
+	t.Setenv("IDLE_RELEASE_SECONDS", "0") // immediate release
+	t.Setenv("SAVE_DEBOUNCE_MILLIS", "25")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Limits.MaxDocBytes != 1048576 || cfg.Limits.MaxConnsPerRoom != 8 ||
+		cfg.Limits.UpdateRatePerSec != 20 || cfg.Limits.CollaboratorInactivitySeconds != 45 ||
+		cfg.Limits.ContributionWindowSeconds != 90 {
+		t.Errorf("overridden limits = %+v", cfg.Limits)
+	}
+	if cfg.Limits.IdleReleaseSeconds != 0 || cfg.Limits.SaveDebounceMillis != 25 {
+		t.Errorf("overridden room cadence = %+v", cfg.Limits)
+	}
+}
+
+func TestLimitsRejectNegative(t *testing.T) {
+	t.Setenv("MAX_CONNS_PER_ROOM", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("a negative limit should fail fast")
+	}
+}
+
+// --- Wave 5 (T018.1): AuthN/AuthZ mode selection ---
+
+// pinKnownGood pins every non-auth selector to a known-good value so an
+// auth-mode test cannot false-pass (or false-fail) on unrelated ambient env.
+func pinKnownGood(t *testing.T) {
+	t.Helper()
+	t.Setenv("HUB_MODE", "inmemory")
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("CHECKPOINT_STORE", "inline")
+}
+
+// TestDefaultAuthZModeDerivesFromOpen asserts the standalone default — AUTH_MODE
+// unset (open) — derives AUTHZ_MODE=open (zero-dependency, AuthZ bypassed).
+func TestDefaultAuthZModeDerivesFromOpen(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "")
+	t.Setenv("AUTHZ_MODE", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthMode != AuthModeOpen {
+		t.Errorf("AuthMode = %q, want open", cfg.AuthMode)
+	}
+	if cfg.AuthZMode != AuthZModeOpen {
+		t.Errorf("AuthZMode = %q, want derived open", cfg.AuthZMode)
+	}
+}
+
+// TestHeaderModeDerivesAuthZEval asserts AUTH_MODE=header (the
+// gateway-terminated AuthN) derives AUTHZ_MODE=authzeval when unset.
+func TestHeaderModeDerivesAuthZEval(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTHZ_MODE", "")
+	t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthMode != AuthModeHeader {
+		t.Errorf("AuthMode = %q, want header", cfg.AuthMode)
+	}
+	if cfg.AuthZMode != AuthZModeEval {
+		t.Errorf("AuthZMode = %q, want derived authzeval", cfg.AuthZMode)
+	}
+}
+
+// TestAuthModeRejectsUnknown asserts an unrecognised AUTH_MODE fails fast.
+func TestAuthModeRejectsUnknown(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "kerberos")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=kerberos: expected error, got nil")
+	}
+}
+
+// TestAuthZModeRejectsUnknown asserts an unrecognised AUTHZ_MODE fails fast.
+func TestAuthZModeRejectsUnknown(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "open")
+	t.Setenv("AUTHZ_MODE", "ldap")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTHZ_MODE=ldap: expected error, got nil")
+	}
+}
+
+// TestAuthZEvalRequiresServiceURLViaAuthZMode asserts selecting authzeval AuthZ
+// explicitly (AUTHZ_MODE=authzeval) with open AuthN still requires
+// AUTH_SERVICE_URL — the authzeval-config requirement keys off AUTHZ_MODE.
+func TestAuthZEvalRequiresServiceURLViaAuthZMode(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTHZ_MODE", "authzeval")
+	t.Setenv("AUTH_SERVICE_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTHZ_MODE=authzeval without AUTH_SERVICE_URL: expected error")
+	}
+}
+
+// TestMetadataStoreKeySelectsTheMetadataPort pins the naming rule's one
+// exception: METADATA_STORE is named for port.MetadataStore, which is this
+// service's own port rather than a core contract, so the key keeps that name
+// while the others are named for the contracts they select.
+func TestMetadataStoreKeySelectsTheMetadataPort(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("METADATA_STORE", "inmemory")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("METADATA_STORE must still be accepted: %v", err)
+	}
+	if cfg.MetadataStore != MetadataStoreInMemory {
+		t.Fatalf("MetadataStore = %q, want inmemory", cfg.MetadataStore)
+	}
+}
+
+// TestCanonicalSelectorKeysAreRead asserts the selector keys actually work, so the
+// tests above cannot pass against a config that rejects everything.
+func TestCanonicalSelectorKeysAreRead(t *testing.T) {
+	t.Setenv("CHECKPOINT_STORE", "inline")
+	t.Setenv("HUB_MODE", "inmemory")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with the canonical selector keys: %v", err)
+	}
+	if cfg.CheckpointStore != CheckpointStoreInline {
+		t.Fatalf("CHECKPOINT_STORE was not read: %q", cfg.CheckpointStore)
+	}
+	if cfg.HubMode != HubInMemory {
+		t.Fatalf("HUB_MODE was not read: %q", cfg.HubMode)
+	}
+}
+
+// TestURLOverridesTakePrecedenceOverComponentParts covers the two "verbatim URL
+// wins" branches.
+//
+// Both backends accept either a full connection URL or host/port/credential
+// parts. The URL form exists for deployments that carry a single secret rather
+// than five, and it must WIN when set — a config that silently rebuilt the URL
+// from empty component defaults would connect to localhost while the operator
+// believed they had pointed it at a managed broker or database.
+func TestURLOverridesTakePrecedenceOverComponentParts(t *testing.T) {
+	pinKnownGood(t)
+	t.Run("RABBITMQ_URL", func(t *testing.T) {
+		// Credential-shaped only because a real RABBITMQ_URL is; the point of the
+		// test is that the URL wins verbatim, not what it contains.
+		const brokerURL = "amqp://user:" + "pw" + "@broker.example:5672/vhost" //nolint:gosec // G101: test fixture, not a credential
+		t.Setenv("RABBITMQ_URL", brokerURL)
+		t.Setenv("RABBITMQ_HOST", "ignored-host")
+		t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+		t.Setenv("METADATA_STORE", "rabbitmq")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RabbitMQ.URL != brokerURL {
+			t.Fatalf("RabbitMQ URL = %q; the explicit URL must win over the component parts, or the service connects to the wrong broker while the operator believes otherwise", cfg.RabbitMQ.URL)
+		}
+	})
+}
+
+// TestPortAndIntegerParsingRejectNonsense covers the numeric guards.
+//
+// A port outside 1–65535 or a non-numeric value must fail startup rather than
+// fall back to a default: silently substituting one would bind a different port
+// from the one the operator configured, and the service would look healthy while
+// nothing could reach it.
+func TestPortAndIntegerParsingRejectNonsense(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{"non-numeric port", "PORT", "eighty"},
+		{"port zero", "PORT", "0"},
+		{"port above the range", "PORT", "70000"},
+		{"non-numeric size", "MAX_UPLOAD_SIZE", "big"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(tc.key, tc.value)
+			if tc.key == "MAX_UPLOAD_SIZE" {
+				t.Setenv("CHECKPOINT_STORE", "file-service")
+				t.Setenv("METADATA_STORE", "rabbitmq")
+				t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+				t.Setenv("RABBITMQ_HOST", "rmq")
+				t.Setenv("FILE_SERVICE_URL", "http://file-service:4003")
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q must fail startup rather than silently falling back to a default", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+// TestSelectedBackendsRequireTheirSettings asserts the fail-fast rule for every
+// backend that needs configuration beyond its selector.
+//
+// This is the same invariant the mandatory selectors enforce, one level down:
+// choosing a backend without the settings it needs must fail at STARTUP, naming
+// what is missing — not at the first save, where the failure surfaces as a
+// document that will not persist while the pod reports healthy. Each case here
+// is a distinct required setting, and the assertion is on the error naming it so
+// the operator's fix travels with the message.
+func TestSelectedBackendsRequireTheirSettings(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "redis hub without a URL",
+			env:     map[string]string{"HUB_MODE": "redis", "REDIS_URL": ""},
+			wantErr: "REDIS_URL",
+		},
+		{
+			name:    "rabbitmq metadata store without a queue",
+			env:     map[string]string{"METADATA_STORE": "rabbitmq", "RABBITMQ_QUEUE": "", "RABBITMQ_HOST": "mq"},
+			wantErr: "RABBITMQ_QUEUE",
+		},
+		{
+			// A shared queue round-robin-steals metadata RPCs between the two
+			// consumers, so one of them silently loses half its replies.
+			name: "lifecycle queue equal to the metadata queue",
+			env: map[string]string{
+				"METADATA_STORE": "rabbitmq", "RABBITMQ_HOST": "mq",
+				"RABBITMQ_QUEUE": "shared", "LIFECYCLE_QUEUE": "shared",
+			},
+			wantErr: "LIFECYCLE_QUEUE",
+		},
+		{
+			name:    "file-service checkpoint store without its URL",
+			env:     map[string]string{"CHECKPOINT_STORE": "file-service", "FILE_SERVICE_URL": ""},
+			wantErr: "FILE_SERVICE_URL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pinKnownGood(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error must name %q so the fix travels with the message, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestNegativeLimitIsRejected covers the limits guard: 0 disables a limit, but a
+// NEGATIVE value is a typo that would otherwise be accepted and disable it too —
+// silently removing a bound the operator believed they had set.
+func TestNegativeLimitIsRejected(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("MAX_DOC_BYTES", "-1")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("a negative MAX_DOC_BYTES must fail; accepting it would silently disable the limit")
+	}
+	if !strings.Contains(err.Error(), "MAX_DOC_BYTES") {
+		t.Fatalf("error must name the setting, got %v", err)
+	}
+}
+
+// TestUnsupportedTopologyFailsStartup pins the refusal of multi-pod fan-out with a
+// durable store.
+//
+// The pair has no ownership mechanism: every pod flushes the whole document on its
+// own schedule and nothing decides which flush wins, so two pods that diverge
+// overwrite each other and the later writer silently discards edits it never
+// received. A warning would not prevent that write — the failure needs no unusual
+// operator behaviour, just two pods and one divergence.
+//
+// The error must name BOTH keys and the supported alternative, because an operator
+// who reaches this has a working intent (durable, multi-pod) and needs to know
+// which half is unavailable.
+func TestUnsupportedTopologyFailsStartup(t *testing.T) {
+	t.Setenv("METADATA_STORE", "inmemory")
+	t.Setenv("HUB_MODE", "redis")
+	t.Setenv("REDIS_URL", "redis://localhost:6379")
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("HUB_MODE=redis with CHECKPOINT_STORE=file-service must fail startup; the service would serve happily while two pods overwrote each other's flushes")
+	}
+	for _, want := range []string{"HUB_MODE=redis", "CHECKPOINT_STORE=file-service", "HUB_MODE=inmemory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error must name %q so the operator knows which half is unavailable and what is supported; got %v", want, err)
+		}
+	}
+}
+
+// TestSupportedTopologiesStillLoad guards the other side: rejecting one pair must
+// not reject the combinations that ARE supported. Without this, a check that
+// refused everything would pass the test above.
+func TestSupportedTopologiesStillLoad(t *testing.T) {
+	// The metadata store is part of the topology, not an independent knob: durable
+	// blobs require a durable index, because an in-process index is empty on every
+	// boot and would refuse every connection as an unknown document.
+	cases := []struct{ name, hub, checkpoint, metadata string }{
+		{"single-pod durable", "inmemory", "file-service", "rabbitmq"},
+		{"multi-pod non-durable", "redis", "inline", "inmemory"},
+		{"single-pod non-durable", "inmemory", "inline", "inmemory"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("METADATA_STORE", c.metadata)
+			t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+			t.Setenv("RABBITMQ_HOST", "rmq")
+			t.Setenv("HUB_MODE", c.hub)
+			t.Setenv("REDIS_URL", "redis://localhost:6379")
+			t.Setenv("CHECKPOINT_STORE", c.checkpoint)
+			t.Setenv("FILE_SERVICE_URL", "http://file-service:4005")
+			if _, err := Load(); err != nil {
+				t.Fatalf("%s must still load: %v", c.name, err)
+			}
+		})
+	}
+}
+
+// TestNumericEnvRejectsMalformed asserts a SET-but-unparseable numeric env var
+// fails fast rather than silently falling back to its default — a typo in a hard
+// limit or safety-sensitive setting must not quietly change runtime behavior.
+func TestNumericEnvRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		key, val string
+		// extra env required for the loader that reads the key to run at all.
+		extra map[string]string
+	}{
+		{key: "MAX_DOC_BYTES", val: "not-a-number"},
+		{key: "SAVE_DEBOUNCE_MILLIS", val: "12.5"},
+		{key: "MAX_UPLOAD_SIZE", val: "ten", extra: map[string]string{
+			"CHECKPOINT_STORE": "file-service",
+			"FILE_SERVICE_URL": "http://files:4000",
+		}},
+		{key: "AUTH_BREAKER_TIMEOUT_SECONDS", val: "soon", extra: map[string]string{ //nolint:gosec // G101: test-fixture env values (URLs/header names), not credentials.
+			"AUTH_MODE": "header", "AUTH_TOKEN_HEADER": "X-Alkemio-Actor-Id",
+			"AUTHZ_MODE": "authzeval", "AUTH_SERVICE_URL": "http://auth:6060",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			pinKnownGood(t)
+			for k, v := range tc.extra {
+				t.Setenv(k, v)
+			}
+			t.Setenv(tc.key, tc.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q: expected a fail-fast parse error, got nil", tc.key, tc.val)
+			}
+		})
+	}
+}
+
+// TestAuthZModeOverrideIndependentOfAuthN asserts AUTHZ_MODE is honoured
+// independently of AUTH_MODE: gateway-terminated AuthN with an explicit OPEN
+// AuthZ is a valid combination, so the two selectors must not be coupled.
+func TestAuthZModeOverrideIndependentOfAuthN(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "header")
+	t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+	t.Setenv("AUTHZ_MODE", "open")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthMode != AuthModeHeader || cfg.AuthZMode != AuthZModeOpen {
+		t.Errorf("AuthMode/AuthZMode = %q/%q, want header/open", cfg.AuthMode, cfg.AuthZMode)
+	}
+}
+
+// TestOIDCModeIsRejected asserts the withdrawn direct-validation mode is refused
+// by config parsing rather than silently accepted and ignored. An operator whose
+// manifest still says oidc must be told at startup, not authenticated by a mode
+// that no longer exists.
+func TestOIDCModeIsRejected(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "oidc")
+	if _, err := Load(); err == nil {
+		t.Fatal("AUTH_MODE=oidc must be rejected; the mode was removed")
+	}
+}
+
+// TestHeaderModeRequiresADedicatedHeader pins BOTH refusals that keep the header
+// adapter from trusting something a client can set.
+//
+// The adapter takes AUTH_TOKEN_HEADER's value AS the actor id, so the header must
+// be gateway-owned. Unset is refused because there is no longer a default to fall
+// back to — an implicit default here would silently pick a header nobody chose.
+// "Authorization" is refused by name because it is client-controllable: accepting
+// it would let any caller stamp its own actor id and impersonate anyone.
+func TestHeaderModeRequiresADedicatedHeader(t *testing.T) {
+	for _, tc := range []struct{ name, header string }{
+		{"unset", ""},
+		{"the client-controllable Authorization", "Authorization"},
+		{"Authorization in any casing", "aUtHoRiZaTiOn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinKnownGood(t)
+			t.Setenv("AUTH_MODE", "header")
+			t.Setenv("AUTH_TOKEN_HEADER", tc.header)
+			t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+			if _, err := Load(); err == nil {
+				t.Fatalf("AUTH_TOKEN_HEADER=%q must be refused in header mode", tc.header)
+			}
+		})
+	}
+
+	// The positive half: a dedicated gateway-owned header IS accepted. Without
+	// it, "refuse everything in header mode" would satisfy the rows above.
+	t.Run("a dedicated gateway header is accepted", func(t *testing.T) {
+		pinKnownGood(t)
+		t.Setenv("AUTH_MODE", "header")
+		t.Setenv("AUTH_TOKEN_HEADER", "X-Alkemio-Actor-Id")
+		t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("header mode with a dedicated header must load: %v", err)
+		}
+		if cfg.Auth.ActorIDHeader != "X-Alkemio-Actor-Id" {
+			t.Errorf("Auth.ActorIDHeader = %q, want X-Alkemio-Actor-Id", cfg.Auth.ActorIDHeader)
+		}
+	})
+}
+
+// TestOpenModeNeedsNoTokenHeader is the companion: open mode ignores the
+// credential entirely, so an unset header name is correct rather than an error.
+// Without this, the header-mode requirement above could be implemented as a
+// global one and nothing would notice.
+func TestOpenModeNeedsNoTokenHeader(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("AUTH_MODE", "open")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("open mode with no AUTH_TOKEN_HEADER must load: %v", err)
+	}
+	if cfg.Auth.ActorIDHeader != "" {
+		t.Errorf("Auth.ActorIDHeader = %q, want empty", cfg.Auth.ActorIDHeader)
+	}
+}
+
+// TestFileServiceNeedsOnlyTheURL is the config half of removing the fallback
+// bucket. FILE_SERVICE_STORAGE_BUCKET_ID is gone: the destination bucket is per
+// document and arrives on the collaboration-fetch metadata, so a deployment-wide
+// value had nothing correct to say. Requiring an env nothing reads is worse than
+// useless — an operator sets it, believes it means something, and it does not.
+//
+// Non-vacuity: restore `|| cfg.FileService.StorageBucketID == ""` to the
+// requirement and this fails — Load rejects a valid file-service deployment.
+func TestFileServiceNeedsOnlyTheURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "http://fs:4003")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("file-service with only FILE_SERVICE_URL must boot: %v", err)
+	}
+	if cfg.FileService.BaseURL != "http://fs:4003" {
+		t.Errorf("BaseURL = %q", cfg.FileService.BaseURL)
+	}
+}
+
+// TestFileServiceStillRequiresTheURL is the positive control for the test above:
+// dropping the bucket requirement must not have loosened the URL requirement. A
+// file-service store with no base URL cannot save anything, and must not boot.
+func TestFileServiceStillRequiresTheURL(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("CHECKPOINT_STORE", "file-service")
+	t.Setenv("METADATA_STORE", "rabbitmq")
+	t.Setenv("RABBITMQ_QUEUE", "alkemio-collaboration")
+	t.Setenv("RABBITMQ_HOST", "rmq")
+	t.Setenv("FILE_SERVICE_URL", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("CHECKPOINT_STORE=file-service with no FILE_SERVICE_URL must fail startup")
 	}
 }

@@ -1,0 +1,1099 @@
+# Non-vacuity ledger — `003-go-yjs-core-port`
+
+**FR-018a / SC-005.** A test that passes for a reason its author has not verified
+is worse than no test, because it is trusted. Every guarantee restructured or
+added during this port was proved by the same procedure:
+
+1. revert the guarantee in isolation (one edit, in the production code),
+2. run the test and confirm it goes **RED**,
+3. restore,
+4. re-run and confirm **GREEN**,
+5. record the revert and the observed failure below.
+
+Where a probe did **not** produce RED, that is recorded too — those are the
+entries that changed a test.
+
+---
+
+## Restructured `002` invariants
+
+The `002` suite passed unchanged across the core swap except where a test reached
+into a structure the port removed. Those were restructured to the same or a
+stronger property, never weakened.
+
+| Invariant | Restructured because | Revert → observed RED |
+|---|---|---|
+| `TestInvBudgetAllPaths` | none — passed unchanged | remove the budget check from `applyUpdate` → the peer path stops logging over-budget, assertion fails |
+| `TestInvTeardownNoDeadlock` | the fake was a `ClusterBroadcaster`; became a `hub.Hub` whose `Subscription.Close` blocks (the same pubsub.Close semantics) | swap teardown's `cancelSub` ahead of the context cancel → deadlocks, test times out |
+| `TestInvPersistRoundtrip` | `BlobStore` → `persistence.CheckpointStore` | make `persist` write a delta instead of complete state → round-trip reads back short |
+| `TestInvObs*` (5) | `panicOnSaveStore` embedded two different stores; now embeds one | remove `recover()` from the run loop → the induced panic crashes the test binary |
+| `TestInvNoLeak`, `TestInvLifecycleBounded`, `TestInvMgrLiveness*`, `TestInvShutdownAbort*`, `TestInvReview*` | passed unchanged | — |
+
+## Guarantees added by this port
+
+| Guarantee | Revert applied | Observed RED |
+|---|---|---|
+| Handshake frames are never shed (`sendInitial`) | replace `sendInitial` with `Send` | "second handshake frame returned ws: connection closed instead of waiting for queue space" |
+| The purge tombstone prevents resurrection | remove the three `acquire` guards | "a Join admitted inside the cascade wrote durable content back for a deleted document" |
+| Failed flushes are retried | remove `armRetryTimer` | "timeout waiting for flush retried after a failure"; escalation never fires |
+| Restore happens inside the registry's `OpenFunc` | move `restoreInto` after `Acquire` | "LoadCheckpoint called 8 times for 8 concurrent first-opens" |
+| A room's teardown evicts its registry slot | remove `evictFromRegistry` | both eviction tests fail: the document is still resident after release |
+| `metapointer.Record` creates a missing row | restore the "missing row is an error" branch | "Record on a document with no index row: no row" |
+| `statusWriter.Unwrap` | delete the method | "Hijack through the status-recording wrapper: feature not supported" |
+| Every metrics hook moves its series | empty `GenerationInvalidated`; empty `DocumentDurabilityRestored` | "left collaboration_generation_invalidations_total unchanged at 0"; "left collaboration_undurable_flush_failures unchanged at 7" |
+| A pre-rebuild metric still exists | drop `FanoutLagSeconds` from `InitMetrics` | "metric collaboration_fanout_lag_seconds existed before the persistence rebuild and is not exported now" |
+| Unsupported `CHECKPOINT_STORE` values fail startup | widen `parseCheckpointStore`'s accepted set | the startup error disappears |
+| An unknown checkpoint codec is refused, not stored | accept the `default:` branch | "saving an unknown encoding = <nil>, want ErrUnsupportedEncoding" |
+| A non-zero fence is refused BEFORE erasure | drop `checkFence` from `Delete` | "Delete with a fence on an Unfenced store = <nil>, want ErrUnexpectedFence" |
+| A blank `contentType` on upsert preserves the stored one | drop the preserve branch | "a blank contentType overwrote the stored one ... could materialize a memo root for a whiteboard" |
+| The index `Delete` removes the row and is idempotent | drop `delete(s.rows, id)` | "Load after Delete = <nil>, want ErrNotFound" |
+| A selected backend without its required settings fails at STARTUP | remove the `REDIS_URL` guard | "expected startup to fail; the backend is selected but unconfigured, so the failure would surface at first use instead" |
+| Corrupt stored state fails materialization and never opens EMPTY | add `ErrCorrupt` to the `ErrNotFound` branch | "materialization succeeded against unreadable stored state; the room would serve an EMPTY document and the next save would overwrite the last good state" |
+| The checkpoint restore is bounded by the ROOM, not by the caller | drop the `WithTimeout` in `restoreBounded` | "restore never returned" — the probe hangs to the 5s guard rather than mismatching an assertion |
+| Writes survive repeated release → evict → re-materialize cycles | load the checkpoint, then discard it instead of applying | "2 of 24 writes survived 12 release/re-materialize cycles; a branch was overwritten" |
+| The room DECLARES its checkpoint codec | drop `Encoding: EncodingV2` from `Room.persist` | 4 tests fail with "persistence: checkpoint encoding required" |
+| The file-service store refuses a codec it cannot record | accept `EncodingV1` alongside V2 | "saving a V1 update = <nil>, want ErrUnsupportedEncoding" |
+| A deleted blob whose index row survives loads as CORRUPT, not missing (required by `ErrNotFound`'s own contract) | clear the pointer in `Delete` | load reports `ErrNotFound`, the room opens the document EMPTY, and the next save writes that over content whose blob was just erased |
+| `CHECKPOINT_STORE` is mandatory | restore `getenv("CHECKPOINT_STORE", inline)` | "expected startup to fail, got nil — the service would run on the non-durable store and lose every document on restart" |
+| `HUB_MODE` is mandatory | restore `getenv("HUB_MODE", inmemory)` | "HUB_MODE unset: expected startup to fail, got nil" |
+| redis + file-service is REJECTED at startup | remove the pair check | "must fail startup; the service would serve happily while two pods overwrote each other's flushes" |
+| ...and the supported combinations still load | make the check reject everything | "single-pod durable must still load" |
+| A save NEVER recreates a file the index still points at | restore the create-on-rewrite-404 fallback | "saving against a pointer whose file is gone SUCCEEDED; a missing referenced checkpoint was silently replaced with current in-memory state, hiding the corruption" |
+| ...and a document with NO pointer still gets its first checkpoint | refuse every save | "first save for a document with no pointer must succeed" |
+
+### Why the room bounds its own restore
+
+The core hands `OpenFunc` a context owned by the **registry**, not by any one
+acquirer: it is cancelled when the *last* waiter stops waiting. That bounds an
+open nobody wants any more; it does **not** bound an open somebody is still
+waiting for. A document that keeps attracting joiners renews the clock on every
+arrival, so a wedged `LoadCheckpoint` can outlive every deadline the acquirers
+themselves carry.
+
+`TestMaterializationIsBoundedWhenTheCheckpointStoreHangs` (the F7 regression)
+cannot detect that gap: under a core that still propagates the acquirer's
+context, the inherited deadline satisfies it either way. The added test therefore
+passes `context.Background()` — no deadline, no cancellation — so **only** the
+room's own bound can end the call. That is what makes it non-vacuous against the
+pinned core rather than only against a future one.
+
+
+## Probes that did NOT go RED — and what changed as a result
+
+These are the entries that matter most: in each case the test was passing for a
+reason other than the one it claimed.
+
+| Test | Probe that should have failed it | What was actually wrong | Fix |
+|---|---|---|---|
+| `TestConcurrentFirstOpensRestoreExactlyOnce` | move `restoreInto` after `Acquire` | it drove `Join`, and `Manager.acquire`'s singleflight collapses concurrent first-connects regardless — it measured the singleflight and reported it as evidence about the registry | call `newRoom` directly, bypassing the singleflight |
+| `TestMalformedFramesAreDropped` | — | `handleMessage` drops frames from unregistered senders *before* parsing, so a bare room never reached the parser; it proved "unknown senders are ignored" while claiming to prove "malformed frames are dropped" | register the member first; confirmed against the coverage profile, not the green tick |
+| `TestColdLoadCostTracksDocumentSize` | make the store append rather than replace | the debounce coalesced both documents into a single flush, so a log-shaped store was indistinguishable | flush after every edit, which is also the honest model of accumulated history |
+| `TestNoPersistenceSignalWasLostInTheRebuild` | empty a `PrometheusMetrics` method body | an unlabelled counter is exported at zero whether or not anything increments it | added `TestEveryMetricsHookMovesItsSeries`, which asserts movement rather than presence |
+| `TestReleasedRoomsDoNotAccumulate` (first version) | remove `evictFromRegistry` | it inspected a registry of its own, but `NewManager` overwrites `Deps.Registry` with its own — so it reported a clean registry no room had ever touched | observe `mgr.registry` |
+| `TestRejoinRacingAnIdleReleaseLosesNoWrites` (first version) | remove the flush before teardown | 40 concurrent joiners all coalesced onto ONE room: the document materialized **exactly once**, never evicted, and the release/rejoin cycle it claimed to stress never happened. The probe stayed green because the debounce had already flushed, and the test would have stayed green against any registry lifetime bug whatsoever | rounds made sequential, each waiting for release so the next must rebuild from the checkpoint; the materialization count is now **asserted in-test**, so the test fails if it ever decays back into the coalesced shape |
+| `FuzzMalformedFramesAreOffenderOnly` (first version) | — | it checked the observer with `Ping`, and coder/websocket only processes pongs while a read is in flight, so it failed with **no offence at all** — it would have been reported as a server defect | the observer reads in the background, as a real client does |
+
+## Deleted rather than restructured (SC-005a)
+
+`TestPurgeDurableSurfacesMetadataLoadError`. `purgeDurable` no longer loads the
+metadata row — the pointer is resolved inside the store — so the error it induced
+became **unreachable by construction**, not merely untested. Two tests still
+cover the surrounding property (that a failing durable purge surfaces rather than
+reporting success), and the removal is annotated at the call site naming them.
+
+No other `002` invariant was deleted.
+
+---
+
+# Lifecycle retry/DLQ topology (Q1–Q5)
+
+35 mutation probes over the new lifecycle consumer: each guarantee was reverted in
+the production source, the package suite was run, RED was observed, and the source
+was restored. Every probe named below went RED. The harness re-runs the suite after
+restoring and asserts GREEN, so a probe that leaves the tree dirty is detectable.
+
+## Topology declaration
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| retry tier declared without `x-queue-type: quorum` | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` |
+| Q1 declared non-durable | ″ |
+| retry tiers declared non-durable | ″ |
+| Q1 given an extra argument (inequivalent to the producer's declaration) | ″ |
+| `x-dead-letter-strategy: at-least-once` dropped | `TestRetryTiersCarryTheirScheduleAndTheDLQIsTerminal` |
+| `x-overflow: reject-publish` dropped | ″ |
+| `x-message-ttl` narrowed from `int32` to `int` (type drift) | ″ |
+| tier dead-letters to the wrong routing key | ″ |
+| DLQ given a TTL (no longer terminal) | ″ |
+| `tierCount` drifts from `len(retryTiers)` | `TestTierCountMatchesTheSchedule` |
+
+## Connect ordering
+
+The ordering claims are asserted against a recorded call log, not merely against
+"both happened". Each of these reverts moved a verb after `Consume` or removed it:
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| `Qos` never applied (prefetch unlimited) | `TestConnectBoundsPrefetchAndDeclaresBeforeConsuming` |
+| `Qos` applied after `Consume` | ″ |
+| topology declared after `Consume` | ″ |
+| publisher confirms never enabled | ″ |
+| a zero configured prefetch reaches `Qos` as 0 | ″ + `TestResolvePrefetchDefaults` |
+
+`DefaultPrefetch`'s exact value is **not** asserted. The earlier assertion compared
+`ch.prefetch` against `DefaultPrefetch` itself, which is self-referential and stayed
+green when the constant changed — it was a change-detector, not an invariant. The
+invariant is that a positive prefetch is applied at all (0 means *unlimited* in
+AMQP); the configured branch is covered separately by
+`TestConnectHonoursConfiguredPrefetch`.
+
+## Confirmed transfer
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| publish loses `mandatory=true` | `TestFailureTransfersToTheNextTierBeforeAcking` |
+| a broker RETURN is ignored (unroutable counts as success) | `TestTransferFailureLeavesTheEventBrokerOwned` |
+| a broker NACK counts as success | ″ |
+| an unconfirmed transfer acks the original anyway | ″ |
+| the attempt header is not incremented | `TestFailureTransfersToTheNextTierBeforeAcking` |
+| an exhausted schedule wraps to tier 0 instead of the DLQ | `TestExhaustedScheduleGoesToTheDeadLetterQueue` |
+| a terminal verdict is routed into the retry ladder | `TestUnactionableEnvelopeGoesToTheDeadLetterQueue` |
+| a successful handler transfers instead of just acking | `TestSuccessfulHandlerAcksWithoutTransferring` |
+
+## Attempt-header totality
+
+`x-collab-attempt` crosses a wire, so the routing decision must be defined for
+every value that can arrive — not just the ones this consumer writes.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| header narrowed to `int32` without clamping (`1<<32` wraps to 0 → back to tier 0) | `TestAttemptHeaderRoutingIsTotalOverWhateverArrives` |
+| negative attempt not floored | ″ |
+| wider (`int64`) header types ignored | ″ |
+| byte-width (`uint8`) header types ignored | ″ |
+
+The negative-value case is the one worth spelling out. Routing alone did **not**
+defend the floor: `nextTarget` already maps any `attempt <= 0` to tier 0, so
+deleting the floor left the suite green. The observable defect is in the *outgoing*
+header — the transfer writes `attempt+1`, so `-7` becomes `-6`, still "before the
+ladder", and the event cycles the first tier forever without ever reaching the DLQ.
+The test therefore asserts the header it publishes as well as the queue it targets:
+**every transfer must strictly advance toward the DLQ.**
+
+## Broker version floor
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the version floor is not enforced | `TestVersionFloorRejectsABrokerThatSilentlyIgnoresTheTopology`, `TestVersionFloorRejectsBelowTheBaselineOnEveryComponent` |
+| a missing broker version is tolerated (fails open) | `TestVersionFloorFailsClosedOnAnUnreadableVersion` |
+| an unreadable broker version is tolerated | ″ |
+
+The first attempt at the missing-version probe was **invalid, not passing**: it
+disabled the missing-version branch but left `raw` empty, so `parseBrokerVersion("")`
+failed and the *unreadable* branch produced an error anyway. The guarantee was never
+unprotected; the probe simply did not revert it. Re-run with the branch returning
+`nil`, it went RED.
+
+## Handler verdicts
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| unparseable body acked as success | `TestUnactionableEnvelopeGoesToTheDeadLetterQueue`, `TestHandleVerdictsSeparateSuccessFromUnactionable` |
+| unknown pattern acked as success | `TestHandleVerdictsSeparateSuccessFromUnactionable` |
+| malformed `document.access_changed` acked as success | `TestMalformedAndEmptyEventsAreTerminal` |
+| a purge failure acked instead of retried | `TestFailureTransfersToTheNextTierBeforeAcking`, `TestTransferFailureLeavesTheEventBrokerOwned`, `TestExhaustedScheduleGoesToTheDeadLetterQueue` |
+
+`handleAccessChanged` was changed as a result of this pass. It previously swallowed
+a malformed payload and returned nothing, so `handle` acked it as a success while
+`handleDeleted` sent the identical failure to the DLQ. The asymmetry was not a
+design choice — an unparseable `access_changed` is exactly as unactionable, and
+acking it meant a lost revocation left no trace anywhere.
+
+## Deleted rather than tested
+
+- `headerReplays` (`x-collab-replays`). No producer and no consumer: nothing writes
+  it and nothing reads it. It existed to support a replay procedure that is
+  documentation, not code. Deleted rather than kept as a named-but-inert constant.
+- `PatternDocumentCreated`, `CreatedEvent`, `handleCreated`, `normalizeContentType`,
+  and `Manager.PreRegister` *on the lifecycle adapter's port*. `PreRegister` itself
+  survives on `service.Manager` — it has a live second caller in the HTTP adapter —
+  but the bus no longer carries a create event, so the lifecycle adapter's copy of
+  the method was a port with no caller.
+- `fakeAcker.requeued`. Production has no `Nack` and no `Reject` at all: a failed
+  transfer leaves the delivery unacknowledged and recycles the channel. Tracking a
+  requeue flag recorded a value no code path can produce. The `nacks` counter stays,
+  asserted at zero — "must never reject" is a live invariant, since rejecting turns a
+  transient publish failure into terminal handling behind an unconfirmed DLX hop.
+
+## Supervisor (broker re-attachment)
+
+Found while wiring metrics, not by a test: `recycle()` closes the channel, but
+nothing re-opened it. The consume loop's only exit is the delivery stream ending,
+so the first unconfirmable transfer permanently stopped the consumer — no purges,
+no revocations — behind a process that stayed healthy in every other respect. The
+same hole swallowed any broker restart or network blip. `Connect` now brings up one
+`session` and a supervisor re-opens it on a bounded backoff until `Close`.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| supervisor removed (a recycle is terminal again) | `TestTheConsumerReAttachesAfterTheDeliveryStreamEnds` |
+| dead session's connection not released before re-attaching | ″ |
+| supervisor keeps re-attaching after `Close` | `TestCloseTearsDownChannelAndConnectionAndStopsSupervising` |
+
+`TestCloseTearsDownChannelAndConnection` had to be rewritten rather than kept: it
+asserted the channel and connection were each closed **exactly once**, which the
+supervisor makes racily false (it releases the dead session too) while the actual
+invariant — they end up released — still holds. Exact-count assertions on an
+idempotent teardown are arithmetic, not invariants. The replacement asserts release
+plus the property that Close actually stands the supervisor down; without that,
+shutdown is indistinguishable from a broker blip and the consumer dials its way back
+up forever behind a process trying to exit.
+
+One claim was **weakened rather than defended**. `transfer` reads the channel and its
+confirm/return streams in a single locked read, and the comment said this guarded
+against a re-attach landing between the publish and the wait. It cannot: the
+supervisor re-attaches from the same goroutine `transfer` runs on, so the interleaving
+has no reachable instance. The probe that split the read stayed green for that reason,
+and the comment was corrected instead of a test being invented to justify it. The lock
+is there for `Close`, which does run on another goroutine.
+
+## Lifecycle observability
+
+Two signals, because they answer two questions a single metric cannot. Twelve
+probes, all RED.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| transfers are never reported | `TestEveryTransferIsReported` |
+| an unconfirmed transfer is reported as confirmed | ″ |
+| every transfer reports the same queue | ″ |
+| success also reports a transfer | `TestSuccessIsNotReportedAsATransfer` |
+| depth polling never starts | `TestQueueDepthIsPolledForEveryQueueInTheTopology` |
+| only the DLQ depth is polled | ″ |
+| the depth reading is discarded | ″ |
+| every queue reports the main queue's depth | ″ |
+| a configured poll interval is ignored | ″ + `TestDepthPollIntervalResolution` |
+| a negative poll interval falls back to the default | `TestDepthPollIntervalResolution` |
+| the Prometheus bridge collapses the outcome label | `TestLifecycleObserverBridgeMovesItsSeries` |
+| queue depth accumulates instead of replacing | ″ |
+
+Two of those probes were **VACUOUS on the first run**, and both times the test was
+at fault:
+
+- *"the depth reading is discarded"* — the fake reported `4` for every queue and
+  the probe hardcoded `4`, so the mutation was indistinguishable from the truth.
+  The fake now reports a **different count per queue**, which also catches a
+  reading taken from the wrong queue.
+- *"a negative poll interval falls back to the default"* — `TestDepthPollingCanBeDisabled`
+  waited 20ms and saw no poll. So would a 30-second default. A window-based test
+  cannot tell *disabled* from *slow*, so the three-way meaning of the interval is
+  now pinned on the resolver itself, with the behavioural test kept only for the
+  part it can actually observe (no poller, no panic on a negative ticker).
+
+`QueueDepth` is a level and `EventTransferred` is a rate, deliberately. A counter
+alone cannot answer even "is READY work waiting": it only goes up, so the increment
+that put ten events in the DLQ scrolls out of the alert window while the events sit
+there. A gauge alone cannot answer "did anything just fail", because a transfer that
+lands in a tier and expires back out is invisible between polls. Per-tier depth also
+substitutes for message age — the ladder quantizes it, and AMQP offers no age reading
+short of the management API or consuming the queue to peek.
+
+Depth is read by **re-declaring** each queue, not by a passive declare. An equivalent
+re-declaration is a no-op that returns the current count; a passive declare takes the
+channel down whenever a queue is missing, which is exactly the situation worth
+reporting rather than dying on. The declare and the poll share one `topologyFor` list,
+so the arguments used to poll are by construction the ones used to declare — otherwise
+a drift between them would be an inequivalent redeclaration that kills the channel.
+
+## Real-broker integration (RabbitMQ 3.13.2)
+
+The unit tests prove what this code does; these prove what the **broker** does with
+it, which is a separate question and the one that actually bit. Run against a real
+3.13.2 with the management plugin; CI is pinned to that exact version so it proves
+the declared floor is *sufficient*, not merely that some newer broker works.
+
+| Test | What only a real broker can answer |
+|---|---|
+| `TestConsumerConsumesLivePublishedEvents` | the producer's frozen Q1 declaration and the consumer's coexist on one broker |
+| `TestQ1RejectsAnInequivalentProducerDeclaration` | the frozen contract is enforced by RabbitMQ (PRECONDITION_FAILED), not merely agreed in a document |
+| `TestAFailedEventLandsOnTheFirstRetryTier` | the transfer publish actually ROUTES — a confirm alone does not prove it, since a default-exchange publish to a missing queue is a silent discard that still confirms |
+| `TestAnUnactionableEventLandsInTheDeadLetterQueue` | an unreadable envelope is recorded, and skips the ladder |
+| `TestBrokerExpiresARetryTierBackToItsTarget` | the broker honours `x-message-ttl` + `x-dead-letter-strategy` on a quorum queue at all |
+| `TestAnExpiredRetryIsRetainedWhenItsTargetIsMissing` | at-least-once retains an unroutable dead-letter, against an at-most-once control that loses it |
+| `TestTheRealLadderRedeliversAfterTheFirstTierExpires` | the shipped 30s tier round-trips: Q1 → tier → Q1 → next tier, with the attempt header surviving the broker's own republish |
+| `TestDepthPollingReportsRealBrokerCounts` | the depth gauge publishes the broker's number, not ours |
+
+### Negative control: the same tests on 3.9.13
+
+Run against the dev broker (`rabbitmq:3.9.13-management`):
+
+- `Connect` fails closed: *"broker is RabbitMQ 3.9.13; this topology requires >= 3.13.2…"*
+- `TestBrokerExpiresARetryTierBackToItsTarget` **fails**: after the TTL the tier
+  still holds its message and the target holds none. The broker accepted every
+  argument, echoed them back, and expired nothing.
+
+That is the whole justification for the version floor, reproduced as a test rather
+than as a claim. It is also why dev-orchestration must move off 3.9.13 before this
+ships.
+
+### Two assertions that were WRONG before they were right
+
+Both failures were mine, not the broker's, and both are the same mistake in
+different clothing: measuring a proxy instead of the property.
+
+**Reading the ready count for retention.** The first version asserted
+`queue.declare-ok`'s message count on the source tier and reported that at-least-once
+had *dropped* the message. It had not. A message held for a pending dead-letter hop
+is neither ready nor unacknowledged, so the ready count reads 0 for a message that
+is very much still there — the broker's own log said so at the time
+(*"to prevent dead-lettered messages from piling up in the source quorum queue"*)
+and `rabbitmqctl list_queues` confirmed `messages=1, messages_ready=0`. The fix was
+the total, from the management API. The review instruction had said "total count …
+not internal ready state"; I asserted the ready state anyway and then believed the
+result.
+
+**Sampling an eventually-consistent statistic once.** With the total wired up, the
+test passed two runs in three. The management API refreshes queue statistics on
+`collect_statistics_interval` (5s default), so a single sample is stale in both
+directions. The assertion now requires the count to *hold* across the refresh
+interval, and the control's 2-second TTL had to grow to 30 seconds — with a 2s TTL
+and 5s statistics, "the control message was here before it expired" is not an
+observable state, so the control was proving nothing.
+
+### A measured limit — and a correction to it
+
+at-least-once **retains** an expired message whose target is missing.
+
+I first reported that it does **not** resume when the target is later created,
+"measured over two minutes". That was wrong: the observation window was too short.
+The broker retries the parked hop on a cycle of about three minutes and releases the
+message on its own. Measured at **2m58s**, twice, on 3.13.2 — once on a tmpfs
+container and once on a persistent volume. The two-minute probe stopped roughly
+fifty seconds early and I reported the absence of an event as its impossibility.
+
+So the recovery action is simply "declare the missing queue", and nothing else is
+needed or effective in the meantime. That is documented AND demonstrated end to end
+by `TestConnectReleasesAnEventParkedForAMissingTarget`, which parks an event for a Q1
+that does not exist, starts the consumer, and watches the event be applied.
+
+In production the service performs the recovery itself: it re-declares all five
+queues at startup, on every supervisor re-attach, and on every depth poll
+(`TestTheDepthPollRecreatesADeletedQueue`), so a deleted queue is back within one
+poll interval and the parked message follows.
+
+## Review round two — four blockers from the peer review
+
+### 1. The confirm/return race (HIGH)
+
+`transfer` selected on the return channel and the confirm channel. Both can be ready
+at once — a mandatory publish to a missing queue produces `basic.return` then
+`basic.ack`, and by the time the select runs the connection reader may have
+dispatched both — and **Go picks at random between two ready cases**. Roughly half
+the time the confirm won and an unroutable publish reported success, after which the
+event was acked: transferred nowhere, deleted from the only queue holding it. The
+worst outcome the ladder exists to prevent, and intermittent.
+
+The fix is a non-blocking drain of the return channel after an ack, and it is
+*sufficient* rather than merely helpful: amqp091-go dispatches every frame from one
+connection-reader goroutine, and both a return and a confirm are delivered by a
+synchronous send from inside it (`Channel.dispatch` → `ch.returns` /
+`confirms.confirm`), in frame order. AMQP puts `basic.return` before `basic.ack` for
+the same publish, and both channels are buffered so the dispatcher never blocks
+part-way. A return for this publish is therefore already buffered when its
+confirmation becomes readable. Verified by reading the vendored source, not assumed.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the return drain after an ack is removed | `TestAnAckNeverOutvotesAReturnThatIsAlreadyWaiting` |
+| the drain reads the return but accepts success anyway | ″ |
+| the same drain in the replay path | `TestAReplayAckNeverOutvotesAReturnThatIsAlreadyWaiting` |
+
+Both tests run 200 iterations against a fake that delivers both answers *before*
+the publish call returns. A real broker cannot be made to lose this race on demand,
+and one iteration could win the coin toss.
+
+### 2. The depth metric claimed a total it cannot see (HIGH)
+
+`collaboration_lifecycle_queue_depth` was documented as "current message count" and
+"unattended work", but its source is `queue.declare-ok`, which reports only the
+READY count — and this repo's own integration test proves a message parked for a
+pending dead-letter hop is neither ready nor unacknowledged. In precisely the state
+worth alerting on, the metric published zero.
+
+Renamed to `collaboration_lifecycle_queue_ready_depth`, with the exclusion stated in
+the metric help, the port doc, and the runbook, and the broker-side reading named
+for the total. The claim that per-tier depth "stands in for age" was kept but its
+justification corrected: AMQP has no age reading at all, not "none without the
+management API".
+
+The blind spot is also bounded, which is now stated rather than hoped: the consumer
+re-declares the whole topology on every re-attach and every poll, so the only cause
+of a parked message — a missing dead-letter target — is repaired within one poll
+interval.
+
+### 3. The documented recovery was not executable (BLOCKING)
+
+"Recreate the queue and replay the source tier" could not work: a parked message is
+unreachable by any consumer or shovel, so there is nothing to replay. Candidates
+were tested against real 3.13.2 rather than reasoned about — see the correction
+above. Declaring the target is the whole action, and the service already performs it.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the depth poll does not re-declare (a deleted queue stays missing) | `TestTheDepthPollRecreatesADeletedQueue` |
+| — (end-to-end demonstration, no mutation) | `TestConnectReleasesAnEventParkedForAMissingTarget` |
+
+One candidate was **discarded as invalid rather than reported**: restarting the
+broker appeared to lose everything, but that container used a tmpfs for
+`/var/lib/rabbitmq`, so the restart wiped the data directory. The experiment measured
+the test rig, not the broker. Re-run on a persistent volume.
+
+### 4. The replay procedure was unsafe (BLOCKING)
+
+The runbook's primary path was a shovel, followed by a warning that the shovel
+preserves `x-collab-attempt` and therefore does not work. Removed. Replaced by
+`cmd/lifecycle-replay`, which clears the attempt count, increments a replay count,
+publishes `mandatory` with a confirm, and acks the dead-letter copy **only after**
+the republish is confirmed — the opposite order from `get`-then-publish, which
+destroys the last copy whenever the publish fails.
+
+`x-collab-replays` is reinstated, but with a real producer and a real consumer this
+time: written by the replay command, read by the consumer when an event reaches the
+DLQ, and exported as the `replays` label on
+`collaboration_lifecycle_dead_lettered_total`. That label is the escalation signal —
+after a replay the attempt count is deliberately zero again, so nothing else
+separates "this just failed" from "the fix applied before the last replay did not
+work".
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| replay does not clear the attempt count | `TestReplayReturnsDeadLetteredEventsToTheLadder` |
+| replay does not increment the replay count | `TestASecondReplayIsDistinguishableFromTheFirst` |
+| replay drops the replay header entirely | both |
+| replay acks the dead-letter copy before the republish is confirmed | both |
+| replay leaves its consumer attached to the DLQ | `TestASecondReplayIsDistinguishableFromTheFirst` |
+| replay publishes without `mandatory` | `TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue`, `TestAReplayClearsTheAttemptCountAndCountsItself` |
+| replay ignores a broker return | `TestAReplayThatCannotLandLeavesTheEventInTheDeadLetterQueue` |
+| the replay counter wraps / passes through negatives | `TestTheReplayCounterSurvivesWhateverArrives` |
+| the dead-letter signal is never raised | `TestTheDeadLetterSignalCarriesThePriorReplayCount` |
+| the dead-letter signal drops the replay count | ″ |
+| a retry-ladder hop also raises the dead-letter signal | `TestOnlyTheDeadLetterQueueRaisesTheDeadLetterSignal` |
+| the Prometheus bridge collapses the `replays` label | `TestDeadLetterBridgeSeparatesReplayCounts` |
+
+`Replay` leaving its consumer attached was **found by a test, not by review**: the
+three-round replay test failed at round 2 because the lingering consumer swallowed
+the next dead-letter message the instant it arrived — held unacknowledged on a
+channel nobody was reading, invisible to the ready depth and unreachable by a second
+replay. A bounded operation has to release the queue when it finishes.
+
+### Comment sweep
+
+`consume`'s doc still described the retired two-attempt mechanism ("acks/nacks per
+the outcome … requeued once, then dropped"), `patternOf` still spoke of a "dropped
+event", the handler-timeout note still said "nack/requeue", and
+`TestHandleNacksRequeueOnPurgeFailure` was named for it. Nothing nacks or rejects any
+more. All four corrected.
+
+### Coverage: a pre-existing gate failure, measured rather than assumed
+
+The combined coverage gate (≥95%) does **not** pass, and did not pass before this
+work either. Measured both sides against the same broker:
+
+| Tree | Combined coverage (scoped) |
+|---|---|
+| PR head before this work (`3176012`) | **94.8%** |
+| after the lifecycle work, before its failure-path tests | 93.6% |
+| after them | **94.8%** |
+
+So the lifecycle work is gate-neutral: it dipped the number and the failure-path
+tests brought it back. The 0.2% shortfall is pre-existing and spread across
+subsystems this branch does not touch — `postgres.Migrate` (59%), `app.buildMetadata`
+(66%), `room.measureLiveDoc` (60%), `manager.acquire` (74%), and a long tail in
+`ws`, `oidc`, `fileservice`, and `metapointer`. It is reported rather than closed:
+padding it from a lifecycle PR would mean writing tests for unrelated code to move a
+number, and lowering the threshold would be worse.
+
+The tests added to reach 94.8% are failure paths, not padding — every one has a
+story about what breaks without it: a transfer that waits forever on a silent
+broker, a replay that starts without publisher confirms, a recycle that outlives
+shutdown, a supervisor that gives up on a broker that is merely restarting, a depth
+poll whose failure takes the consumer with it.
+
+`cmd/lifecycle-replay` is excluded from the gate's scope on the same grounds as
+`cmd/server` — flag parsing and dialling in front of `lifecycle.Replay`, which is
+itself inside the bar and covered against a real broker. `NopObserver` moved to
+`observer_nop.go` and is excluded exactly as `NopMetrics` already was: empty method
+bodies that cannot fail.
+
+### An unrelated CI flake, fixed
+
+The integration job on PR #10 was also failing on
+`TestAwarenessAndDocumentUpdatesStayOnSeparateChannels` (redis hub) — at 3.01s,
+against a 3-second `waitFor` deadline. It passes 28/28 locally including under
+`-race`, so the failure was the budget, not the behaviour: the test waits on a
+goroutine hop through miniredis pub/sub, which takes microseconds on an idle machine
+and much longer on a loaded runner. A tight deadline there detects nothing — the
+adapter has no latency requirement — it only fails the build when the runner is
+busy. Raised to 30s with that reasoning recorded at the call site.
+
+## Redis hub: Subscribe returned before the subscription existed
+
+The CI flake I had "fixed" by widening a test deadline was a real message-loss
+bug, and the deadline could never have fixed it.
+
+`go-redis`'s `Client.Subscribe` does two unhelpful things:
+
+```go
+func (c *Client) Subscribe(ctx context.Context, channels ...string) *PubSub {
+	pubsub := c.pubSub()
+	if len(channels) > 0 {
+		_ = pubsub.Subscribe(ctx, channels...)   // error DISCARDED
+	}
+	return pubsub
+}
+```
+
+- The error is thrown away, so a subscription that failed outright is
+  indistinguishable from one that worked. The pump then sits on a connection that
+  never delivers, for the life of the document, and it looks like a quiet document.
+- Even on success, `pubsub.Subscribe` has only **written** the SUBSCRIBE command;
+  `_subscribe` does not read the server's confirmation. A publish issued right
+  after `Subscribe` returns can be processed first, and Redis pub/sub has no replay
+  or backlog — **that message is gone**. Cross-pod, that is a document update or an
+  awareness state that simply never arrives.
+
+No deadline on the receiving side can wait out a message that was never queued,
+which is why `TestAwarenessAndDocumentUpdatesStayOnSeparateChannels` failed at
+exactly 3.01s: not slowness, a lost message. The 30s workaround is reverted and the
+budget is back to 3s.
+
+`Hub.Subscribe` now returns only after the server has confirmed **every** channel
+it subscribed. The count comes from the same slice used for the SUBSCRIBE, so
+"confirm every channel we subscribed" holds by construction rather than by two
+numbers agreeing.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| Subscribe returns with no handshake (the original race) | `TestSubscribeIsReadyBeforeItReturns`, `TestSubscribeFailsWhenTheSubscriptionCannotBeEstablished`, `TestAFailedSubscribeLeavesNoTraceBehind` |
+| only one channel is confirmed (awareness still races) | `TestSubscribeWaitsForAConfirmationPerChannel` + two others |
+| a keep-alive Pong is counted as a confirmation | `TestAKeepAliveIsNotASubscriptionConfirmation` |
+| a read failure is counted as a confirmation | `TestAwaitSubscribedSurfacesAReadFailure` + two others |
+| a message arriving between confirmations is not collected | `TestAwaitSubscribedKeepsMessagesThatArriveBetweenConfirmations`, `TestAMessageArrivingDuringTheHandshakeIsStillDelivered` |
+| …or is collected and then dropped | `TestAMessageArrivingDuringTheHandshakeIsStillDelivered` |
+| a failed Subscribe leaves its subscriber registered | `TestAFailedSubscribeLeavesNoTraceBehind` |
+
+Three of those were **VACUOUS on the first attempt**, and the reason is worth
+recording: they live at the call site, and the call site could only be driven
+through a real miniredis, which never produces the interleaving or the keep-alive.
+The fix was not to write cleverer tests but to widen the seam — `client.Subscribe`
+now returns a `pubsubConn` interface rather than the concrete `*goredis.PubSub`, so
+a scripted connection can hand the hub exactly the reply sequence a real server
+produces only occasionally. Same principle as the existing
+`blockingSubscribeClient`: prove it from outside the production code, but make sure
+the outside can actually reach it.
+
+The handshake introduces a narrow loss of its own, which is why the collected
+messages exist at all: a two-channel SUBSCRIBE is confirmed one channel at a time,
+so a publish on the first can land before the second is confirmed. That message is
+already off the connection — `PubSub.Channel()` will never redeliver it — so the
+handshake hands it to the pump. Dropping it would lose the message exactly as the
+original race did, in a smaller window.
+
+The subscriber-cleanup entry is not cosmetic. `Subscribe` registers its subscriber
+before doing I/O, and pump refs are **derived** from the live subscriber count. A
+failed subscription that left its entry behind would give the next successful pump a
+ref count that never reaches zero, leaking the Redis subscription and its goroutine
+for the life of the pod — the same leak class as the race-window finding above it.
+
+## The coverage gate, closed
+
+**95.2%, gate passes.** Measured with `.scripts/coverage-gate.sh 95.0` against a
+real RabbitMQ 3.13.2 with the management plugin. Progression, same broker
+throughout: 94.8% at the PR head before any of this work → 93.6% after the
+lifecycle feature → 94.8% after its failure-path tests → 94.9% after the redis
+readiness fix → **95.2%**.
+
+The threshold was not lowered and no exclusion was broadened to get there. The
+0.4% came from two tests over the widest genuinely-uncovered invariant left in the
+tree: `Manager.acquire`'s materialization window.
+
+`acquire` builds a room OFF the registry lock, because `newRoom` does backend I/O
+and holding the lock across it would wedge every other document. That means the
+world can change while a room is loading, and the re-checks afterwards were
+untested:
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| a room materialized during a cascade is registered anyway | `TestACascadeStartingDuringMaterializationLeavesNoLiveRoom` |
+| …is refused but not torn down | ″ |
+| a room materialized during shutdown is registered anyway | `TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom` |
+| …is refused but not torn down | ″ |
+
+Both are real failure stories, not statement-chasing. Registering a room on a
+document a cascade is deleting puts a LIVE room on deleted content, and its first
+flush writes the content and the index row back — the owner deletes a document and
+it reappears. Registering one after `Close` has taken its drain snapshot means the
+room is never drained: its buffered edits are never flushed and the process exits
+with them in memory.
+
+The two teardown rows are the interesting ones. `TestRoomTornDownDuringMaterializationReleasesItsRegistrySlot`
+already existed and proves that *teardown* releases the registry handle — but it
+calls `room.teardown(nil)` directly, by its own admission ("constructed directly
+rather than raced"). So nothing proved `acquire` actually calls it on the refusal
+paths, and deleting either call stayed green. These tests race it for real and
+assert the handle is gone afterwards, via `mgr.registry` — the Manager overwrites
+`Deps.Registry` with its own, so inspecting a registry of one's own would report a
+clean registry no room ever touched.
+
+The window is held open with a gated `CheckpointStore`: `LoadCheckpoint` parks the
+materializing room, `Delete` parks the cascade, so both are in flight
+simultaneously and deterministically. No production seam — the Manager already
+takes its stores as ports, same approach as the redis `blockingSubscribeClient`.
+
+One setup detail that cost a debugging round: a room only calls `LoadCheckpoint`
+when the metadata index says there is something to restore. Without seeding durable
+state first, the gate is never reached and the test hangs on a window that never
+opens.
+
+### A test race that only CI could find
+
+`TestReplayReturnsDeadLetteredEventsToTheLadder` passed locally every time and
+failed in CI with `x-collab-replays = 0, want 1`.
+
+The setup published an event to Q1, closed the consumer, purged Q1, and then seeded
+the dead-letter queue — a leftover from an earlier approach that drove the event
+through the ladder before I switched to seeding the DLQ directly. **A delivery the
+consumer had taken but not acked is requeued when its channel closes**, and that
+requeue can land *after* the purge. Q1 then holds the original event, and the
+assertion reads that one instead of the replayed one: no replay count, because it
+was never replayed.
+
+Nothing about the replay path was wrong. The fix was to delete the setup that had
+stopped serving a purpose: declare the topology, seed the DLQ, replay, and assert —
+with an explicit check that Q1 is empty first, so the `Get` cannot be reading some
+other message. Five consecutive runs green afterwards, and all five replay probes
+still RED.
+
+Worth recording because the failure mode is generic: a test that closes a consumer
+to "stop" it is not draining it, and any unacked delivery comes back.
+
+## Authorization moved in front of materialization
+
+Found by tracing, then measured before it was fixed: authorization was decided
+INSIDE the room, which meant the room already existed by the time anyone asked.
+`Manager.Join` called `acquire` — which loads the document out of durable storage,
+opens a fan-out subscription and takes a registry slot — and only then ran
+`resolveMode` on the room's run loop.
+
+Measured on the unfixed tree: a denied actor produced `LoadCheckpoint=1` and left
+the room live; **25 denied joins on 25 distinct ids produced 25 live rooms**. No
+content was ever sent to the denied caller — that boundary always held, and this was
+never a disclosure — but the fetch, the memory, the fan-out subscription and the
+existence/latency signal were all reachable without authorization.
+
+`Manager.authorizeSession` now runs before the acquire loop. It evaluates READ, then
+UPDATE, derives the session's capability once, and passes it into the room on the
+join command. `handleJoin` no longer decides authorization at all; it enforces the
+connection cap and uses the capability it was given.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| the pre-acquire gate removed (authorize after materialization) | `TestADeniedReadNeverMaterializesTheDocument`, `TestAnAuthZOutageFailsClosedWithoutMaterializing`, `TestASessionCostsExactlyTwoEvaluations` |
+| a denied read treated as viewer instead of refused | `TestADeniedReadNeverMaterializesTheDocument` |
+| an authz backend error reported as a denial | `TestAnAuthZOutageFailsClosedWithoutMaterializing` |
+| write capability assumed rather than evaluated | `TestASessionCostsExactlyTwoEvaluations` |
+
+The denial test asserts against the backend rather than inferring: zero
+`LoadCheckpoint` calls, zero live rooms, not resident in `mgr.registry`, and exactly
+ONE evaluation — there is nothing to decide about writing once reading is refused.
+
+The session test asserts the evaluation count is exactly `[read, update-content]`
+and **does not grow while document traffic flows**. That is the assertion that would
+catch a drift back to per-frame authorization, which is a different contract with a
+different cost.
+
+At the WebSocket boundary the two failure kinds are kept distinct, because the
+client behaves differently: a denial closes `1008` (a verdict — do not retry), an
+authorization backend outage closes `1011` (transient — keep retrying). Coercing the
+outage to a denial would make a five-minute authz outage look to every user like
+permanent loss of access to their own documents.
+
+## The mid-session re-authorization surface, deleted
+
+The settled contract is that authorization is established once per WebSocket session
+and holds until the socket closes; a revocation takes effect on the next connect.
+`document.access_changed` re-authorized mid-session and disconnected members, which
+is the opposite of that.
+
+It was also never reachable: **zero producers anywhere in the workspace** — not in
+`server/src` (worktree or clone), not in any `.ts` or `.go` outside this repo. A
+consumer for an event nobody emits.
+
+Removed: `PatternDocumentAccessChanged`, `AccessChangedEvent`, `handleAccessChanged`,
+the lifecycle port's `ReEvaluate`, `Manager.ReEvaluate`, `cmdReEvaluate`,
+`handleReEvaluate`, `reEvaluateNow`, `reEvaluateMembers`, `Room.resolveMode`,
+`mustReadOnlyControl`, and eleven tests that asserted mid-session downgrade,
+upgrade, and disconnect-on-revocation.
+
+Two things were **retargeted rather than deleted**, because the property survived
+and only its home moved:
+
+- `TestResolveModeUpdateErrorFailsClosed` / `TestResolveModeReadErrorFailsClosed`
+  became `TestASessionFailsClosedOnEitherEvaluation` against `authorizeSession`. The
+  update-content half is the one worth keeping: read succeeded, so the caller is
+  entitled to the document, and the tempting failure is to admit them as a viewer —
+  silently converting an infrastructure outage into a permission decision that the
+  client has no reason to retry.
+- `TestInvLifecycleBounded` (FR-014) used `ReEvaluate` as its vehicle. Before
+  deleting it I checked whether the invariant still holds for the one remaining
+  event: `Purge` reaches the room through `enqueue`, which is `enqueueCtx` with a
+  background context — but `enqueueCtx` has its own `enqueueDeadline` backstop
+  independent of ctx, so a busy room still cannot head-of-line-block the consumer.
+  The invariant is live; the test now drives it through `Purge`.
+
+## A flake in my own earlier test
+
+`TestAShutdownStartingDuringMaterializationLeavesNoLiveRoom` (landed in 215afa2)
+failed roughly one run in six with `memory: registry closed`. `Manager.Close()`
+closes the registry last, and the test probed the registry after Close had been
+started — so the probe raced the teardown and reported the resulting error as a
+leak. A CLOSED registry cannot be holding anything; "closed" is the absence of the
+failure, not evidence of it. The probe now runs only while the registry is open.
+Ten consecutive runs green.
+
+## RabbitMQ 4.0 silently drops what our contract keeps
+
+RabbitMQ 4.0 gives quorum queues a default `delivery-limit` of **20**; 3.x was
+unlimited. Our transfer-failure contract deliberately leaves a delivery UNACKED and
+recycles the channel so the event stays broker-owned — and every recycle is another
+delivery. Neither Q1 nor the DLQ has a dead-letter exchange, so at the limit there
+is nowhere to divert to.
+
+Measured on real `rabbitmq:4.0.5-management`, reproduced twice, by consuming and
+closing the channel without acking 25 times:
+
+| Shape | Args | Result |
+|---|---|---|
+| Q1 as shipped | `{x-queue-type: quorum}` | 21 deliveries, then **gone** |
+| Q1 fixed | `+ x-delivery-limit: int32(-1)` | 25/25, **retained** |
+| DLQ as shipped | `{x-queue-type: quorum}` | 21 deliveries, then **gone** |
+| Retry tier | quorum + ttl + dlx + at-least-once + reject-publish | forced 21 deliveries → tier empty, **target holds it** |
+
+So the tiers were proven NOT to need it, both ways: they have a DLX, so the limit
+**dead-letters instead of dropping**, and in production they have no consumer at all,
+so nothing increments a delivery count. They keep the broker default deliberately.
+
+| Guarantee reverted | Test that caught it |
+|---|---|
+| Q1 falls back to the 4.0 default | `TestQ1SurvivesMoreThanTwentyUnconfirmedRedeliveries` (real 4.0.5) |
+| the DLQ falls back to the 4.0 default | `TestTheDeadLetterQueueSurvivesRepeatedFailedReplays` (real 4.0.5) |
+| the limit written at a different width (`int`, not `int32`) | `TestConnectDeclaresTheWholeTopologyDurablyAsQuorumQueues` (a CONVENTION check — see the correction below) |
+| a tier gains a limit it must not have | ″ |
+
+The frozen Q1 literal is now, exactly:
+
+```go
+amqp.Table{"x-queue-type": "quorum", "x-delivery-limit": int32(-1)}
+```
+
+The DLQ exposure is the less obvious one. The DLQ normally has no consumer, so
+nothing increments a delivery count — until someone runs a replay. A replay that
+cannot land leaves the dead-letter copy unacked and closes its channel, which is
+correct (that copy is the last one in existence, so it must not be released before
+the republish is confirmed) and which is a delivery. Twenty-five failed replays
+against a still-broken backend would discard the very message the DLQ exists to
+preserve for a human.
+
+### A test race with the mechanism it tested
+
+`TestTheDepthPollRecreatesADeletedQueue` failed intermittently on 4.0.5 under the
+full suite while passing in isolation. It deleted a tier and asserted it was gone
+before waiting for the poll to recreate it — but the poll ran every 200ms, which is
+shorter than the round trip needed to look. The poll recreated the queue before the
+"it is really gone" check could see the gap. The test now uses a deliberately slow
+2-second poll so both halves are observable, and allows the quorum delete to become
+visible rather than assuming a Raft operation is instant. Six consecutive runs green.
+
+### Correction: integer width is not declaration-equivalence load-bearing
+
+I claimed, in the commit message for the 4.0 fix and in the topology comments, the
+runbook, CLAUDE.md and this ledger, that `int` versus `int32` on a queue argument
+would fail `PRECONDITION_FAILED` and stop whichever side declared second. **That is
+wrong.** RabbitMQ normalizes integer widths for these arguments.
+
+Raised by a cross-language gate (a Go `int32(-1)` queue reasserted successfully by
+amqplib with plain `-1`, `int8`, `int16`, `int32` and `int64`), then reproduced here
+against real 4.0.5 rather than taken on trust:
+
+| Redeclaration of a queue holding `x-delivery-limit: int32(-1)` | Result |
+|---|---|
+| same value as a plain Go `int` | accepted |
+| same value as `int8` / `int16` / `int64` | accepted |
+| **different value** (`int32(5)`) | `PRECONDITION_FAILED — received '5' but current is '-1'` |
+| **argument omitted** | `PRECONDITION_FAILED — received none but current is the value '-1' of type 'signedint'` |
+
+The same is true of `x-message-ttl`: `int` and `int64` at the same value redeclare
+fine; only a changed value is refused.
+
+So what is actually load-bearing across the producer/consumer boundary is the
+argument **set** and its **values** — including that omitting an argument the queue
+already has is refused just as a changed value is, which is the more useful half and
+is the one the runbook now leads with. Width is a repo convention, matching the
+`signedint` type the broker reports back. The unit assertions on `int32` are kept and
+relabelled as convention checks; they no longer claim to model a broker refusal.
+
+Worth recording how I got it wrong, because the evidence was already in front of me:
+the mutation probe "the limit is set at the wrong width (int, not int32)" came back
+**VACUOUS** against the real-broker integration tests. I noted that, attributed the
+RED to the unit wiring test, and moved on — when the vacuous result against the
+broker was precisely the finding. A probe that fails to go RED where the claim says
+it should is evidence about the claim, not noise to be routed around.
+
+## T027: refusing assets-root poison at ingress
+
+A structurally valid Yjs update can put an inline `data:` URI into a whiteboard's
+`files` root. Clients accept such a document cleanly and then throw on every
+subsequent encode, so discarding and reseeding from the server reloads the same
+poison forever. It has to be refused on the way in.
+
+### What the audit measured before any code
+
+| Question | Answer |
+|---|---|
+| Can Go read the `files` root and spot a `data:` locator after apply? | yes, as a plain string |
+| Is `ApplyUpdateV2` atomic on malformed input? | almost: of every truncation offset, only `len-1` mutates — and it applies the payload IN FULL before erroring |
+| Cost of a synchronized shadow vs the rejected per-update clone | **1.01x / 1.03x** versus **57x / 427x** at 200 / 2000 elements |
+| Can a cold load already carry poison? | yes — restore validated nothing |
+
+The `len-1` result is what makes the rebuild load-bearing rather than cautious: a
+shadow apply that ERRORS may nonetheless be fully mutated, so reusing it would
+validate the next update against a state the live document never had.
+
+### The origin census, derived mechanically
+
+Every production mutation of a live `Y.Doc`, grepped and resolved to its callers:
+`applyUpdate` (the chokepoint, called by `dispatchSync` for inbound writes and
+`handlePeer` for cross-pod deliveries) and `restoreInto` (cold load, inside the
+registry's `OpenFunc`). `applyWouldExceedMaxDocBytes` applies only to a scratch doc.
+Awareness was excluded **with evidence**: both `ApplyAwarenessUpdate` calls target
+`r.awareness`, a separate CRDT, never `r.doc`.
+
+### Guarantees, all probed RED
+
+| Reverted | Caught by |
+|---|---|
+| no candidate validation (poison reaches live) | `TestPoisonFromAClientNeverReachesTheLiveDocument` + 2 |
+| validate the live doc after applying instead of the candidate | ″ |
+| shadow not rebuilt after a schema rejection | `TestTheRoomStaysUsableAfterARejection` + 2 |
+| shadow not rebuilt after a failed candidate apply | `TestAPartiallyAppliedCandidateDoesNotPoisonLaterValidation` |
+| memos given a shadow (validation would materialize a `files` root) | `TestAMemoIsNeverGivenAFilesRoot` |
+| a memo apply reported not-applied (scope creep) | `TestAMemoMalformedUpdateKeepsItsPreExistingBehaviour` |
+| cold load does not validate the restored candidate | `TestAPoisonedCheckpointFailsMaterialization` |
+| `data:` check case-sensitive / ignores leading whitespace | `TestTheAssetsRootContract` |
+| trim reverted to `strings.TrimSpace` (BOM bypass) | ″ |
+| BOM / `Space_Separator` not trimmed; U+0085 wrongly trimmed | ″ |
+| byte bound measured on the trimmed value | ″ |
+| empty or non-string locators accepted | ″ |
+| `sendInitial` loses its fast-path closed guard | `TestSendInitialRefusesAnAlreadyClosedConnection` |
+| a blocked `sendInitial` ignores the connection closing | `TestSendInitialGivesUpWhenTheConnectionClosesWhileItWaits` |
+
+### Rejected, with the reason
+
+- **A content fingerprint at the checkpoint boundary.** Feasible —
+  `EncodeStateAsUpdateV2` is byte-stable across construction paths, and the save
+  path already encodes. Rejected because no production path creates the divergence
+  it would catch: live and shadow receive identical bytes and apply is
+  deterministic (0 verdict and 0 state mismatches over a 192-case corpus), and a
+  corrupted update diverges BOTH documents identically, giving them the same wrong
+  fingerprint.
+- **A per-update state-vector comparison.** It is not content equality: of 5595
+  updates that applied cleanly after single-bit corruption, **5536 had an equal
+  state vector and different content**. The guarantee is construction — one
+  chokepoint, every origin paired — not a checksum.
+- **Candidate promotion / doc swap.** Infeasible: the registry owns document
+  identity and exposes no `Replace`. Four things bind to the specific doc object.
+  And unnecessary once the impossible branch is a teardown.
+- **A parallel fatal lifecycle** (`applyFatal`, `syncOutcome.fatal`, `Room.unfit`,
+  post-command checks). Replaced by the run loop's EXISTING panic boundary, which
+  already tears down without flushing for exactly this reason.
+- **A `nil` guard on `GetMap`.** No producer in this service: `applyConvention`
+  selects the whiteboard roots as maps before validation, and decoded roots arrive
+  generic and are upgraded. A conflicting stored root was not reproducible.
+
+### Two of my own mistakes worth recording
+
+`fatal()` called `Registry.Invalidate` from the room's own run loop. `Invalidate`
+closes the handle and then WAITS for the generation to drain — which cannot happen
+until that same goroutine releases it in teardown. A deterministic self-deadlock,
+found by review and confirmed in the vendored source, not by a test.
+
+The real-path test built its poison by encoding `room.doc` from the test goroutine,
+racing the run loop, which is the document's single writer. The author client now
+emits the poison from its own document, which is also what a browser does.
+
+### Scope, stated plainly
+
+This is a bounded locator schema. It is NOT update integrity: of 2220 silent
+divergences produced by single-bit corruption, it caught **zero**, and it is not
+meant to. It does not roll out safely ahead of the client — see the runbook.
+
+## Observation, deliberately not acted on: the peer-awareness relay is asymmetric
+
+Recorded because it was found while proving something else, and because the reason
+for leaving it alone is more useful than the finding.
+
+The CLIENT awareness path drops a frame whose decode fails, and says why: an
+awareness apply fails on the BYTES, not on the state, so a frame that fails on one
+pod fails identically for every recipient — relaying it makes one client's bad frame
+cost every other client and every other pod a failed decode, inverting the
+offender-only property (FR-009c). The PEER path does not do this. Its apply error is
+logged and the broadcast sits outside the error branch, so a peer awareness frame
+this pod's own decoder rejected is still relayed to every local browser.
+
+**No production change was made, because there is no producer.** All four
+`publishToPeers` callsites were checked:
+
+| site | what it publishes | validated first? |
+|---|---|---|
+| `evictAwareness` | a server-constructed removal frame | n/a — the server built it |
+| client awareness | the client's frame | YES — published only after `ApplyAwarenessUpdate` succeeds |
+| client ephemeral | the client's frame, verbatim | no — but never decoded by any server, opaque by design |
+| `onDocUpdate` | the observer's encoding | n/a — server-encoded |
+
+So no pod puts an awareness frame on the hub that it has not already decoded
+successfully, and the broker does not mutate frames. The unconditional peer relay
+has no concrete malformed producer under the current stack, and awareness is
+ephemeral and non-document regardless.
+
+Revisit only if a real producer appears — a peer that can publish awareness without
+validating it first, or a non-Alkemio publisher on the hub. Until then this is a
+consistency wart with no reachable failure, which is exactly the kind of thing that
+should be written down rather than fixed.
+
+---
+
+## Typed session ends, close-after-drain, and the existence gate
+
+Six guarantees were added at once (a typed `session-end` control, the close that
+follows it, and an admission gate for documents that do not exist). Each was
+proved by reverting it and watching the test that claims it go RED.
+
+| guarantee reverted | test | result |
+|---|---|---|
+| teardown queues the close BEFORE the control | `TestMembersAreToldBeforeTheyAreClosed` | RED |
+| teardown stops sending the control at all | `TestEveryTeardownPathEndsTheSocket` | RED |
+| `Send` may enqueue behind a queued close | `TestSendAfterCloseIntentIsRefused` | RED |
+| `Join`'s existence gate removed | `TestUnknownDocumentIsRefusedWithoutMaterializing` | RED |
+| unknown document gets its own close status | `TestUnknownDocumentClosesExactlyLikeForbidden` | RED |
+| authzeval not-found stops being a clean denial | `TestEvaluateUnknownDocumentIsACleanDenial` | RED |
+
+### One of these was VACUOUS on the first attempt, and the fix is the point
+
+`TestMembersAreToldBeforeTheyAreClosed` originally sampled the client's frame
+COUNT before shutdown and asserted the close was recorded after more frames had
+arrived. Reverting the ordering left it GREEN.
+
+The reason is that a frame count is not the property. Any other traffic in
+flight — an awareness snapshot, a room-user-change — pushes the count up whether
+or not the reason was among those frames, so "more frames than before" is
+satisfied by a close that explained nothing. The assertion now captures, at the
+moment the close is queued, whether a `session-end` CONTROL had already been
+delivered. That is the property itself rather than a proxy for it, and reverting
+the order now fails.
+
+Recorded because the near-miss generalises: an ordering test that measures
+volume instead of content passes for the wrong reason, and it passes quietly.
+
+### What the probes could not reach
+
+The panic-recovery teardown (`run`'s deferred recover) is not driven by a test —
+forcing a panic on the run loop needs an injection seam that would exist only for
+the test. It is covered by CONSTRUCTION instead: `teardown` takes the session end
+as a required argument, so a path that reaches it without naming one does not
+compile. That is why the argument is mandatory rather than optional, and it is a
+weaker claim than a RED, stated here as such.
+
+---
+
+## The terminal boundary: an atomic flag is not an ordering guarantee
+
+`b4b87dc` claimed that nothing could be enqueued behind a close intent "by
+construction", on the strength of an `atomic.Bool`. The claim was FALSE, and the
+review that caught it read the source rather than the report.
+
+`Send` checked `ending.Load()` and then enqueued. Two steps, separable:
+
+1. `Send` reads `ending == false`.
+2. `Send` is descheduled before its channel send.
+3. `CloseAfterDrain` sets `ending` and enqueues the close intent.
+4. `Send` resumes and enqueues its frame BEHIND the intent.
+
+An atomic makes each step indivisible; it does nothing about the gap between
+them. `sendInitial` was worse — it never consulted the flag at all, so a teardown
+racing the handler's post-join batch could admit the intent while the batch was
+parked waiting for queue space. The writer stops at the intent, so nothing drains
+again, and the handshake sat there for the full `handshakeSendTimeout` before
+shedding a connection whose session had already ended.
+
+**Blast radius, stated precisely:** the wire was never wrong. The writer returns
+at the intent, so a frame queued behind it is never written and no client ever
+saw traffic after its session-end. What was wrong is that `Send` returned nil for
+a frame that would never be delivered, and that the port documented a guarantee
+the code did not provide.
+
+The fix is one lock covering the terminal state AND the enqueue, so the check and
+the act are a single step. Every holder does only non-blocking work, so the room
+loop is never stalled; `sendInitial` waits for space OUTSIDE the lock and
+re-checks admission on each retry.
+
+| guarantee reverted | test | result |
+|---|---|---|
+| `offer` reads the flag outside the lock (the shipped shape) | `TestOfferInFlightAcrossTheBoundaryIsRefused` | RED |
+| `sendInitial` ignores the boundary | `TestSendInitialRefusesOnceTheSessionIsEnding` | RED |
+| `admitEnd` stops closing the boundary | `TestSendAfterCloseIntentIsRefused` | RED |
+| `close()` takes the admission lock | `TestShedAfterAQueuedIntentEndsTheConnection` | **VACUOUS — removed** |
+
+### Two of these tests were wrong first, and both failures were mine
+
+**The first `sendInitial` test passed for the wrong reason.** It filled a depth-1
+queue, so `CloseAfterDrain` could not enqueue the intent and fell back to an
+immediate hard close — and the wait then returned because `closed` was closed,
+not because the boundary was honoured. Reverting the boundary check left it
+green. It now uses a depth-2 queue so the intent is QUEUED and the connection
+stays open, and asserts both of those preconditions before testing anything, so
+it cannot silently degrade into the easy case again.
+
+**The first linearization test did not discriminate the defect.** It asserted
+only the post-condition (an offer issued before the boundary moved is refused),
+which the broken implementation satisfies most of the time; eight probe runs
+never caught it. The discriminating property is structural: while the admission
+lock is HELD, no offer may make progress. An implementation that reads the
+terminal state outside the lock sails straight past that, which is exactly the
+shipped shape — and now fails deterministically, with no sleeps and no
+production hook.
+
+The generalisation, and the reason both are written down: a concurrency test that
+asserts only the post-condition tends to pass, because the benign interleaving is
+the common one. It has to assert the property that makes the bad interleaving
+impossible.
+
+### `close()` did not need the lock, so it does not have it
+
+Taking the admission lock in `close()` looked symmetric and was probed to see
+whether it was load-bearing. It is not: `closed` is a channel, so the check is
+already race-free, and the worst a stale answer costs is an item admitted into a
+queue nothing will drain — never written, never seen. No test could tell the
+difference, so it was removed rather than kept for tidiness. `ending` is a plain
+field whose ordering against the enqueue IS the property, which is why that one
+stays under the lock.
+
+### The shed/graceful overlap is deliberately unresolved
+
+Once an intent is queued the writer normally performs the graceful close, but
+`close()` — the slow-consumer shed, and the handler's own deferred teardown — can
+still arrive first, and the writer then observes `closed` and exits without the
+handshake. That is INTENDED: the shed exists for a connection already going away,
+and a close handshake there would block on a peer that is not reading. So the
+pinned outcome is not which close code the peer observes — that race is left open
+on purpose — but that the connection ends exactly once and nothing further is
+admitted (`TestShedAfterAQueuedIntentEndsTheConnection`).

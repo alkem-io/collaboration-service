@@ -1,8 +1,13 @@
 // Package model holds the domain types of the collaboration service: the
-// document metadata/index, the persisted snapshot, the live in-memory room,
-// and the ephemeral awareness/presence state. These are plain named structs
-// with zero infrastructure imports — the inward-pointing core of the hexagon
-// that the ports (internal/domain/port) and adapters are defined against.
+// document metadata/index, the document content type and its conventions, the
+// participant's collaborator mode, and the server→client control messages.
+// These are plain named structs with zero infrastructure imports — the
+// inward-pointing core of the hexagon that the ports (internal/domain/port) and
+// adapters are defined against.
+//
+// The live room and its awareness state are NOT here: they are service.Room and
+// the core's ycrdt.Awareness, which own behaviour rather than shape. Durable
+// document bytes are persistence.Checkpoint, owned by the core's contract.
 //
 // Shapes follow specs/003-unify-collab-yjs/data-model.md.
 package model
@@ -24,31 +29,13 @@ const (
 	ContentTypeWhiteboard ContentType = "whiteboard"
 )
 
-// BlobStoreKind identifies which BlobStore adapter holds a document's encoded
-// snapshot. It is persisted in the metadata row so a document can be rehydrated
-// from the right backend regardless of the running configuration.
-type BlobStoreKind string
-
-const (
-	// BlobStoreInline keeps the blob in the main DB; the content pointer is
-	// the metadata row key (today's behavior).
-	BlobStoreInline BlobStoreKind = "inline"
-	// BlobStoreFileService offloads the blob to the existing file-service;
-	// the content pointer is a file-service object id.
-	BlobStoreFileService BlobStoreKind = "file-service"
-	// BlobStoreS3 offloads the blob to an S3 bucket (standalone).
-	BlobStoreS3 BlobStoreKind = "s3"
-	// BlobStoreLocal keeps the blob on the local filesystem (standalone).
-	BlobStoreLocal BlobStoreKind = "local"
-)
-
 // DocumentID is the single id namespace shared by memos and whiteboards.
 type DocumentID string
 
 // Metadata is the small, queryable index row for a collaboration document,
-// owned by the Alkemio server (or the standalone metadata store). It records
+// owned by the Alkemio server (or the in-process index in tests/local). It records
 // where the blob lives and who owns the document's lifecycle — never the blob
-// bytes themselves (those live in the BlobStore behind ContentPointer).
+// bytes themselves (those live in the checkpoint store behind ContentPointer).
 type Metadata struct {
 	ID DocumentID
 	// ContentType drives the document convention and client binding.
@@ -57,24 +44,26 @@ type Metadata struct {
 	// version timeline (FR-025).
 	Version int
 	// ContentPointer locates the snapshot inside the blob store (inline row
-	// key / file-service object id / S3 key).
+	// key / file-service object id).
 	ContentPointer string
-	// BlobStore names the adapter that holds the blob for ContentPointer.
-	BlobStore BlobStoreKind
+	// Migrated is the temporary progressive-rollout admission marker. Existing
+	// legacy rows remain false until their snapshot pointer is published; rows
+	// created by the unified server are true from creation.
+	Migrated bool
+	// AuthorizationPolicyID is the Alkemio authorization policy this document
+	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
+	// the authorization-evaluation-service; empty in open mode.
+	AuthorizationPolicyID string
+	// StorageBucketID is the document's OWN storage bucket (its
+	// profile.storageBucket.id, carried on collaboration-fetch). The
+	// file-service checkpoint store persists each snapshot into this per-document
+	// bucket so blobs co-locate with the document's other media rather than
+	// piling into one flat platform bucket. If it is empty that store REFUSES the
+	// first save — there is no configured fallback bucket to divert to.
+	StorageBucketID string
 	// OwnerRef is the parent Alkemio entity that owns this document's
 	// lifecycle; the delete cascade keys off it (FR-023).
 	OwnerRef  string
 	CreatedAt time.Time
 	UpdatedAt time.Time
-}
-
-// Snapshot is the encoded full Y.Doc state for a document. Live edits travel
-// the wire as y-protocols v1; the durable snapshot is encoded v2 (v1 remains
-// readable). Written debounced/throttled per room (R7); latest-only today.
-type Snapshot struct {
-	ID DocumentID
-	// Version matches the Metadata.Version the bytes were persisted at.
-	Version int
-	// Data is the encoded Y.Doc state (v2) handed to BlobStore.Put.
-	Data []byte
 }

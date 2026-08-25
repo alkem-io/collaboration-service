@@ -26,5 +26,8 @@ Thumbs.db
 # Vendor (if used)
 vendor/
 
+# JS-interop e2e harness deps (installed via `npm ci`; never committed)
+test/e2e/jsinterop/node_modules/
+
 # Local Claude Code state
 .claude/

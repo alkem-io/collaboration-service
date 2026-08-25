@@ -1,0 +1,421 @@
+// Package fileservice is the file-service-backed persistence.CheckpointStore:
+// one document, one stable file, rewritten in place.
+//
+// Shape and why it is this shape (research.md D1a):
+//
+//   - A file id is a STABLE identifier — a filename, not a version. Saving
+//     rewrites the content behind the same id via PUT /internal/file/{id}/content
+//     ("store-and-link"); file-service swaps the underlying blob and its
+//     content-hash externalID behind that id, which is its business, not ours.
+//   - The stored bytes are a BARE Yjs-V2 state snapshot with no envelope. That
+//     is not a preference: Alkemio's `server` also writes this blob (document
+//     create, and the one-time content migration), so anything we wrapped around
+//     it would make the two writers mutually unreadable. It is why the log
+//     profile was unusable here and the checkpoint profile exists.
+//   - The state vector is DERIVED on read. A file row has nowhere to put it —
+//     its only structured metadata is a typed image-specific ContentMetadata —
+//     and the contract explicitly permits deriving it.
+//
+// Fencing is NOT supported and the store reports Unfenced (research.md D6a).
+// Rejecting a superseded owner means remembering the highest accepted epoch per
+// document, durably; a file row cannot hold it, and keeping it in the Alkemio
+// index would make the persistence-level backstop depend on reaching a second
+// service — which is exactly what a backstop must not do, since it exists for
+// the case where a partitioned holder is still alive. Ownership is the cluster
+// lease's job here.
+package fileservice
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/antst/go-yjs/backend"
+	"github.com/antst/go-yjs/backend/persistence"
+	"github.com/antst/go-yjs/crdt"
+)
+
+// PointerResolver maps a document to its stable file pointer.
+//
+// file-service assigns file ids on create and does not accept a caller-supplied
+// one, so the DocumentID -> file id mapping has to live somewhere. It is written
+// ONCE, when the document's file is first created, and read on load — not per
+// save, because the pointer never changes after that.
+//
+// It is an interface rather than a direct MetadataStore dependency so this store
+// reaches its own infrastructure and the mapping's home stays a wiring decision.
+type PointerResolver interface {
+	// Pointer returns the document's stable file pointer and storage bucket.
+	// It MUST report ErrNoPointer when the document has no file yet.
+	Pointer(ctx context.Context, id backend.DocumentID) (pointer, bucket string, err error)
+	// Record persists a newly created pointer, immediately after the file is
+	// created. It runs on a document's FIRST save — the ErrNoPointer path — and
+	// not on rewrites, which address the existing file by id.
+	//
+	// It does NOT run for a pointed-at file that has vanished out of band.
+	// SaveCheckpoint REFUSES that case with ErrCorrupt rather than creating a
+	// replacement, because recreating would swap a missing referenced checkpoint
+	// for whatever the room happens to hold and hide the corruption.
+	//
+	// Record is the SOLE writer of ContentPointer — nothing else may set it, or a
+	// stale value elsewhere would point the document at a missing file.
+	Record(ctx context.Context, id backend.DocumentID, pointer string) error
+}
+
+// ErrNoPointer reports that a document has no file yet, so the next save must
+// create one. It is the resolver's "not found", kept distinct from
+// persistence.ErrNotFound so a resolver failure is never mistaken for an
+// empty document.
+var ErrNoPointer = errors.New("fileservice: document has no file pointer yet")
+
+// Config carries the per-deployment file-service settings.
+type Config struct {
+	// BaseURL is the file-service root, e.g. http://file-service:4003.
+	BaseURL string
+	// MaxUploadSize caps a snapshot in bytes. It MUST stay below file-service's
+	// own request-body limit: a document sitting exactly on the limit encodes to
+	// slightly more once v2 framing is added, so it would pass our budget check
+	// and then be refused by the transport — accepted, and permanently unsaveable.
+	MaxUploadSize int64
+	// HTTPClient overrides the default client (tests); nil uses a 30s client.
+	HTTPClient *http.Client
+}
+
+// Store persists one current state per document into file-service.
+type Store struct {
+	cfg      Config
+	client   *http.Client
+	pointers PointerResolver
+	// revisions is a per-process monotonic counter. file-service assigns its own
+	// row Version, but that is its concurrency token, not our revision, and it is
+	// not returned by the content-write path — so revisions are process-local and
+	// strictly increasing, which is all the contract requires.
+	revisions revisionCounter
+}
+
+// New constructs a store. resolver supplies the DocumentID -> file pointer map.
+func New(cfg Config, resolver PointerResolver) (*Store, error) {
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, errors.New("fileservice: BaseURL is required")
+	}
+	if resolver == nil {
+		return nil, errors.New("fileservice: a PointerResolver is required")
+	}
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &Store{cfg: cfg, client: client, pointers: resolver}, nil
+}
+
+// FenceMode reports Unfenced. See the package doc: this medium cannot hold a
+// per-document epoch, so stale-owner rejection is the cluster lease's job.
+func (s *Store) FenceMode() persistence.FenceMode { return persistence.Unfenced }
+
+// SaveCheckpoint replaces the document's durable state.
+//
+// StateVector is required by the contract but deliberately not stored — a file
+// row has nowhere to put it, and LoadCheckpoint derives it instead.
+func (s *Store) SaveCheckpoint(ctx context.Context, req persistence.SaveCheckpointRequest) (persistence.Revision, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if req.Fence != 0 {
+		return 0, persistence.ErrUnexpectedFence
+	}
+	// V2 ONLY, and rejected loudly rather than decoded anyway.
+	//
+	// The stored blob is a BARE Yjs update — no envelope — because other systems
+	// read and write these files directly. That is the whole point of the medium,
+	// and it leaves nowhere to record which codec produced the bytes. A store that
+	// cannot record the codec must support exactly one, or it is guessing on every
+	// read; the contract sanctions that and requires the other codec be refused.
+	//
+	// V2 is the one, because it is what this service writes
+	// (EncodeStateAsUpdateV2) and reads (ApplyUpdateV2). That is a statement about
+	// the required format, not about what happens to be stored: a V1 blob would be
+	// unreadable here, which is why it is refused at the boundary rather than
+	// accepted and discovered later.
+	switch req.Encoding {
+	case persistence.EncodingV2:
+	case persistence.EncodingUnspecified:
+		return 0, persistence.ErrEncodingRequired
+	default:
+		return 0, fmt.Errorf("%w: this store records no codec alongside the blob and so accepts V2 only, got %d",
+			persistence.ErrUnsupportedEncoding, req.Encoding)
+	}
+	if limit := s.cfg.MaxUploadSize; limit > 0 && int64(len(req.Update)) > limit {
+		return 0, fmt.Errorf("snapshot %d bytes exceeds the configured limit %d", len(req.Update), limit)
+	}
+
+	pointer, bucket, err := s.pointers.Pointer(ctx, req.DocumentID)
+	switch {
+	case err == nil:
+		rerr := s.rewrite(ctx, pointer, req.Update)
+		if rerr == nil {
+			return s.revisions.next(), nil
+		}
+		if errors.Is(rerr, persistence.ErrNotFound) {
+			// CORRUPT, not "create a new one". The index says this document HAS
+			// state — it carries a pointer — and the file behind it is gone. Only
+			// the explicit no-pointer condition below may create a first
+			// checkpoint, exactly as LoadCheckpoint reserves ErrNotFound for a
+			// document with no pointer at all.
+			//
+			// Creating here would write current in-memory state into a NEW file and
+			// record that pointer, silently replacing a missing referenced
+			// checkpoint with whatever the room happens to hold — hiding the
+			// corruption instead of surfacing it.
+			return 0, fmt.Errorf("%w: file %q behind the document pointer is missing, refusing to recreate it", persistence.ErrCorrupt, pointer)
+		}
+		return 0, rerr
+	case errors.Is(err, ErrNoPointer):
+		// First save for this document.
+	default:
+		return 0, fmt.Errorf("resolving file pointer: %w", err)
+	}
+
+	// NO FALLBACK BUCKET, and deliberately so. An empty bucket here is not a
+	// configuration gap to paper over: the resolver REACHED the index, found the
+	// document's row, and that row named no owning bucket. The only thing a
+	// fallback could do is pick a different owner than the one the data says.
+	//
+	// The cost is OWNERSHIP AND LIFECYCLE. A snapshot written into a
+	// deployment-wide bucket is never reached by the document's delete cascade,
+	// which walks the document's OWN bucket, so the content outlives the document
+	// as an orphan. Piling every document's snapshot into one shared bucket is
+	// also the arrangement this store was deliberately moved off, after it caused
+	// snapshot collision and content loss.
+	//
+	// It is NOT an access-control problem, and must not be described as one: a
+	// snapshot is created with NO authorizationId (the row's authz column is
+	// NULL), so the destination bucket confers no authorization on it either way.
+	//
+	// This is a data-integrity condition, not a transient one: no retry invents an
+	// owner. It surfaces through the ordinary save-failure path, so the room
+	// escalates and members are told their edits are not saved — which is TRUE,
+	// and is the outcome worth having over a silently misfiled write.
+	//
+	// NOT covered here: a resolver that could not reach the index at all. That
+	// returns its own error above and never arrives with an empty bucket.
+	if bucket == "" {
+		return 0, fmt.Errorf(
+			"%w: document %q has an index row but no owning storage bucket; refusing to create its first snapshot",
+			persistence.ErrCorrupt, req.DocumentID)
+	}
+	created, err := s.create(ctx, bucket, req.Update)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.pointers.Record(ctx, req.DocumentID, created); err != nil {
+		// The bytes are durable but unreachable: nothing maps the document to
+		// them. Report failure rather than a revision the caller would treat as
+		// a successful save.
+		return 0, fmt.Errorf("recording file pointer for a stored snapshot: %w", err)
+	}
+	return s.revisions.next(), nil
+}
+
+// LoadCheckpoint returns the document's current state, deriving the state vector
+// from the stored bytes. Both returned slices are caller-owned — the response
+// body is read into a fresh buffer, and the derived vector is freshly allocated.
+func (s *Store) LoadCheckpoint(ctx context.Context, id backend.DocumentID) (persistence.Checkpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return persistence.Checkpoint{}, err
+	}
+	pointer, _, err := s.pointers.Pointer(ctx, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrNoPointer):
+		return persistence.Checkpoint{}, persistence.ErrNotFound
+	default:
+		return persistence.Checkpoint{}, fmt.Errorf("resolving file pointer: %w", err)
+	}
+
+	blob, err := s.fetch(ctx, pointer)
+	if err != nil {
+		return persistence.Checkpoint{}, err
+	}
+	// One decoder, no sniffing: SaveCheckpoint accepts V2 only, so every blob this
+	// store can have written is V2 and the codec is known rather than guessed.
+	vector, err := crdt.EncodeStateVectorFromUpdateV2(blob)
+	if err != nil {
+		// Stored bytes that will not parse cannot form the state a successful
+		// load promises.
+		return persistence.Checkpoint{}, fmt.Errorf("%w: %w", persistence.ErrCorrupt, err)
+	}
+	return persistence.Checkpoint{
+		Revision:    s.revisions.current(),
+		Encoding:    persistence.EncodingV2,
+		Update:      blob,
+		StateVector: vector,
+	}, nil
+}
+
+// rewrite swaps the content behind an existing, stable file id.
+func (s *Store) rewrite(ctx context.Context, pointer string, data []byte) error {
+	// PathEscape the pointer: a path-significant byte must not re-target the
+	// write at a different file-service object.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer)+"/content", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("file-service rewrite: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		return persistence.ErrNotFound
+	case http.StatusConflict:
+		// CAUTION — this is content DEDUPLICATION, not stale-owner protection.
+		//
+		// file-service enforces unique(externalID, storageBucketID). Writing bytes
+		// that already belong to ANOTHER file in the same bucket is refused;
+		// writing identical bytes to THIS file succeeds. The coincidence is
+		// dangerous: during testing a 409 can look like a concurrency guard, and
+		// it provides none — two owners writing DIFFERENT states both succeed.
+		// Ownership is the cluster lease's job (this store is Unfenced).
+		//
+		// It is also permanent for these bytes, not transient, so it must not be
+		// retried as a transient fault.
+		return fmt.Errorf("file-service rewrite: content already stored under another file in this bucket (dedup conflict): %s", readErrBody(resp.Body))
+	default:
+		return fmt.Errorf("file-service rewrite: unexpected status %d: %s", resp.StatusCode, readErrBody(resp.Body))
+	}
+}
+
+// create makes the document's file for the first time and returns its id.
+func (s *Store) create(ctx context.Context, bucket string, data []byte) (string, error) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", "snapshot.ybin")
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("write snapshot part: %w", err)
+	}
+	for name, value := range map[string]string{
+		"displayName":     "collaboration-snapshot",
+		"storageBucketId": bucket,
+	} {
+		if err := mw.WriteField(name, value); err != nil {
+			return "", fmt.Errorf("write field %s: %w", name, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return "", fmt.Errorf("close multipart: %w", err)
+	}
+
+	// authorizationId is omitted deliberately: a snapshot is internal infra whose
+	// access is governed by the document's own authz, so file-service writes a
+	// NULL authz column. UNIQUE(authorizationId) permits any number of NULLs.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BaseURL+"/internal/file", &body)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("file-service create: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("file-service create: unexpected status %d: %s", resp.StatusCode, readErrBody(resp.Body))
+	}
+	var cr struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&cr); err != nil {
+		return "", fmt.Errorf("decode create response: %w", err)
+	}
+	if cr.ID == "" {
+		return "", errors.New("file-service create returned an empty id")
+	}
+	return cr.ID, nil
+}
+
+// fetch reads a file's content into a caller-owned buffer.
+func (s *Store) fetch(ctx context.Context, pointer string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		s.cfg.BaseURL+"/internal/file/"+url.PathEscape(pointer)+"/content", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("file-service fetch: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// CORRUPT, not "not found". The index says this document HAS state — it
+		// carries a pointer — and the file behind that pointer is gone. That is a
+		// different situation from a document that was never saved, and the
+		// difference is load-bearing: a caller that treats it as "nothing stored"
+		// initialises the document as if it were new — for this service, EMPTY — and
+		// the next save overwrites the last good state with that. ErrNotFound is
+		// reserved for a document with no pointer at all.
+		return nil, fmt.Errorf("%w: file %q behind the document pointer is missing", persistence.ErrCorrupt, pointer)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("file-service fetch: unexpected status %d", resp.StatusCode)
+	}
+	return readBounded(resp.Body, s.cfg.MaxUploadSize, pointer)
+}
+
+// readBounded reads a checkpoint body under the SAME size contract the write path
+// enforces, and reports an oversize blob as an error naming the limit instead of
+// buffering it whole.
+//
+// The write path has always refused a snapshot above MaxUploadSize (SaveCheckpoint
+// below), so a stored blob past that limit is by definition one this service did
+// not write — a content migration, a hand-repaired file, or the wrong object
+// behind the pointer. Reading it with a bare io.ReadAll materialised the entire
+// body in memory before anything looked at its size, on the room-materialisation
+// path: one OOM per concurrent cold open, and no error that named a size.
+//
+// The +1 is what makes the detection exact. LimitReader(limit) alone cannot tell
+// "exactly at the limit" from "truncated at the limit" — both yield limit bytes —
+// so it would either reject a legal maximal blob or silently accept a truncated
+// one AS a complete document, and a truncated Yjs update decodes to a SHORTER
+// document with no error. Reading one byte past the limit distinguishes them.
+func readBounded(body io.Reader, limit int64, pointer string) ([]byte, error) {
+	if limit <= 0 {
+		return io.ReadAll(body)
+	}
+	b, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%w: file %q behind the document pointer exceeds the %d-byte checkpoint limit",
+			persistence.ErrCorrupt, pointer, limit)
+	}
+	return b, nil
+}
+
+func readErrBody(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 2<<10))
+	return strings.TrimSpace(string(b))
+}
+
+var _ persistence.CheckpointStore = (*Store)(nil)

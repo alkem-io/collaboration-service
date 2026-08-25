@@ -1,0 +1,87 @@
+name: CI — Integration & Coverage Gate
+
+# Brings the build-tagged integration suites (redis / rabbitmq)
+# and the e2e suite (incl. the real yjs + y-protocols JS-client interop harness)
+# into CI against live backends, then enforces the ≥95% combined coverage gate
+# (T017.5, SC-008/SC-011). The fast lint · race · build lane stays in ci-test.yml
+# (central go-ci@v1); this workflow is the durable-backend + coverage lane.
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  integration-coverage:
+    runs-on: ubuntu-latest
+
+    services:
+      rabbitmq:
+        # Pinned to the broker infrastructure-operations deploys, so CI proves the
+        # topology against the version that actually runs it.
+        #
+        # The pin matters for x-delivery-limit. From 4.0 a quorum queue applies a
+        # default delivery-limit of 20 where 3.x was unlimited, which drops a
+        # redelivered message on a queue with no dead-letter route. Both queues set
+        # -1 explicitly; an unbounded tag could drift onto a version where that
+        # argument means something different.
+        # -management matches the image the environments run. No test uses the
+        # management API, so its port and env are deliberately not wired.
+        image: rabbitmq:4.0.5-management
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+
+    env:
+      # Integration-suite backend wiring (the build-tagged tests skip when unset).
+      RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node (for the y-protocols JS-interop harness)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install JS-interop harness deps
+        working-directory: test/e2e/jsinterop
+        run: npm ci
+
+      # The lifecycle integration tests no longer wait on broker timers. The retry
+      # ladder they used to exercise — a ~3-minute dead-letter hop, a TTL longer
+      # than the management API's statistics interval, and a 30s first tier — was
+      # deleted along with the tiers themselves, so this lane is now bounded by the
+      # work rather than by RabbitMQ's own clocks.
+      # -race is the point of running these tags in CI at all. The two-pod fan-out,
+      # materialization-race, lifecycle and JS-interop suites exist to prove the
+      # single-writer, hub and teardown invariants, and they are the ONLY suites the
+      # untagged lane never builds — so without this they were the concurrency tests
+      # nothing race-checked anywhere in CI. The Makefile sets GOFLAGS := -race for
+      # the same targets locally, so this also removes a local/CI divergence.
+      - name: Integration + e2e + coverage gate (≥95%)
+        env:
+          GOTESTFLAGS: -race -count=1
+        run: ./.scripts/coverage-gate.sh 95.0
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage-merged.out
+          if-no-files-found: ignore
