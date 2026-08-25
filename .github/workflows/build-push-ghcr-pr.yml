@@ -10,7 +10,12 @@ concurrency:
 
 jobs:
   image:
-    uses: antst/alkemio-github-workflows/.github/workflows/container-pr.yml@v1
+    # Pinned to an immutable commit rather than the mutable @v1 tag. This is a
+    # reusable workflow from a PERSONAL namespace, invoked here with
+    # packages:write — retagging v1 there would change what runs with image-push
+    # rights, with no review in this repository. The SHA below is what v1
+    # resolved to when it was pinned; behaviour is unchanged.
+    uses: antst/alkemio-github-workflows/.github/workflows/container-pr.yml@ab4acc18e4f2551c03e2df8d2f436f0b013152f4 # v1
     permissions:
       contents: read
       packages: write

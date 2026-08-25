@@ -2,6 +2,80 @@ defaults:
   requestContentType: application/json
   responseContentType: application/json
   responseStatus: 200
+framework:
+  # Response-extraction patterns, copied from apispec's built-in chi/http defaults
+  # with ONE deliberate change: the bare, unconstrained `^Marshal$` pattern is
+  # REMOVED.
+  #
+  # That default pattern treats any `json.Marshal(x)` anywhere in a handler's call
+  # graph as an HTTP response body. The standalone create handler
+  # (POST /collab/{documentId}) calls Manager.PreRegister → the RabbitMQ metadata store
+  # Save → marshalEnvelope, which json.Marshal's the NestJS RPC envelope. apispec
+  # was attributing that envelope as a spurious 200 `rabbitmq.envelope` response on
+  # the POST, even though the POST actually returns 201 CreateDocumentResponse. The
+  # bus envelope is an internal wire payload, not an HTTP response.
+  #
+  # The remaining patterns still capture the real responses: the handlers' own
+  # Render methods write via json.NewEncoder(w).Encode(...) (the `^Encode$` pattern,
+  # which is correctly constrained to a json Encoder) and net/http ResponseWriter
+  # calls. Providing framework.responsePatterns REPLACES the default set entirely
+  # (it is not merged), so the full list is reproduced here minus the bare Marshal.
+  # Keep in sync with apispec's defaults if the tool's built-ins change.
+  responsePatterns:
+    - callRegex: ^WriteHeader$
+      recvTypeRegex: ^net/http\.ResponseWriter$
+      statusArgIndex: 0
+      statusFromArg: true
+      typeArgIndex: -1
+    - callRegex: ^Write$
+      recvTypeRegex: ^net/http\.ResponseWriter$
+      typeArgIndex: 0
+      typeFromArg: true
+      deref: true
+    - callRegex: ^Error$
+      recvTypeRegex: ^net/http$
+      statusArgIndex: 2
+      statusFromArg: true
+      typeFromArg: true
+      typeArgIndex: 1
+      defaultContentType: "text/plain; charset=utf-8"
+      defaultBodyType: string
+    - callRegex: ^NotFound$
+      recvTypeRegex: ^net/http$
+      statusArgIndex: -1
+      typeArgIndex: -1
+      defaultStatus: 404
+    - callRegex: ^Redirect$
+      recvTypeRegex: ^net/http$
+      statusArgIndex: 3
+      typeArgIndex: -1
+      statusFromArg: true
+    - callRegex: ^JSON$
+      recvTypeRegex: ^github\.com/go-chi/render$
+      typeArgIndex: 2
+      typeFromArg: true
+      deref: true
+    - callRegex: ^Status$
+      recvTypeRegex: ^github\.com/go-chi/render$
+      statusArgIndex: 1
+      statusFromArg: true
+    - callRegex: ^Encode$
+      recvTypeRegex: ".*json(iter)?\\.\\*?Encoder"
+      typeArgIndex: 0
+      typeFromArg: true
+      deref: true
+    - callRegex: ^Fprintf$|^Fprint$|^Fprintln$
+      recvTypeRegex: ^fmt$
+      defaultBodyType: string
+      validateWriterDest: true
+    - callRegex: ^Copy$
+      recvTypeRegex: ^io$
+      defaultBodyType: "[]byte"
+      validateWriterDest: true
+    - callRegex: ^WriteString$
+      recvTypeRegex: ^io$
+      defaultBodyType: string
+      validateWriterDest: true
 info:
   title: Alkemio Collaboration Service
   description: |
@@ -9,10 +83,12 @@ info:
     service over one CRDT protocol (Yjs): memos (Y.XmlFragment) and whiteboards
     (id-keyed Y.Map) share a single document namespace. Transport is raw
     WebSocket + y-protocols (sync + awareness) at /collab/{documentId};
-    horizontal scaling (fan-out), persistence (metadata + blob), and auth are
-    optional pluggable ports — single-binary standalone by default.
+    horizontal scaling (fan-out), persistence (metadata + blob), and auth sit
+    behind pluggable ports. The supported Alkemio deployment is integrated:
+    the authoritative index is in server via RabbitMQ, durable content is in
+    file-service, and authN/authZ use header + authzeval.
 
-    This spec covers only the operational/standalone HTTP surface; the live
+    This spec covers only the operational + document-create HTTP surface; the live
     collaboration protocol is the WebSocket contract in
     specs/003-unify-collab-yjs/contracts/ws-protocol.md.
   version: 0.1.0

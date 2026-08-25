@@ -1,9 +1,12 @@
-// Package open is the standalone Auth + AuthZ adapter: it authenticates every
-// connection as an anonymous identity and grants every privilege. It is the
-// zero-dependency default that lets the service run outside Alkemio (single
-// binary, no auth-evaluation-service). The authzeval adapter (sibling package,
-// task T006) provides the Alkemio token handshake + authorization-evaluation-
-// service implementation.
+// Package open is the in-process Auth + AuthZ adapter for development and
+// tests: it authenticates every connection as an anonymous identity and grants
+// every privilege, so the service can run with no auth infrastructure present.
+// It is never a deployment option.
+//
+// The Alkemio composition splits the two roles across sibling packages: the
+// `header` adapter is handshake AuthN (it trusts the gateway-stamped actor id),
+// and `authzeval` is per-document AuthZ against the
+// authorization-evaluation-service. Neither role is served by this package.
 package open
 
 import (
@@ -13,13 +16,14 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
 
-// Auth is the open authenticator/authorizer for standalone mode.
+// Auth is the open authenticator/authorizer: anonymous identity, all privileges.
 type Auth struct{}
 
 // New constructs the open auth adapter.
 func New() *Auth { return &Auth{} }
 
-// Authenticate accepts any (including empty) token as an anonymous identity.
+// Authenticate accepts any (including no) credential as an anonymous identity
+// with a nil ActorID — open mode bypasses AuthZ entirely.
 func (a *Auth) Authenticate(_ context.Context, _ string) (model.Identity, error) {
 	return model.Identity{}, nil
 }

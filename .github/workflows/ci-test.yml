@@ -8,12 +8,22 @@ on:
 
 jobs:
   ci:
-    # Central org CI (lint · race tests · build). The OpenAPI staleness gate is
-    # intentionally not enabled yet: this service is WebSocket-first and exposes
-    # no apispec-annotated REST surface in Phase 1. It is added (with
-    # `openapi-make-target: openapi`) when the standalone create/delete HTTP API
-    # lands (task T016 of specs/003-unify-collab-yjs/tasks/collaboration-service.md).
-    uses: antst/alkemio-github-workflows/.github/workflows/go-ci.yml@v1
+    # Central org CI (lint · race tests · build). `go test ./...` also runs the
+    # CRDT core's backend/conformance suites, which live as ordinary tests beside
+    # each port implementation (FR-008, SC-006) — no extra CI wiring is needed for
+    # them, and a failing contract fails the build like any other test.
+    #
+    # The OpenAPI staleness gate stays disabled: this service is WebSocket-first
+    # and its only REST surface is the standalone create endpoint plus /healthz,
+    # neither of which justifies the gate. The standalone deployment itself was
+    # withdrawn by constitution v3.0.0 §III.
+    # Pinned to an immutable commit rather than the mutable @v1 tag. This is a
+    # reusable workflow from a PERSONAL namespace: retagging v1 there would change
+    # what runs here, with no review in this repository. This job grants only
+    # contents:read — the higher-privilege caller is build-push-ghcr-pr.yml, which
+    # grants packages:write — but the pin is worth having on both. The SHA below is
+    # what v1 resolved to when it was pinned; behaviour is unchanged.
+    uses: antst/alkemio-github-workflows/.github/workflows/go-ci.yml@ab4acc18e4f2551c03e2df8d2f436f0b013152f4 # v1
     permissions:
       contents: read
     with:

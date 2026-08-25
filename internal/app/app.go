@@ -1,0 +1,366 @@
+// Package app assembles the collaboration-service hexagon: it selects a concrete
+// adapter per outbound port from configuration, wires the domain service to the
+// inbound HTTP/WS surface, and starts the optional RabbitMQ lifecycle consumer.
+//
+// It is the single composition root shared by the production entrypoint
+// (cmd/server) and the end-to-end test suite (test/e2e), so both boot the
+// service through exactly the same wiring — the e2e suite exercises the real
+// adapter-selection logic, not a hand-assembled copy of it (constitution
+// anti-pattern 3: no duplicate logic).
+package app
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/antst/go-yjs/backend/hub"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+
+	"github.com/antst/go-yjs/backend/persistence"
+
+	httpAdapter "github.com/alkem-io/collaboration-service/internal/adapter/inbound/http"
+	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/lifecycle"
+	"github.com/alkem-io/collaboration-service/internal/adapter/inbound/ws"
+	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/authzeval"
+	authheader "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/header"
+	authopen "github.com/alkem-io/collaboration-service/internal/adapter/outbound/auth/open"
+	hubredis "github.com/alkem-io/collaboration-service/internal/adapter/outbound/hub/redis"
+	metainmem "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/inmemory"
+	metarabbitmq "github.com/alkem-io/collaboration-service/internal/adapter/outbound/metadatastore/rabbitmq"
+	persistfileservice "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/fileservice"
+	persistinprocess "github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/inprocess"
+	"github.com/alkem-io/collaboration-service/internal/adapter/outbound/persistence/metapointer"
+	"github.com/alkem-io/collaboration-service/internal/config"
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
+	"github.com/alkem-io/collaboration-service/internal/domain/port"
+	"github.com/alkem-io/collaboration-service/internal/domain/service"
+)
+
+// App is the assembled, ready-to-serve collaboration service: the HTTP handler
+// (operational endpoints + the collaboration WebSocket + the optional no-bus
+// document-create REST endpoint, tests/local) bound to a started room Manager,
+// plus a Close that releases every live room and tears down the backends that
+// hold connections.
+type App struct {
+	// Handler is the chi router serving /healthz, /metrics, /collab/{id} (WS),
+	// and the optional no-bus document-create REST endpoint (tests/local).
+	Handler http.Handler
+	// Manager is the started room registry; the lifecycle consumer and the REST
+	// API drive it. Exposed for the e2e suite to assert room state directly.
+	Manager *service.Manager
+
+	closers []func()
+}
+
+// New assembles the service from configuration: it selects each adapter, builds
+// the router and room Manager, and starts the RabbitMQ lifecycle consumer in
+// Alkemio mode. The returned App's Close must be called on shutdown to release
+// live rooms (persisting a final snapshot each) and close the durable backends.
+// A wiring failure (bad backend config, unreachable bus) returns an error and
+// leaves nothing started.
+func New(cfg *config.Config, logger *zap.Logger) (*App, error) {
+	deps, depsCleanup, err := buildDeps(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	handler, manager := buildRouter(cfg, deps, logger)
+
+	a := &App{Handler: handler, Manager: manager}
+	// Order matters on Close: stop the lifecycle consumer, then release rooms
+	// (Manager.Close), then close the durable backends. We append in that reverse
+	// order below and Close drains last-in-first-out.
+	a.closers = append(a.closers, depsCleanup)
+	a.closers = append(a.closers, manager.Close)
+
+	if err := startLifecycle(cfg, manager, logger, &a.closers); err != nil {
+		a.Close()
+		return nil, err
+	}
+	return a, nil
+}
+
+// Close releases every live room (final snapshot + teardown) and closes the
+// durable backends, in reverse wiring order. Idempotent enough for a deferred
+// call after a failed New.
+func (a *App) Close() {
+	for i := len(a.closers) - 1; i >= 0; i-- {
+		a.closers[i]()
+	}
+	a.closers = nil
+}
+
+// buildDeps selects a concrete adapter per outbound port from configuration and
+// assembles the domain dependency set (T004.4/T005.6/T006.4). It returns a
+// cleanup that closes the backends that hold connections (redis/rabbitmq)
+// on shutdown. The in-process selections (inmemory / inline / open) let the
+// service run with nothing else present, which is the tests/local fixture and
+// not a deployment (SC-012); any other selection wires the matching integrated
+// adapter, failing fast if its config is incomplete.
+
+func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), error) {
+	var closers []func()
+	cleanup := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+
+	fanout, err := buildHub(cfg, logger, &closers)
+	if err != nil {
+		cleanup()
+		return service.Deps{}, nil, err
+	}
+
+	metadata, contributor, err := buildMetadata(cfg, &closers)
+	if err != nil {
+		cleanup()
+		return service.Deps{}, nil, err
+	}
+
+	checkpoint, err := buildCheckpoint(cfg, metadata)
+	if err != nil {
+		cleanup()
+		return service.Deps{}, nil, err
+	}
+
+	auth := buildAuthN(cfg)
+	authz := buildAuthZ(cfg, metadata)
+
+	return service.Deps{
+		Hub:         fanout,
+		Metadata:    metadata,
+		Checkpoint:  checkpoint,
+		Auth:        auth,
+		AuthZ:       authz,
+		Contributor: contributor,
+	}, cleanup, nil
+}
+
+func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hub, error) {
+	if cfg.HubMode != config.HubRedis {
+		// The core's shipped single-process hub. Not a no-op: the room publishes and
+		// subscribes on this path too, so single-pod exercises the same code multi-pod
+		// does rather than a stub.
+		return hub.NewInProcess(), nil
+	}
+	// The instance id distinguishes THIS process on the wire so its own publishes,
+	// which Redis loops straight back, are not delivered a second time on top of
+	// the synchronous local delivery. Uniqueness is what matters, not stability
+	// across restarts.
+	h, err := hubredis.New(cfg.Redis.URL, uuid.NewString())
+	if err != nil {
+		return nil, fmt.Errorf("redis fan-out: %w", err)
+	}
+	*closers = append(*closers, func() { _ = h.Close() })
+	logger.Info("redis fan-out enabled")
+	return h, nil
+}
+
+// buildMetadata selects the MetadataStore and, for the Alkemio (rabbitmq) bus,
+// the Contributor that publishes the north-star contribution event over the same
+// bus (T013). A nil Contributor (no bus wired) defaults to a domain no-op.
+func buildMetadata(cfg *config.Config, closers *[]func()) (port.MetadataStore, port.Contributor, error) {
+	switch cfg.MetadataStore {
+	case config.MetadataStoreRabbitMQ:
+		client, store, err := metarabbitmq.Connect(metarabbitmq.Config{
+			URL: cfg.RabbitMQ.URL, Queue: cfg.RabbitMQ.Queue,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("rabbitmq metadata store: %w", err)
+		}
+		*closers = append(*closers, func() { _ = client.Close() })
+		// The rabbitmq store also satisfies port.Contributor (collaboration-
+		// contribution event), so analytics ride the same bus.
+		return store, store, nil
+	default:
+		// In-process store: the tests/local path, not durable (SC-012).
+		return metainmem.New(), nil, nil
+	}
+}
+
+// startLifecycle starts the RabbitMQ lifecycle consumer on the Alkemio bus,
+// registering its closer. The consumer handles EXACTLY ONE pattern,
+// `document.deleted` — there is no `document.created` and no other inbound
+// lifecycle event; anything else on the queue is rejected as poison. On a delete
+// it TOMBSTONES, CLOSES AND EVICTS the live room and deletes nothing durable:
+// `server` confirms the event before starting its owner cascade.
+//
+// With no bus wired there is no lifecycle consumer at all. The only substitute is
+// the optional document-create endpoint, which is a tests/local surface; there is
+// NO delete route to stand in for the event.
+//
+// A failure to connect is therefore fatal in Alkemio mode for a narrower reason
+// than a cascade: without the consumer a document being deleted upstream would
+// stay live and editable in this process during and after the owner cascade.
+//
+// The consumer binds the DEDICATED lifecycle queue (cfg.RabbitMQ.LifecycleQueue),
+// NOT the metadata-store RPC queue. RabbitMQ round-robins a queue across its consumers,
+// so binding the metadata-store queue here would let the lifecycle consumer steal a
+// fraction of collaboration-fetch/-save RPCs and drop them — memo joins then time
+// out. The two consumers must never share a queue.
+func startLifecycle(cfg *config.Config, manager *service.Manager, logger *zap.Logger, closers *[]func()) error {
+	if cfg.MetadataStore != config.MetadataStoreRabbitMQ {
+		return nil
+	}
+	queue := lifecycleQueue(cfg)
+	consumer, err := lifecycle.Connect(lifecycle.Config{
+		URL: cfg.RabbitMQ.URL, Queue: queue,
+		// Without an Observer the dead-letter queue is invisible: events would move to
+		// the DLQ and stay there with nothing to alert on.
+		Observer: httpAdapter.PrometheusLifecycleObserver{},
+	}, manager, logger.Named("lifecycle"))
+	if err != nil {
+		return fmt.Errorf("lifecycle consumer: %w", err)
+	}
+	*closers = append(*closers, func() { _ = consumer.Close() })
+	logger.Info("lifecycle consumer enabled", zap.String("queue", queue))
+	return nil
+}
+
+// lifecycleQueue is the queue the lifecycle consumer binds: the dedicated
+// LifecycleQueue, NEVER the metadata-store RPC queue. RabbitMQ round-robins a queue
+// across its consumers, so binding the metadata-store queue would let the lifecycle
+// consumer steal metadata-store fetch/save RPCs. config.Load already defaults and
+// validates LifecycleQueue (distinct from Queue); this falls back to the package
+// default only as a belt-and-suspenders guard for a hand-built Config.
+func lifecycleQueue(cfg *config.Config) string {
+	if cfg.RabbitMQ.LifecycleQueue != "" {
+		return cfg.RabbitMQ.LifecycleQueue
+	}
+	return config.DefaultLifecycleQueue
+}
+
+// buildCheckpoint selects the persistence adapter.
+//
+// It returns a plain CheckpointStore. The deletion capability was required here
+// only so the owner-delete cascade could erase a snapshot; `server` owns that
+// cascade, so nothing in this service deletes one and nothing needs to assert it
+// can.
+//
+// Only two shapes exist. file-service is the deployed one; `inline` resolves to
+// the in-process store, which backs the test suite, the local development loop
+// and the zero-dependency smoke test (§III). Any other value is rejected by
+// config.Load and cannot reach here.
+func buildCheckpoint(cfg *config.Config, metadata port.MetadataStore) (persistence.CheckpointStore, error) {
+	if cfg.CheckpointStore == config.CheckpointStoreFileService {
+		return persistfileservice.New(persistfileservice.Config{
+			BaseURL:       cfg.FileService.BaseURL,
+			MaxUploadSize: cfg.FileService.MaxUploadSize,
+		}, metapointer.New(metadata))
+	}
+	return persistinprocess.New(), nil
+}
+
+// buildAuthN selects the handshake-AuthN adapter from cfg.AuthMode, independently
+// of AuthZ (Wave 5, T018.7).
+//
+// Two adapters: `header` trusts a gateway-stamped actor id (the Alkemio topology,
+// where Traefik forward-auth calls server and server stamps the header), and
+// `open` authenticates everyone anonymously for the in-process development and
+// test path. There is no third: direct credential validation in this service
+// duplicated identity resolution that the gateway already performs.
+func buildAuthN(cfg *config.Config) port.Auth {
+	if cfg.AuthMode == config.AuthModeHeader {
+		return authheader.New()
+	}
+	return authopen.New()
+}
+
+// buildAuthZ selects the per-document-AuthZ adapter from cfg.AuthZMode,
+// independently of AuthN (Wave 5, T018.7).
+func buildAuthZ(cfg *config.Config, metadata port.MetadataStore) port.AuthZ {
+	if cfg.AuthZMode != config.AuthZModeEval {
+		return authopen.New()
+	}
+	return authzeval.New(authzeval.Config{
+		ServiceURL:              cfg.AuthZEval.ServiceURL,
+		BreakerFailureThreshold: cfg.AuthZEval.BreakerFailureThreshold,
+		BreakerTimeout:          time.Duration(cfg.AuthZEval.BreakerTimeoutSeconds) * time.Second,
+		BreakerHalfOpenMaxReqs:  cfg.AuthZEval.BreakerHalfOpenMaxReqs,
+	}, policyResolver{metadata})
+}
+
+// policyResolver adapts a MetadataStore to authzeval.PolicyResolver: it resolves
+// a document's authorizationPolicyId from its metadata row (OPEN-1).
+type policyResolver struct{ meta port.MetadataStore }
+
+// PolicyID resolves the document's Alkemio authorization policy id from its
+// metadata row, so the authzeval adapter can evaluate access against it (OPEN-1).
+func (p policyResolver) PolicyID(ctx context.Context, id model.DocumentID) (string, error) {
+	m, err := p.meta.Load(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return m.AuthorizationPolicyID, nil
+}
+
+func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (http.Handler, *service.Manager) {
+	httpAdapter.InitMetrics()
+
+	roomCfg := service.DefaultRoomConfig()
+	roomCfg.Limits = service.Limits{
+		MaxDocBytes:      cfg.Limits.MaxDocBytes,
+		MaxConnsPerRoom:  cfg.Limits.MaxConnsPerRoom,
+		UpdateRatePerSec: cfg.Limits.UpdateRatePerSec,
+		UpdateBurst:      cfg.Limits.UpdateBurst,
+		// 0 means "use the core default" rather than "escalate on the first failed
+		// flush", which a literal 0 threshold would mean — a single transient blip
+		// would then tear down a healthy room and discard its edits.
+		FlushFailureThreshold: cfg.Limits.FlushFailureThreshold,
+	}
+	roomCfg.CollaboratorInactivity = time.Duration(cfg.Limits.CollaboratorInactivitySeconds) * time.Second
+	roomCfg.ContributionWindow = time.Duration(cfg.Limits.ContributionWindowSeconds) * time.Second
+	roomCfg.IdleTimeout = time.Duration(cfg.Limits.IdleReleaseSeconds) * time.Second
+	// Apply unconditionally: 0 is a meaningful value (disables periodic saves —
+	// persist only on idle-release/close), so guarding on >0 would make
+	// SAVE_DEBOUNCE_MILLIS=0 silently fall back to the 2000ms default.
+	roomCfg.SaveDebounce = time.Duration(cfg.Limits.SaveDebounceMillis) * time.Millisecond
+	manager := service.NewManager(deps, roomCfg, httpAdapter.PrometheusMetrics{}, logger.Named("rooms"))
+
+	collab := &ws.Handler{
+		Auth:    deps.Auth,
+		Manager: manager,
+		Logger:  logger.Named("ws"),
+		// The `header` AuthN adapter reads the gateway-stamped actor id from this
+		// header. The Alkemio deployment terminates auth at the gateway and forwards
+		// the resolved actor id (AUTH_TOKEN_HEADER=X-Alkemio-Actor-Id). There is no
+		// default name; `open` mode leaves it empty and ignores the credential.
+		ActorIDHeader: cfg.Auth.ActorIDHeader,
+		// A single inbound WS message must accommodate a full-doc SyncStep2 (the v2
+		// snapshot, up to MaxDocBytes) plus framing; the 32 KiB coder/websocket
+		// default would close the socket on any real document and loop the client.
+		ReadLimitBytes: ws.ReadLimitFor(cfg.Limits.MaxDocBytes),
+	}
+
+	routerDeps := httpAdapter.Deps{
+		CollabHandler: collab,
+		Logger:        logger,
+	}
+	// The document-create endpoint is the no-bus (tests/local) substitute for
+	// creation (T016). In Alkemio/rabbitmq mode `server` owns document creation and
+	// the authoritative index, which this service reads and writes OUTBOUND over
+	// collaboration-fetch/-save RPC; the dedicated INBOUND lifecycle consumer
+	// handles deletion notification only. So this unauthenticated endpoint must NOT
+	// be exposed — leaving CollabAPI nil omits the REST surface entirely, which
+	// also makes Manager.PreRegister unreachable in that mode.
+	//
+	// When AuthZ is authzeval (AUTHZ_MODE=authzeval, independent of the AuthN
+	// mode), a create MUST carry an authorizationPolicyId — an empty one registers
+	// a document that fails every later authorization evaluation (the authzeval
+	// adapter fails closed on an empty policy). Require it at the handler so such a
+	// document is never persisted; in open AuthZ everything is granted, so the
+	// policy id is optional.
+	if cfg.MetadataStore != config.MetadataStoreRabbitMQ {
+		routerDeps.CollabAPI = &httpAdapter.CollabAPIHandler{
+			Lifecycle:                  manager,
+			RequireAuthorizationPolicy: cfg.AuthZMode == config.AuthZModeEval,
+		}
+	}
+
+	router := httpAdapter.NewRouter(routerDeps)
+	return router, manager
+}

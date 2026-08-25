@@ -1,7 +1,235 @@
 <!--
 Sync Impact Report
-- Version change: N/A → 1.0.0 (initial ratification)
-- Adapted from the Alkemio File Service (Go) constitution v1.3.0, inheriting
+- Version change: 3.0.1 → 4.0.0 (MAJOR — §II port replaced, §III prohibition
+  becomes a bounded permission, §V narrowed)
+- 4.0.0 (2026-08-21): Authorize the direct admission projection; retire the
+  metadata bus; incorporate the direct-OIDC removal.
+
+  THE HEADLINE, stated plainly: 3.0.1 said this service "holds no database of
+  its own and opens no database connection". 4.0.0 replaces that prohibition
+  with a BOUNDED PERMISSION to open one connection pool, read-only, against
+  tables `server` owns. Code written to 3.0.1 would be wrong about what this
+  service is allowed to do. That is why this is MAJOR rather than a cleanup.
+
+  - MODIFIED §III — ownership vs. access separated. Collab owns NO database,
+    schema, table, DDL, or migrator and runs no migrations; `server` owns every
+    schema change. Within that boundary collab MAY open ONE connection pool to
+    ONE Alkemio application database target, with existing application
+    credentials, for a read-only admission projection. Pool sizing is ordinary
+    configuration and is deliberately not fixed here. (file-service is the
+    precedent: it owns its `file` rows while `server` owns the migrations.)
+  - ADDED to §III — eight normative invariants on that projection: no
+    ownership; SELECT-only by construction and review; ONE projection read once
+    per socket, reused for authorization, room materialization, and checkpoint
+    resolution; an exact approved field set; existing credentials only; the
+    in-process implementation retained; distinct failure dispositions; and what
+    stays on RabbitMQ.
+  - The approved field set is EXACTLY: existence/declared content type,
+    `authorizationPolicyID`, `storageBucketID`, `contentPointer`, `displayName`,
+    `levelZeroSpaceID` (the analytics context, in the SAME row). `owner` and
+    `contentVersion` are excluded — audited as dead or not globally consumed.
+    Re-adding either requires an amendment.
+  - Failure dispositions are separated because collapsing them breaks something
+    real in each direction. An absent/unknown row MUST be wire-indistinguishable
+    from forbidden (1008, same reason) or the service becomes a document-id
+    oracle. A query/connection FAILURE MUST be 1011 so clients retry — routing a
+    database outage to "unknown document" tells every client that a document
+    which exists does not.
+  - The SELECT-only boundary is ARCHITECTURAL AND REVIEWED, NOT
+    DATABASE-ENFORCED, and 4.0.0 says so rather than implying a control it does
+    not have. There is no dedicated read-only role; the existing application
+    credentials could write. What holds the line is that the adapter and its
+    generated `sqlc` package contain only the approved SELECTs, pinned for
+    implementation acceptance by a characterization test enumerating the query
+    files and their operation kinds — so adding or changing a query fails until
+    reviewed. It is an acceptance gate, not a security control, and MUST NOT be
+    presented as one. A deliberate future write is outside 4.0.0 and needs an
+    amendment.
+  - MODIFIED §II — the broad `MetadataStore` port is REPLACED, not re-adapted,
+    by a narrow typed `AdmissionReader`. Its `Load`/`Save`/`Delete` shape IS the
+    obsolete metadata bus: a read-only admission concern needs neither `Save`
+    nor `Delete`, and retaining them would keep a second writable source of
+    truth for rows `server` owns. §II's own rule already required this —
+    superseded ports are removed, not wrapped.
+  - MODIFIED §V — handshake AuthN narrowed to what the code does after the
+    direct-OIDC adapter was deleted. No adapter resolves a MISSING credential to
+    the anonymous sentinel any more: in `header` mode absence means the gateway
+    did not run and is rejected; in `open` mode everyone is anonymous and AuthZ
+    is bypassed. The sentinel survives, but now arrives as a PRESENT
+    gateway-stamped nil UUID — authenticated-anonymous. Added the startup
+    invariant that the actor-id header must be named explicitly and that both an
+    unset name and `Authorization` (case-insensitive) are refused, because that
+    header's value is trusted verbatim as the actor id.
+  - MODIFIED §V — DELETED the `document.access_changed` re-evaluation mandate.
+    No such event exists in the code, and none is planned; the shipped rule is
+    that AuthZ is evaluated once per socket from the typed policy id and a
+    policy change takes effect on reconnect, with `document.deleted` the one
+    live invalidation. A mandate nothing implements is worse than an honest
+    reconnect boundary, because it reads as a guarantee.
+  - MODIFIED Technology Stack Constraints — pgx v5 and sqlc are RETAINED and
+    become LIVE (they were conditional constraints without a subject, not
+    contradictions). Migrations row becomes "None — `server` owns DDL and
+    migrations"; `golang-migrate` is not retained for this service. Metadata
+    store row becomes the `AdmissionReader`. Durable content row corrected:
+    file-service is the PRODUCTION `persistence.CheckpointStore`, not an
+    optional `persistence.Store`.
+  - MODIFIED Integration Requirements — `server` owns the schema and the rows
+    read at admission; the metadata bus retires; the contribution event and the
+    lifecycle delete stay on RabbitMQ; the file-service correction as above.
+
+  MIGRATION AND VERIFICATION PLAN (each step gated by the previous; no step
+  skipped, and step 4 precedes step 5 deliberately):
+  1. Release A — `server` populates the columns admission depends on. Nothing
+     reads them yet.
+  2. VERIFY on real data, measured and not asserted: zero remaining NULLs, and
+     every content pointer resolving. This gate exists because steps 3 onward
+     are not safely reversible.
+  3. Release B — `server` applies the guarded NOT NULL and drops what Release A
+     superseded. `server` performs the DDL; collab performs none of it.
+  4. Remove the standalone REST create/delete surface. This MUST precede UUID
+     typing, or the typing change lands on an endpoint already due for deletion.
+  5. UUID typing.
+  6. Direct admission goes live — gated on the characterization test of the
+     approved query set existing and passing. Admission MUST NOT be accepted or
+     enabled before it.
+  7. Retire the `MetadataStore` port and the RabbitMQ metadata
+     `fetch`/`save`/`delete`/`info` adapters. The contribution event and the
+     lifecycle delete remain.
+
+  Historical amendment records below are unchanged.
+- Version change: 3.0.0 → 3.0.1 (PATCH — §III clarification; no principle change)
+- 3.0.1 (2026-08-18): §III — widen the retained in-process path from a "test
+  capability" to a "development and testing capability". 3.0.0 understated it:
+  the same path is also the local development loop (real editors driven against
+  the service without Alkemio infrastructure) and the documented zero-dependency
+  smoke test that isolates the WebSocket path from authZ. All three are now
+  enumerated, with an explicit instruction that the adapters serving them are
+  retained on that basis and MUST NOT be pruned as unused — closing the gap
+  where a later §X dead-code pass could have removed them on the strength of the
+  narrower wording. No principle is redefined and no configuration changes
+  status: the standalone deployment remains withdrawn.
+- Version change: 2.0.0 → 3.0.0 (MAJOR — §III redefined; a supported product
+  configuration is withdrawn)
+- 3.0.0 (2026-08-18): Withdraw the zero-dependency standalone product promise.
+  - MODIFIED §III "Standalone-First, Alkemio-Integrated" → "Alkemio-Integrated,
+    In-Process Testable". The service targets Alkemio; the standalone deployment
+    is no longer a supported configuration. Rationale: the promise was never
+    satisfiable — the document index is owned by the Alkemio `server` and reached
+    by RPC over RabbitMQ, so every real configuration depends on that external
+    service, and no environment runs `server` without file-service — so it cost
+    real complexity for a deployment nobody runs (§XI).
+  - RETAINED as a distinct, narrower guarantee: the service MUST remain runnable
+    entirely in-process for tests, using in-process fixtures and the core's
+    shipped single-process defaults. Explicitly a test capability with no
+    durability guarantee, not a deployment mode.
+  - ADDED to §III: adapters existing SOLELY to serve the withdrawn promise are
+    legacy under §X and MUST be removed; adapters that also serve the in-process
+    test path are retained on that basis. Removal is tracked separately from the
+    go-yjs core port so a foundational change does not also carry a multi-adapter
+    deletion.
+  - MODIFIED Technology Stack Constraints — metadata-store row now names the
+    `MetadataStore` port and the RabbitMQ→server path as the system of record
+    (the Postgres variant existed for standalone only); authorization row now
+    scopes `open` to in-process tests. §V wording likewise rescoped.
+  - Consequential: `001` FR-017 (standalone create/delete HTTP API) and FR-020
+    (standalone as first-class) are superseded; the `postgres` metadata store and
+    the non-file-service content adapters lose their only consumer.
+  - MIGRATION PLAN (affected code):
+    * NO DATA MIGRATION. Nothing is deployed and no production data exists, so
+      this is deletion only — there is no stored state to convert or preserve.
+    * ORDERING. This amendment MUST be committed before any of the removals
+      below. Until it is in force, §III still mandates standalone and the same
+      adapters are REQUIRED code, so deleting them would violate the constitution
+      in effect at that moment. The removals are also deliberately NOT bundled
+      into the go-yjs core port (`003`): a reviewer who disagrees with withdrawing
+      standalone must be able to say so without rejecting a large deletion.
+    * REMOVE — `internal/adapter/outbound/metastore/postgres/` with its
+      migrations, pool, and sqlc output; drop `pgx`, `sqlc`, and `golang-migrate`
+      from the build; drop the CI Postgres service. This is the service's ONLY
+      database code, so afterwards it opens no database connection at all.
+    * REMOVE — every content adapter other than `file-service` and the in-process
+      store, with their config validation and env documentation.
+    * REMOVE — the standalone create/delete REST API (`001` FR-017). It is the
+      no-bus lifecycle equivalent and is already conditionally mounted; it shares
+      the Manager path with the RabbitMQ lifecycle consumer, so only the HTTP
+      surface goes and the lifecycle logic is untouched.
+    * RETAIN — `inline` blob, `inmemory` metadata, `open` auth/authz, and
+      `inmemory` fan-out. These serve the in-process test path that §III still
+      requires, and are kept on that basis rather than as standalone remnants.
+    * UPDATE — the `METADATA_STORE` / `CHECKPOINT_STORE` config enums and their
+      validation, `.env.example`, `README.md`, and `CLAUDE.md`.
+    * SUPERSEDE — mark `001` FR-017 and FR-020 superseded by this amendment in
+      the `001` spec, so the earlier spec does not silently contradict it.
+    * VERIFY — full gates green with no external services (`go build`, `go vet`,
+      `go vet -tags integration`, `golangci-lint` at zero, `go test -race ./...`),
+      and the `002` invariant suite still green and non-vacuous.
+- Version change: 1.0.1 → 2.0.0 (MAJOR — §II and §IV redefined; code compliant
+  with 1.0.1 violates 2.0.0)
+- 2.0.0 (2026-08-18): Adopt `github.com/antst/go-yjs` as the CRDT core and its
+  backend contracts. Driven by specs/003-go-yjs-core-port/ (FR-023), which is
+  unimplementable under 1.0.1 because §IV mandated `y-crdt` by name.
+  - MODIFIED §II Pluggable Ports — where the core defines a backend contract for
+    a concern, that contract IS the port: `persistence.Store` (durable content,
+    superseding the bespoke `BlobStore`), `hub.Hub` (fan-out, superseding
+    `ClusterBroadcaster`), `memory.Registry` (document identity/lifetime).
+    `MetadataStore` is retained and explicitly NOT superseded — the Alkemio index
+    carries content type, authz policy, owner and bucket, which a byte-and-revision
+    store does not model. Added two rules: implementations MUST be native (no
+    translation shims; superseded ports removed, not wrapped) and MUST pass the
+    core's conformance suites.
+  - MODIFIED §IV CRDT Correctness — core re-pointed from the `y-crdt` fork to the
+    first-party `go-yjs`. Substance preserved: one core, no reimplementation,
+    differential fuzz gate against real Yjs, v1 live / v2 durable, ≤1s convergence.
+    Clarified that the gate is the core's responsibility and is not re-verified
+    here, and that a badly-fitting contract SHOULD be fixed upstream rather than
+    worked around locally — but never diverged from silently.
+  - MODIFIED §XIV Latest Dependencies — replaced the `y-crdt` module-`replace`
+    clause. For the first-party pre-1.0 core the "latest stable" rule yields to an
+    explicit version pin, so adopting an upstream change is always deliberate.
+  - MODIFIED Technology Stack Constraints — CRDT core, fan-out, and durable-content
+    rows re-stated against the new contracts; added a document-registry row.
+  - Rationale: `y-crdt` proved inadequate and was rewritten into `go-yjs`, which
+    ships backend contracts for concerns this service had hand-built. §II and §IV
+    named the superseded core and ports directly, so they blocked the port.
+  - MIGRATION PLAN (affected code):
+    * NO DATA MIGRATION. The service has never been deployed and holds no
+      production data, so no stored state must survive and no format continuity
+      is owed. The work is a rebuild, not a conversion.
+    * ORDERING. This amendment MUST be in force before implementation begins;
+      under 1.0.1, §IV mandated `y-crdt` by name, so the port was unimplementable.
+    * REPLACE — the core dependency and the module `replace` directive that
+      redirected `skyterra/y-crdt` to the fork; `go-yjs` is a distinct module
+      path, pinned to an explicit version (§XIV).
+    * IMPLEMENT NATIVELY — `persistence.Store` over file-service, and `hub.Hub`
+      over Redis. Both MUST reach their infrastructure directly. Implementing
+      either by delegating to the port it supersedes is prohibited by §II.
+    * REMOVE, NOT WRAP — the `BlobStore` and `ClusterBroadcaster` ports and every
+      adapter behind them, once their replacements exist. No translation shim,
+      compatibility layer, or adapter-over-adapter may survive.
+    * ADOPT — `memory.Registry` for in-process document identity, acquisition,
+      eviction, and invalidation; the collaboration session is rebuilt around its
+      handle. Shutdown drain ordering, flush policy, presence, limits, authz, and
+      lifecycle-event handling remain this service's own.
+    * RETAIN — `MetadataStore`. It is NOT superseded: it carries the Alkemio
+      document index, a different concern from a byte-and-revision store. It MUST
+      NOT be repurposed as a persistence bridge.
+    * WIRE — the core's conformance suites into CI for every implementation the
+      service provides.
+    * GATE — the `002` lifecycle properties MUST still hold. Tests reaching into
+      rebuilt structures MAY be restructured but MUST NOT be weakened, and each
+      MUST be re-proven non-vacuous with the proof recorded.
+    * TRACKED BY — `specs/003-go-yjs-core-port/`.
+- Version change: 1.0.0 → 1.0.1 (PATCH — §V clarification, no principle change)
+- 1.0.1 (2026-06-20): §V Security by Design — clarify the handshake-AuthN
+  rule that *missing ≠ failed*. A credential that was **presented but is
+  invalid** (malformed/expired/signature-rejected/tombstoned) is a FAILED
+  handshake → 401; a **missing** credential (no cookie/bearer/guestName) is
+  NOT a failure → it resolves to the anonymous sentinel and the per-document
+  `AuthZ` port decides. Preserves the original intent (never silently
+  downgrade a FAILED auth to anonymous); encodes the missing-vs-failed
+  distinction the Wave-5 `oidc` AuthN adapter relies on (spec FR-022/FR-023).
+- 1.0.0 (2026-06-18): initial ratification.
+  Adapted from the Alkemio File Service (Go) constitution v1.3.0, inheriting
   the fleet's §I–XV principles verbatim where applicable, with service-specific
   adjustments for a CRDT/WebSocket service:
   - II. Storage Abstraction → Pluggable Ports (fan-out / persistence / auth)
@@ -10,9 +238,9 @@ Sync Impact Report
     per-document authZ, fail-closed
   - Technology Stack Constraints → CRDT/WS stack (coder/websocket, the forked
     y-crdt core, Prometheus); Postgres path keeps pgx/sqlc/golang-migrate
-- Added principles: I–XV (see Core Principles)
-- Added sections: Technology Stack Constraints, Integration Requirements,
-  Anti-Patterns — Quick Reference, Governance
+  - Added principles: I–XV (see Core Principles)
+  - Added sections: Technology Stack Constraints, Integration Requirements,
+    Anti-Patterns — Quick Reference, Governance
 - Follow-up TODOs: none
 -->
 
@@ -24,10 +252,10 @@ Sync Impact Report
 
 All code MUST follow the hexagonal (ports and adapters) architecture
 pattern. Business logic lives in the domain core and MUST NOT depend
-on external infrastructure. External systems (fan-out bus, metadata
-store, blob store, authorization service, WebSocket transport) are
-accessed exclusively through well-defined ports (interfaces) with
-concrete adapters.
+on external infrastructure. External systems (fan-out bus, the
+document-admission database, blob store, authorization service,
+WebSocket transport) are accessed exclusively through well-defined
+ports (interfaces) with concrete adapters.
 
 - Domain types and interfaces MUST reside in dedicated domain packages
   with zero infrastructure imports.
@@ -42,29 +270,154 @@ The service MUST keep horizontal scaling, persistence, and
 authorization behind clean port interfaces so each is swappable by
 configuration without touching business logic (FR-019/020/021/022).
 
-- Cross-pod fan-out MUST go through a `ClusterBroadcaster` port
-  (default `inmemory` single-pod; `redis` for multi-pod, R4).
-- The document index MUST go through a `MetadataStore` port
-  (default the Alkemio server RabbitMQ save/fetch bus; `postgres`
-  for standalone).
-- The encoded Y.Doc snapshot MUST go through a `BlobStore` port
-  (default `inline`; `file-service` / `s3` / `local` optional).
+Where the CRDT core (§IV) defines a backend contract for one of these
+concerns, **that contract IS the port**. The service MUST NOT define a
+parallel bespoke port for the same concern.
+
+- Durable document content MUST go through the core's
+  `persistence.CheckpointStore` contract. There are exactly TWO backends:
+  `file-service` for production, and the in-process store for the test suite
+  and local development. The in-process store is not durable across a restart
+  and MUST never be presented as a deployment option.
+- Cross-pod fan-out MUST go through the core's `hub.Hub` contract
+  (shipped in-process default single-pod; `redis` for multi-pod, R4).
+- In-process document identity, acquisition, eviction, and
+  invalidation MUST go through the core's `memory.Registry` contract.
+- Document admission MUST go through a narrow, typed **`AdmissionReader`**
+  port. Its deployed implementation is the direct `sqlc` + `pgx`
+  read-only projection over `server`-owned tables (§III); an in-process
+  implementation serves tests and local development. This is **not**
+  superseded by `persistence.CheckpointStore`: the projection carries
+  declared content type, authorization policy id, storage bucket id,
+  content pointer, display name, and the analytics context, none of
+  which a byte-and-revision store models or should.
+
+  The broad `MetadataStore` port it replaces is **retired, not
+  re-adapted**. Its `Load`/`Save`/`Delete` shape IS the obsolete
+  metadata bus: a read-only admission concern does not need `Save` or
+  `Delete`, and keeping them would preserve a second writable source of
+  truth for rows `server` owns. The port and its RabbitMQ
+  `fetch`/`save`/`delete`/`info` adapters MUST be removed once direct
+  admission is live — per §II's own rule that superseded ports are
+  removed rather than wrapped.
 - Authentication and authorization MUST go through `Auth` (handshake)
   and `AuthZ` (per-document) ports.
 - Backend selection MUST be configuration-driven and the service MUST
   NOT leak backend details through its wire protocol or API.
 
-### III. Standalone-First, Alkemio-Integrated
+**Implementations MUST be native.** A contract MUST be implemented
+directly against its infrastructure. Implementing one by delegating to
+a superseded port — a `Store` that calls an older snapshot/pointer
+port, a `Hub` that wraps an older broadcaster — is prohibited.
+Superseded ports MUST be removed, not wrapped; no translation shim,
+compatibility layer, or adapter-over-adapter may survive a migration
+(§VIII, §X).
 
-The service MUST run as a single binary with zero external
-dependencies by default, AND integrate cleanly into the Alkemio
-platform when configured. Both modes are first-class.
+**Custom implementations MUST be contract-validated.** Where the core
+ships conformance suites for a contract, every implementation the
+service provides MUST pass them in CI. Choosing a shape the contract
+permits is conformant; misreporting a guarantee is not — an append
+that reports success before its bytes are durable, a load that presents
+a partial history as complete, or a fan-out that assumes ordering or
+single delivery the contract does not promise, are all violations
+regardless of whether the build and local tests pass.
 
-- The default configuration (`open` auth, `inmemory` fan-out,
-  `inline` blob) MUST boot with no database, bus, or auth service.
-- The Alkemio configuration MUST authenticate at the handshake from
-  the Alkemio token/cookie (Oathkeeper/Kratos) and authorize per
-  document via the authorization-evaluation-service.
+### III. Alkemio-Integrated, In-Process Testable
+
+The service targets the Alkemio platform. It MUST integrate cleanly
+into it, and MUST remain runnable entirely in-process for tests.
+
+**The zero-dependency standalone deployment is NOT a supported product
+configuration.** That promise is withdrawn: it was never satisfiable,
+because the authoritative document index is owned by the Alkemio
+`server` and production blobs by file-service, so a real configuration
+always depends on external Alkemio infrastructure regardless of how
+that index is reached. Retaining the promise cost real complexity for a
+deployment nobody runs (§XI — No Busywork).
+
+This service **owns no database**. It owns no schema, no table, no DDL,
+and no migrator, and it MUST NOT create, alter, or drop any database
+object. `server` owns the schema and every migration against it. Blobs
+live in file-service.
+
+Within that ownership boundary the service MAY open **one connection
+pool to one Alkemio application database target**, using the existing
+application credentials, for a **read-only admission projection** over
+`server`-owned rows. Pool sizing and timeouts are ordinary bounded
+configuration and are not fixed here. This is a bounded permission, not
+a general database capability: it exists so a socket can be admitted
+from one authoritative row instead of a bus round-trip, and it is
+constrained by the invariants below.
+
+**The admission projection.** The service MAY read `server`-owned
+memo / whiteboard / profile / placement tables directly, subject to ALL
+of the following:
+
+1. **No ownership.** Collab owns no schema, table, DDL, or migrator, and
+   runs no migrations. `server` owns every schema change. (This mirrors
+   file-service, which owns its `file` rows while `server` still owns
+   the migrations that shape them.)
+2. **SELECT-only by construction and review.** The admission adapter and
+   its generated `sqlc` package MUST contain only the exact approved
+   admission `SELECT` statements — no DDL, no migrator, no write query.
+   This boundary is **architectural and reviewed, not database-enforced**:
+   there is no dedicated read-only role, and the existing application
+   credentials could write if some future reviewed code deliberately
+   added a write. Such a write is OUTSIDE this version and requires an
+   amendment. Implementation acceptance MUST include a characterization
+   test that enumerates the `sqlc` query files and pins the complete
+   approved query set and operation kind, so that adding or changing any
+   query fails until explicitly reviewed. It is an acceptance gate, not
+   a security control, and MUST NOT be described as one.
+3. **One projection per socket.** A single typed row is read ONCE at
+   admission and reused for authorization, room materialization, and
+   checkpoint resolution. No per-frame queries, no lazy re-reads, and no
+   second round-trip for a field that belongs in the same row.
+4. **The approved field set.** The projection carries exactly:
+   existence and declared content type, `authorizationPolicyID`,
+   `storageBucketID`, `contentPointer`, `displayName`, and
+   `levelZeroSpaceID` — the last being the analytics context, which
+   travels in the SAME row rather than being fetched separately. It MUST
+   NOT carry `owner` or `contentVersion`: both were audited as dead or
+   not globally consumed, and re-adding either requires an amendment.
+5. **Existing credentials.** The existing application database
+   credentials are used. No new secret, no new role, no new grant, and
+   no dedicated read-only role.
+6. **The in-process implementation stays.** The zero-dependency
+   in-process path remains the test and local-development capability
+   described in this section and MUST NOT be pruned as unused.
+7. **Failure dispositions are distinct, and MUST NOT be collapsed.** A
+   row that is absent or unknown MUST be **wire-indistinguishable from
+   forbidden** (both `1008`, same reason) so the service cannot be used
+   to enumerate which documents exist; only the server's own logs may
+   distinguish them. A query or connection FAILURE is a different thing:
+   it is an internal transient failure (`1011`) so clients keep
+   retrying. Collapsing a database outage into "unknown document" would
+   tell every client that a document which exists does not.
+8. **What stays on RabbitMQ.** The **contribution event** stays. The
+   **lifecycle delete** stays. Neither is an admission read; neither
+   moves.
+
+- The service MUST run entirely **in-process**, with no database, bus,
+  blob store, or auth service, using in-process fixtures and the core's
+  shipped single-process defaults. This path serves three distinct
+  purposes, all of which MUST keep working:
+  1. the automated test suite;
+  2. the local development loop, including driving real editors against
+     the service without Alkemio infrastructure;
+  3. the documented zero-dependency smoke test that isolates the
+     WebSocket path from authZ.
+  It is a **development and testing capability, not a deployment
+  mode**: it carries no durability guarantee and MUST NOT be
+  represented as a supported way to run the service in an environment
+  that matters. Adapters serving it are retained on this basis and MUST
+  NOT be pruned as unused.
+- The Alkemio configuration MUST authenticate at the handshake from the
+  actor id the gateway resolved and stamped, and authorize per document
+  via the authorization-evaluation-service.
+- Adapters that exist **solely** to serve the withdrawn standalone
+  promise are legacy under §X and MUST be removed. Adapters that also
+  serve the in-process test path are retained on that basis.
 - The service replaces `collaborative-document-service` and
   `whiteboard-collaboration-service`; it MUST serve both document
   conventions (memo `Y.XmlFragment`, whiteboard id-keyed `Y.Map`)
@@ -73,17 +426,31 @@ platform when configured. Both modes are first-class.
 
 ### IV. CRDT Correctness — One Core, Fuzz-Gated
 
-The service MUST build on the single forked Go Yjs core
-(`y-crdt`); it MUST NOT reimplement CRDT logic or carry a second
-CRDT implementation.
+The service MUST build on the single Go Yjs core
+`github.com/antst/go-yjs`; it MUST NOT reimplement CRDT logic or carry
+a second CRDT implementation.
 
+- The core is **first-party**: it is this team's own product, created by
+  rewriting the earlier `skyterra/y-crdt` fork after that fork proved
+  inadequate for this service. It supplies both the CRDT and the backend
+  contracts of §II.
 - The core is trusted in production only after its cross-implementation
-  fuzz gate against JS Yjs is green (WS-A, FR-011/SC-006).
+  differential fuzz gate against real JS Yjs is green (FR-011/SC-006).
+  That gate is the core's own responsibility and is **not re-verified
+  in this service**; encoding and merge semantics are out of scope here.
+- Yjs wire compatibility is a design guarantee of the core. What this
+  service MUST guarantee is that its own transport framing, sync
+  handshake sequencing, and awareness handling do not break it.
 - The live wire encoding is y-protocols v1; the durable snapshot
   encoding is v2 (v1 remains readable).
 - Convergence MUST hold: all connected clients reach identical document
   state ≤1s after edits settle (SC-002). Malformed/hostile updates MUST
   be rejected without divergence.
+- **Because the core is first-party, a contract that does not fit this
+  service's genuine needs SHOULD be changed in the core** rather than
+  worked around here; a poor fit is evidence about the contract, and the
+  two are designed together. Diverging *silently* — working around a
+  contract locally while leaving it unchanged upstream — is prohibited.
 
 ### V. Security by Design
 
@@ -91,12 +458,43 @@ The service mediates document access and holds authoritative document
 state, making security a non-negotiable concern at every layer.
 
 - The server is authoritative and holds **plaintext** Y.Docs (FR-021).
-- Authentication MUST happen at the WebSocket handshake; a failed
-  handshake MUST be rejected (401), never downgraded to anonymous
-  (except in `open` standalone mode, which is anonymous by design).
+- Authentication MUST happen at the WebSocket handshake. A **failed**
+  authentication MUST NOT be silently downgraded to anonymous. A failed
+  authentication means a credential was **presented but is invalid** —
+  malformed, or not a well-formed actor id — and MUST be rejected (401).
+  Never treat a credential that failed validation as anonymous.
+
+  **What ABSENCE means is mode-dependent, and the two modes differ on
+  purpose:**
+  - In **`header`** mode (the Alkemio deployment) an absent or empty
+    actor-id header means **the gateway did not run**. That is a failed
+    handshake and MUST be rejected — never downgraded to anonymous. The
+    gateway always stamps something: the actor id, or the **nil-UUID
+    anonymous sentinel** for an un-credentialed caller. An anonymous
+    caller is therefore **authenticated-anonymous** — a PRESENT
+    credential — and the per-document `AuthZ` port decides what they may
+    see (a public-read document stays reachable, a protected one is
+    refused by authorization).
+  - In **`open`** mode (in-process development and tests) there is no
+    credential and everyone is anonymous by design, with AuthZ bypassed.
+
+  The header adapter TRUSTS its configured header verbatim as the actor
+  id, so that header MUST be gateway-owned and named explicitly. Startup
+  MUST refuse **an unset header name**, and MUST refuse
+  **`Authorization`, compared case-insensitively** — a client-settable
+  header whose value would otherwise become the actor id. There is no
+  default header name to fall back to.
 - Per-document authorization (read vs. update-content → viewer vs.
-  collaborator) MUST be evaluated via the `AuthZ` port and re-evaluated
-  on `document.access_changed`.
+  collaborator) MUST be evaluated via the `AuthZ` port from the typed
+  authorization policy id carried by the admission projection (§III).
+  **It is a per-socket capability, evaluated ONCE at connection open and
+  held until that socket closes.** There are no per-frame checks and no
+  lease, so a policy change takes effect on the client's **next
+  connection**, not immediately. `document.deleted` is the ONE live
+  invalidation: it promptly closes and evicts the room. No other
+  access-change machinery exists, and none MUST be added without an
+  amendment — an unimplemented re-evaluation mandate is worse than an
+  honest reconnect boundary, because it reads as a guarantee.
 - Authorization checks MUST **fail closed**: a transport failure, open
   circuit breaker, or degraded auth service is never treated as a
   healthy "allowed" or "denied" — the connection is refused.
@@ -217,9 +615,14 @@ be verified online (pkg.go.dev, GitHub releases, etc.).
   outdated.
 - Dependencies MUST be pinned to specific versions, but those versions
   MUST be current at time of addition.
-- The forked `y-crdt` core is pinned by module `replace` to a specific
-  fork commit whose fuzz gate is green; bumping it MUST re-verify the
-  gate.
+- The `go-yjs` core is **first-party and pre-1.0**, so its shape may
+  change. It MUST be pinned to a specific version, and bumping it MUST
+  re-verify the differential fuzz gate (§IV).
+- For that core only, the "latest stable" rule yields to the explicit
+  pin: upstream changes there are coordinated design decisions made by
+  this team, not external releases to track. The pin exists so that
+  adopting such a change is always a deliberate act here, never an
+  implicit one.
 
 ### XV. No Assumptions
 
@@ -252,8 +655,11 @@ VII–XV):
 11. Do not use `map[string]any` for HTTP response bodies — use named
     structs with JSON tags and a `Render(w http.ResponseWriter)` method.
     This enables OpenAPI spec generation and compile-time type safety.
-12. Do not reimplement CRDT logic — the forked `y-crdt` core is the
-    single source of CRDT behavior.
+12. Do not reimplement CRDT logic — the `go-yjs` core is the single
+    source of CRDT behavior.
+12a. Do not implement a core contract by delegating to a superseded
+    port, and do not keep a superseded port alive behind a shim —
+    implement natively and delete what it replaces (§II).
 13. Do not fail open on an authorization error — fail closed.
 
 ## Technology Stack Constraints
@@ -265,19 +671,20 @@ without a constitution amendment:
 |-------------------|-----------------------------------------------------|
 | Language          | Go 1.26                                             |
 | Architecture      | Hexagonal (ports/adapters)                          |
-| CRDT core         | Forked `skyterra/y-crdt` (pure Go Yjs + v2 codec)   |
+| CRDT core         | `github.com/antst/go-yjs` (first-party Go Yjs, v1+v2 codecs) |
 | WebSocket         | `coder/websocket`                                   |
 | HTTP router       | chi v5                                              |
 | Logging           | Zap (structured JSON)                               |
 | Metrics           | Prometheus (`/metrics`)                             |
-| Fan-out           | in-memory (default), Redis (multi-pod)              |
-| Metadata store    | RabbitMQ→server (default), Postgres (standalone)    |
-| Blob store        | inline (default), file-service / S3 / local         |
-| DB driver (PG)    | pgx v5                                              |
-| Query generation  | sqlc                                                |
-| Migrations        | golang-migrate                                      |
+| Fan-out           | `hub.Hub`: shipped in-process (default), Redis (multi-pod) |
+| Document admission | `AdmissionReader`: direct read-only `sqlc`+`pgx` projection over `server`-owned tables (deployed); in-process implementation (tests/dev) |
+| Document registry | `memory.Registry` (shipped in-process implementation) |
+| Durable content   | `persistence.CheckpointStore`: **file-service (production)**; in-process implementation (tests/dev) |
+| DB driver (PG)    | pgx v5 — **live**: one bounded pool, read-only admission projection (§III) |
+| Query generation  | sqlc — **live**: the approved admission SELECTs only, pinned by a characterization test |
+| Migrations        | **None — `server` owns DDL and migrations; this service runs none** |
 | Messaging         | amqp091 (RabbitMQ), NATS (auth fallback)            |
-| Authorization     | authorization-evaluation-service (h2c HTTP/2 preferred, or NATS); `open` for standalone |
+| Authorization     | authorization-evaluation-service (h2c HTTP/2 preferred, or NATS); `open` for in-process tests |
 | Circuit breaker   | sony/gobreaker v2                                   |
 
 Additional dependencies SHOULD be minimized. The Go standard library
@@ -295,13 +702,16 @@ The collaboration service integrates with the following systems:
   `../agents-hq/specs/003-unify-collab-yjs/contracts/ws-protocol.md`.
 
 **Alkemio Server** (Node/TS):
-- Owns document identity; the collab service reacts to lifecycle events
-  (`document.deleted` cascade purge; optional `document.created` /
-  `document.access_changed`) over RabbitMQ — see
-  `.../contracts/lifecycle-events.md`.
-- Holds the document metadata/index via the `save`/`fetch` bus extended
-  with `content_pointer` + `blob_store` — see
-  `.../contracts/persistence-ports.md`.
+- Owns document identity, **the schema, and every migration against it**.
+  The collab service reacts to the `document.deleted` cascade purge over
+  RabbitMQ — see `.../contracts/lifecycle-events.md`. That delete is the
+  one live invalidation; there is no access-change event.
+- Owns the memo / whiteboard / profile / placement rows the collab
+  service reads **directly, read-only, once per socket at admission**
+  (§III). The RabbitMQ metadata `save`/`fetch`/`delete`/`info` path and
+  the `MetadataStore` port it serves are retired once that read is live.
+- Receives the **contribution event** over RabbitMQ, which stays on the
+  bus alongside the lifecycle delete.
 
 **Authorization Evaluation Service** (Go, h2c HTTP/2 or NATS):
 - h2c (preferred): `POST {AUTH_SERVICE_URL}/internal/auth/evaluate`.
@@ -311,9 +721,14 @@ The collaboration service integrates with the following systems:
   closed.
 
 **file-service** (Go, existing — no code change):
-- Optional `BlobStore` backend via its existing PUT/GET API; expanding
-  it is pre-authorized if the blob store needs a capability it does not
-  yet expose.
+- The **production** durable-content backend for
+  `persistence.CheckpointStore` via its existing PUT/GET API — not an
+  optional one, and not a `persistence.Store`. Expanding it is
+  pre-authorized if the store needs a capability it does not yet expose.
+- Its contract with this service is **store blob, read blob**. Blob
+  retention, expiry, and reclamation of superseded blobs are the
+  file-service's own concern; this service MUST NOT model or manage
+  them, and exposes no document-history or restore surface.
 
 ## Governance
 
@@ -332,4 +747,4 @@ informal conventions and ad-hoc decisions.
 - **Review cadence**: The constitution SHOULD be reviewed quarterly or
   when significant architectural decisions arise.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-06-18
+**Version**: 4.0.0 | **Ratified**: 2026-06-18 | **Last Amended**: 2026-08-21
