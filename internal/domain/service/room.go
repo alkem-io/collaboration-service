@@ -1112,12 +1112,12 @@ func (r *Room) handleJoin(
 	mode model.CollaboratorMode,
 	isMultiUser *bool,
 ) joinResult {
-	if r.maxConns > 0 && len(r.members) >= r.maxConns {
-		return joinResult{err: ErrRoomFull}
-	}
 	if isMultiUser != nil {
 		decision := *isMultiUser
 		r.isMultiUser = &decision
+	}
+	if r.maxConns > 0 && len(r.members) >= r.maxConns {
+		return joinResult{err: ErrRoomFull}
 	}
 	readOnlyReason := readOnlyReasonForIdentity(identity)
 	// Room membership is authoritative in the supported durable topology because

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -223,6 +224,54 @@ func TestLiveRoomKeepsExplicitDecisionWhenLatestReplyOmitsIt(t *testing.T) {
 	reason, readOnly := readOnlyReason(second)
 	if !readOnly || reason != model.ReasonMultiUserNotAllowed {
 		t.Fatalf("omitted decision changed denial: readOnly=%v reason=%q", readOnly, reason)
+	}
+}
+
+// TestFullRoomStillRefreshesMultiUserDecision pins that capacity rejection does
+// not discard an explicit server-owned decision. A later rolling-deploy reply
+// may omit the field, so the room must cache the decision before returning
+// ErrRoomFull or it can resurrect a stale entitlement when capacity frees.
+func TestFullRoomStillRefreshesMultiUserDecision(t *testing.T) {
+	cfg := fastConfig()
+	cfg.Limits.MaxConnsPerRoom = 2
+	mgr, deps := testManager(t, cfg)
+	id := model.DocumentID("full-room-license-refresh")
+	multiUser := true
+	if err := mgr.PreRegister(t.Context(), model.Metadata{
+		ID: id, ContentType: model.ContentTypeWhiteboard, IsMultiUser: &multiUser,
+	}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+
+	first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+	second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+	first.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+	second.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+
+	singleUser := false
+	if err := deps.meta.Save(t.Context(), model.Metadata{ID: id, IsMultiUser: &singleUser}); err != nil {
+		t.Fatalf("remove license: %v", err)
+	}
+	blocked := newFakeClientWithIdentity(t, "33333333-3333-3333-3333-333333333333")
+	_, _, err := mgr.Join(t.Context(), JoinRequest{
+		ID:       id,
+		Content:  model.ContentTypeWhiteboard,
+		Identity: blocked.identity,
+		Conn:     blocked,
+	})
+	if !errors.Is(err, ErrRoomFull) {
+		t.Fatalf("join at capacity err = %v, want %v", err, ErrRoomFull)
+	}
+
+	// Model the next server in a rolling deployment omitting the new field.
+	// The leave and subsequent join are serialized by the same room loop.
+	mgr.deps.Metadata = omitMultiUserMetadata{MetadataStore: deps.meta}
+	first.session.Leave()
+	next := newFakeClientWithIdentity(t, "44444444-4444-4444-4444-444444444444")
+	next.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+	reason, readOnly := readOnlyReason(next)
+	if !readOnly || reason != model.ReasonMultiUserNotAllowed {
+		t.Fatalf("omitted decision after full-room refresh: readOnly=%v reason=%q", readOnly, reason)
 	}
 }
 
