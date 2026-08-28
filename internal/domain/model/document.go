@@ -50,6 +50,10 @@ type Metadata struct {
 	// legacy rows remain false until their snapshot pointer is published; rows
 	// created by the unified server are true from creation.
 	Migrated bool
+	// IsMultiUser is the server-owned license decision for this document. Nil
+	// means the producer predates the additive field, so rolling deployments keep
+	// their existing behaviour until the server supplies an explicit decision.
+	IsMultiUser *bool
 	// AuthorizationPolicyID is the Alkemio authorization policy this document
 	// is evaluated against (OPEN-1). The authzeval AuthZ adapter passes it to
 	// the authorization-evaluation-service; empty in open mode.

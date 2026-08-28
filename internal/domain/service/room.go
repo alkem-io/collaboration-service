@@ -79,8 +79,12 @@ type command struct {
 	// materialized. The room does not re-derive it: authorization is established
 	// once per connection and holds for the life of the socket.
 	mode model.CollaboratorMode
-	data []byte
-	done chan joinResult
+	// isMultiUser is the latest optional license decision from this join's
+	// existence read. Nil means an older producer omitted it, so the room keeps
+	// its last explicit decision.
+	isMultiUser *bool
+	data        []byte
+	done        chan joinResult
 	// done2 acknowledges a cmdCloseDeleted that ran on the room loop (T015).
 	done2 chan error
 	// contribution completion is produced by the one bounded off-loop periodic
@@ -251,6 +255,10 @@ type Room struct {
 	// fallback: when it is empty the file-service store refuses the first save
 	// rather than writing the blob somewhere the delete cascade will never reach.
 	bucketID string
+	// isMultiUser is a read-only, transient admission cache refreshed from the
+	// server-owned decision on every join. Nil preserves the last known decision
+	// during a rolling deploy. The room never persists this field.
+	isMultiUser *bool
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
 	// document's maxCollaborators (carried on the bus metadata contract) is not yet
@@ -860,6 +868,7 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	r.policyID = meta.AuthorizationPolicyID
 	r.ownerRef = meta.OwnerRef
 	r.bucketID = meta.StorageBucketID
+	r.isMultiUser = meta.IsMultiUser
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
 	}
@@ -1041,7 +1050,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	switch cmd.kind {
 	case cmdJoin:
 		stopTimer(idleTimer)
-		res := r.handleJoin(cmd.conn, cmd.identity, cmd.mode)
+		res := r.handleJoin(cmd.conn, cmd.identity, cmd.mode, cmd.isMultiUser)
 		// Guard the result send like cmd.done2: the only cmdJoin producer always
 		// supplies a buffered done, but a nil channel here would panic the loop.
 		if cmd.done != nil {
@@ -1097,9 +1106,31 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 // lacks read access never reaches a room at all. Re-deriving it here would mean
 // the expensive materialization had already happened for a caller who may be
 // refused, which is exactly what the pre-acquire check removed.
-func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.CollaboratorMode) joinResult {
+func (r *Room) handleJoin(
+	c Conn,
+	identity model.Identity,
+	mode model.CollaboratorMode,
+	isMultiUser *bool,
+) joinResult {
+	if isMultiUser != nil {
+		decision := *isMultiUser
+		r.isMultiUser = &decision
+	}
 	if r.maxConns > 0 && len(r.members) >= r.maxConns {
 		return joinResult{err: ErrRoomFull}
+	}
+	readOnlyReason := readOnlyReasonForIdentity(identity)
+	// Room membership is authoritative in the supported durable topology because
+	// startup rejects Redis fan-out with file-service. Enabling durable multi-pod
+	// operation must move this admission decision into its ownership mechanism.
+	if mode == model.ModeCollaborator && r.isMultiUser != nil && !*r.isMultiUser {
+		for _, member := range r.members {
+			if member.mode == model.ModeCollaborator {
+				mode = model.ModeViewer
+				readOnlyReason = model.ReasonMultiUserNotAllowed
+				break
+			}
+		}
 	}
 
 	r.nextID++
@@ -1126,10 +1157,20 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 		ctrl := encodeControl(model.ControlMessage{
 			Kind:     model.ControlReadOnlyState,
 			ReadOnly: model.ReadOnlyState(true),
-			Reason:   readOnlyReasonForIdentity(identity),
+			Reason:   readOnlyReason,
 		})
 		if ctrl != nil {
 			frames = append(frames, ctrl)
+		}
+		if readOnlyReason == model.ReasonMultiUserNotAllowed {
+			ctrl = encodeControl(model.ControlMessage{
+				Kind:   model.ControlCollaboratorMode,
+				Mode:   model.ModeViewer,
+				Reason: model.ReasonMultiUserNotAllowed,
+			})
+			if ctrl != nil {
+				frames = append(frames, ctrl)
+			}
 		}
 	}
 
@@ -1322,6 +1363,12 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 
 	case model.WireDurabilityRequest:
 		return r.handleDurabilityRequest(src, payload, sessionDropped)
+
+	case model.WireHeartbeat:
+		// Echo only to the sender. This is transport liveness, not awareness:
+		// it never fans out, touches the Y.Doc, or arms persistence.
+		r.sendTo(src, frame)
+		return false
 
 	default:
 		// Control is server→client only; ignore client-sent control/unknown
