@@ -758,7 +758,7 @@ func TestADroppedFrameThenARequestIsRefusedOnTheRunLoop(t *testing.T) {
 
 	// Join BEFORE the loop starts: nothing else is running, so touching room state
 	// here is safe and avoids racing the run loop for a member.
-	res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator)
+	res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator, nil)
 	if res.err != nil {
 		t.Fatalf("handleJoin: %v", res.err)
 	}
@@ -854,7 +854,7 @@ func TestATeardownEndingIsNeverOverriddenByATransientRefusal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			room := newBareRoom(t)
 			conn := &recordingConn{}
-			res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator)
+			res := room.handleJoin(conn, model.Identity{}, model.ModeCollaborator, nil)
 			if res.err != nil {
 				t.Fatalf("handleJoin: %v", res.err)
 			}

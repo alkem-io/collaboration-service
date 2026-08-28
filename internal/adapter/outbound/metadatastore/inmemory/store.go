@@ -91,6 +91,9 @@ func coalesceBlank(in, existing model.Metadata) model.Metadata {
 	if existing.Migrated {
 		in.Migrated = true
 	}
+	if in.IsMultiUser == nil {
+		in.IsMultiUser = existing.IsMultiUser
+	}
 	if in.AuthorizationPolicyID == "" {
 		in.AuthorizationPolicyID = existing.AuthorizationPolicyID
 	}

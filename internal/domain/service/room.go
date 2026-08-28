@@ -79,8 +79,12 @@ type command struct {
 	// materialized. The room does not re-derive it: authorization is established
 	// once per connection and holds for the life of the socket.
 	mode model.CollaboratorMode
-	data []byte
-	done chan joinResult
+	// isMultiUser is the latest optional license decision from this join's
+	// existence read. Nil means an older producer omitted it, so the room keeps
+	// its last explicit decision.
+	isMultiUser *bool
+	data        []byte
+	done        chan joinResult
 	// done2 acknowledges a cmdCloseDeleted that ran on the room loop (T015).
 	done2 chan error
 	// contribution completion is produced by the one bounded off-loop periodic
@@ -1045,7 +1049,7 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 	switch cmd.kind {
 	case cmdJoin:
 		stopTimer(idleTimer)
-		res := r.handleJoin(cmd.conn, cmd.identity, cmd.mode)
+		res := r.handleJoin(cmd.conn, cmd.identity, cmd.mode, cmd.isMultiUser)
 		// Guard the result send like cmd.done2: the only cmdJoin producer always
 		// supplies a buffered done, but a nil channel here would panic the loop.
 		if cmd.done != nil {
@@ -1101,9 +1105,18 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 // lacks read access never reaches a room at all. Re-deriving it here would mean
 // the expensive materialization had already happened for a caller who may be
 // refused, which is exactly what the pre-acquire check removed.
-func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.CollaboratorMode) joinResult {
+func (r *Room) handleJoin(
+	c Conn,
+	identity model.Identity,
+	mode model.CollaboratorMode,
+	isMultiUser *bool,
+) joinResult {
 	if r.maxConns > 0 && len(r.members) >= r.maxConns {
 		return joinResult{err: ErrRoomFull}
+	}
+	if isMultiUser != nil {
+		decision := *isMultiUser
+		r.isMultiUser = &decision
 	}
 	readOnlyReason := readOnlyReasonForIdentity(identity)
 	// Room membership is authoritative in the supported durable topology because

@@ -6,7 +6,16 @@ import (
 	"time"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
+	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
+
+type omitMultiUserMetadata struct{ port.MetadataStore }
+
+func (s omitMultiUserMetadata) Load(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
+	meta, err := s.MetadataStore.Load(ctx, id)
+	meta.IsMultiUser = nil
+	return meta, err
+}
 
 // controlOf returns the first control message of the given kind the client
 // received, or false when none was seen.
@@ -133,6 +142,67 @@ func TestMultiUserGateIsAdditiveAndRollingSafe(t *testing.T) {
 				t.Fatalf("second writer was downgraded with reason %q", reason)
 			}
 		})
+	}
+}
+
+// TestLiveRoomRefreshesMultiUserDecisionAtJoin pins the authoritative metadata
+// read to every new session, even while the room itself remains materialized.
+func TestLiveRoomRefreshesMultiUserDecisionAtJoin(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		initial        bool
+		latest         bool
+		secondReadOnly bool
+	}{
+		{name: "license removed", initial: true, latest: false, secondReadOnly: true},
+		{name: "license granted", initial: false, latest: true, secondReadOnly: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, deps := testManager(t, fastConfig())
+			id := model.DocumentID("live-license-" + tc.name)
+			if err := mgr.PreRegister(t.Context(), model.Metadata{
+				ID: id, ContentType: model.ContentTypeWhiteboard, IsMultiUser: &tc.initial,
+			}); err != nil {
+				t.Fatalf("pre-register: %v", err)
+			}
+
+			first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+			first.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+			if err := deps.meta.Save(t.Context(), model.Metadata{ID: id, IsMultiUser: &tc.latest}); err != nil {
+				t.Fatalf("update license decision: %v", err)
+			}
+
+			second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+			second.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+			_, readOnly := readOnlyReason(second)
+			if readOnly != tc.secondReadOnly {
+				t.Fatalf("second writer readOnly = %v, want %v", readOnly, tc.secondReadOnly)
+			}
+		})
+	}
+}
+
+// TestLiveRoomKeepsExplicitDecisionWhenLatestReplyOmitsIt preserves rolling
+// compatibility without allowing an old producer to erase a known denial.
+func TestLiveRoomKeepsExplicitDecisionWhenLatestReplyOmitsIt(t *testing.T) {
+	mgr, deps := testManager(t, fastConfig())
+	id := model.DocumentID("live-license-omitted")
+	singleUser := false
+	if err := mgr.PreRegister(t.Context(), model.Metadata{
+		ID: id, ContentType: model.ContentTypeWhiteboard, IsMultiUser: &singleUser,
+	}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+
+	first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+	first.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+	mgr.deps.Metadata = omitMultiUserMetadata{MetadataStore: deps.meta}
+
+	second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+	second.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+	reason, readOnly := readOnlyReason(second)
+	if !readOnly || reason != model.ReasonMultiUserNotAllowed {
+		t.Fatalf("omitted decision changed denial: readOnly=%v reason=%q", readOnly, reason)
 	}
 }
 
