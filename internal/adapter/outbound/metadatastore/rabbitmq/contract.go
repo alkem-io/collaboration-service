@@ -83,6 +83,7 @@ type FetchReply struct {
 	Version               int    `json:"version,omitempty"`
 	ContentPointer        string `json:"contentPointer,omitempty"`
 	Migrated              bool   `json:"migrated"`
+	IsMultiUser           *bool  `json:"isMultiUser,omitempty"`
 	AuthorizationPolicyID string `json:"authorizationPolicyId,omitempty"`
 	// StorageBucketID is the document's own profile.storageBucket.id (mirrors
 	// the server FetchOutputData.storageBucketId). The file-service checkpoint store

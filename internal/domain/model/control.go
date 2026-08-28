@@ -39,6 +39,9 @@ const (
 	// `saved` broadcast — that broadcast answers a different question and would
 	// report another editor's save as this request's durability.
 	WireDurabilityRequest WireMessageType = 4
+	// WireHeartbeat is a client-originated liveness probe echoed to that same
+	// connection. It carries no document state and is never broadcast or saved.
+	WireHeartbeat WireMessageType = 5
 )
 
 // ControlKind names a server→client control event carried inside a WireControl
@@ -303,6 +306,9 @@ const (
 	// ReasonRoomCapacityReached marks a read-only/refused client because the room
 	// is at its connection cap (ROOM_CAPACITY_REACHED).
 	ReasonRoomCapacityReached ReadOnlyReason = "room-capacity-reached"
+	// ReasonMultiUserNotAllowed marks the second writer on a document whose
+	// server-owned license permits only one live editor.
+	ReasonMultiUserNotAllowed ReadOnlyReason = "multi-user-not-allowed"
 )
 
 // CollaboratorModeReason is the code (OPEN-1) explaining a collaborator-mode

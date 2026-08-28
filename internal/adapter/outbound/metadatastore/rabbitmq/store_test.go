@@ -160,6 +160,7 @@ func TestSaveTransportErrorSurfaces(t *testing.T) {
 }
 
 func TestLoadFetchesAndMaps(t *testing.T) {
+	isMultiUser := false
 	f := &fakeRPC{replies: map[string]any{PatternFetch: FetchReply{
 		Found:                 true,
 		ContentType:           "memo",
@@ -169,6 +170,7 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 		AuthorizationPolicyID: "pol-1",
 		StorageBucketID:       "bucket-1",
 		OwnerRef:              "owner",
+		IsMultiUser:           &isMultiUser,
 	}}}
 	store := newWithRPC(f)
 
@@ -191,6 +193,9 @@ func TestLoadFetchesAndMaps(t *testing.T) {
 	// collaboration-fetch reply so the checkpoint store can persist snapshots into it.
 	if meta.StorageBucketID != "bucket-1" {
 		t.Errorf("StorageBucketID = %q, want bucket-1", meta.StorageBucketID)
+	}
+	if meta.IsMultiUser == nil || *meta.IsMultiUser {
+		t.Errorf("IsMultiUser = %v, want pointer to false", meta.IsMultiUser)
 	}
 }
 

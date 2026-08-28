@@ -139,3 +139,26 @@ func TestBlankContentTypePreservesTheStoredOne(t *testing.T) {
 		t.Fatalf("a blank contentType overwrote the stored one: got %q, want preserved %q; the next open would resolve the type from the handshake and could materialize a memo root for a whiteboard", got.ContentType, model.ContentTypeWhiteboard)
 	}
 }
+
+// TestPartialSavePreservesMultiUserDecision pins nil as "producer omitted the
+// additive field", not "erase the last explicit license decision".
+func TestPartialSavePreservesMultiUserDecision(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+	singleUser := false
+	if err := s.Save(ctx, model.Metadata{
+		ID: "doc", ContentType: model.ContentTypeWhiteboard, IsMultiUser: &singleUser,
+	}); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+	if err := s.Save(ctx, model.Metadata{ID: "doc", OwnerRef: "callout-1"}); err != nil {
+		t.Fatalf("partial Save: %v", err)
+	}
+	got, err := s.Load(ctx, "doc")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.IsMultiUser == nil || *got.IsMultiUser {
+		t.Fatalf("partial Save replaced explicit false with %v", got.IsMultiUser)
+	}
+}
