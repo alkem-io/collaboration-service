@@ -1,0 +1,18 @@
+name: Build & Deploy Collaboration Service to Dev on Hetzner
+
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  deploy:
+    uses: alkem-io/github-workflows/.github/workflows/deploy-hetzner.yml@v1
+    with:
+      environment: dev
+      # image / deployment / container / pull-secret names all match the
+      # org conventions derived from the repo name — no overrides needed.
+    secrets:
+      KUBECONFIG: ${{ secrets.KUBECONFIG_SECRET_HETZNER_DEV }}
+      REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}

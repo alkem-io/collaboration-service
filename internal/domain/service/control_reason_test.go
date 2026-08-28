@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -70,6 +71,66 @@ func TestJoinViewerReadOnlyReasonNotAuthenticated(t *testing.T) {
 	reason, _ := readOnlyReason(viewer)
 	if reason != model.ReasonNotAuthenticated {
 		t.Fatalf("read-only reason = %q, want %q", reason, model.ReasonNotAuthenticated)
+	}
+}
+
+// TestSingleUserDocumentDowngradesOnlyTheSecondWriter pins the license gate at
+// the room's serialized join boundary: the first update-authorized member keeps
+// write access, while the next one joins as a viewer with the existing typed
+// multi-user reason on both control channels.
+func TestSingleUserDocumentDowngradesOnlyTheSecondWriter(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	isMultiUser := false
+	if err := mgr.PreRegister(context.Background(), model.Metadata{
+		ID: "single-user-license", ContentType: model.ContentTypeWhiteboard, IsMultiUser: &isMultiUser,
+	}); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+
+	first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+	second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+	first.joinExisting(mgr, "single-user-license", model.ContentTypeWhiteboard)
+	second.joinExisting(mgr, "single-user-license", model.ContentTypeWhiteboard)
+
+	if _, ok := readOnlyReason(first); ok {
+		t.Fatal("first writer was downgraded")
+	}
+	reason, ok := readOnlyReason(second)
+	if !ok || reason != model.ReasonMultiUserNotAllowed {
+		t.Fatalf("second writer read-only reason = %q, %v; want %q", reason, ok, model.ReasonMultiUserNotAllowed)
+	}
+	mode, ok := controlOf(second, model.ControlCollaboratorMode)
+	if !ok || mode.Mode != model.ModeViewer || mode.Reason != model.ReasonMultiUserNotAllowed {
+		t.Fatalf("second writer collaborator-mode = %+v, %v", mode, ok)
+	}
+}
+
+func TestMultiUserGateIsAdditiveAndRollingSafe(t *testing.T) {
+	licensed := true
+	for _, tc := range []struct {
+		name        string
+		isMultiUser *bool
+	}{
+		{name: "licensed", isMultiUser: &licensed},
+		{name: "field absent", isMultiUser: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, _ := testManager(t, fastConfig())
+			id := model.DocumentID("multi-user-" + tc.name)
+			if err := mgr.PreRegister(context.Background(), model.Metadata{
+				ID: id, ContentType: model.ContentTypeWhiteboard, IsMultiUser: tc.isMultiUser,
+			}); err != nil {
+				t.Fatalf("pre-register: %v", err)
+			}
+
+			first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+			second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+			first.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+			second.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+			if reason, downgraded := readOnlyReason(second); downgraded {
+				t.Fatalf("second writer was downgraded with reason %q", reason)
+			}
+		})
 	}
 }
 

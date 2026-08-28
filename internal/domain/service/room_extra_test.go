@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -96,6 +97,34 @@ func TestUnknownWireTypeIgnored(t *testing.T) {
 	// A malformed (empty) frame is dropped without mutation.
 	if room.handleMessage(1, nil, false) {
 		t.Error("empty frame should not mutate the document")
+	}
+}
+
+func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
+	cfg := fastConfig()
+	mgr, _ := testManager(t, cfg)
+	client := newFakeClient(t)
+	client.join(mgr, "heartbeat", model.ContentTypeMemo)
+
+	var heartbeat bytes.Buffer
+	protocol.WriteMessage(&heartbeat, uint8(model.WireHeartbeat), nil)
+	client.session.Forward(heartbeat.Bytes())
+
+	waitFor(t, "heartbeat echo", func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		for _, frame := range client.received {
+			in := bytes.NewBuffer(frame)
+			messageType, _, err := protocol.ReadMessage(in)
+			if err == nil && model.WireMessageType(messageType) == model.WireHeartbeat {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(2 * cfg.SaveDebounce)
+	if hasControlKind(client, model.ControlSaved) {
+		t.Fatal("heartbeat armed persistence")
 	}
 }
 

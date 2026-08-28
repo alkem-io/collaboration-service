@@ -251,6 +251,9 @@ type Room struct {
 	// fallback: when it is empty the file-service store refuses the first save
 	// rather than writing the blob somewhere the delete cascade will never reach.
 	bucketID string
+	// isMultiUser is the server-owned license decision loaded with the document
+	// metadata. Nil preserves the pre-field behaviour during a rolling deploy.
+	isMultiUser *bool
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
 	// document's maxCollaborators (carried on the bus metadata contract) is not yet
@@ -860,6 +863,7 @@ func (r *Room) loadMetadata(ctx context.Context) (model.Metadata, bool, error) {
 	r.policyID = meta.AuthorizationPolicyID
 	r.ownerRef = meta.OwnerRef
 	r.bucketID = meta.StorageBucketID
+	r.isMultiUser = meta.IsMultiUser
 	if meta.ContentType != "" {
 		r.content = meta.ContentType
 	}
@@ -1101,6 +1105,16 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 	if r.maxConns > 0 && len(r.members) >= r.maxConns {
 		return joinResult{err: ErrRoomFull}
 	}
+	readOnlyReason := readOnlyReasonForIdentity(identity)
+	if mode == model.ModeCollaborator && r.isMultiUser != nil && !*r.isMultiUser {
+		for _, member := range r.members {
+			if member.mode == model.ModeCollaborator {
+				mode = model.ModeViewer
+				readOnlyReason = model.ReasonMultiUserNotAllowed
+				break
+			}
+		}
+	}
 
 	r.nextID++
 	id := r.nextID
@@ -1126,10 +1140,20 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 		ctrl := encodeControl(model.ControlMessage{
 			Kind:     model.ControlReadOnlyState,
 			ReadOnly: model.ReadOnlyState(true),
-			Reason:   readOnlyReasonForIdentity(identity),
+			Reason:   readOnlyReason,
 		})
 		if ctrl != nil {
 			frames = append(frames, ctrl)
+		}
+		if readOnlyReason == model.ReasonMultiUserNotAllowed {
+			ctrl = encodeControl(model.ControlMessage{
+				Kind:   model.ControlCollaboratorMode,
+				Mode:   model.ModeViewer,
+				Reason: model.ReasonMultiUserNotAllowed,
+			})
+			if ctrl != nil {
+				frames = append(frames, ctrl)
+			}
 		}
 	}
 
@@ -1322,6 +1346,12 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 
 	case model.WireDurabilityRequest:
 		return r.handleDurabilityRequest(src, payload, sessionDropped)
+
+	case model.WireHeartbeat:
+		// Echo only to the sender. This is transport liveness, not awareness:
+		// it never fans out, touches the Y.Doc, or arms persistence.
+		r.sendTo(src, frame)
+		return false
 
 	default:
 		// Control is server→client only; ignore client-sent control/unknown
@@ -2204,6 +2234,7 @@ func (r *Room) persist(ctx context.Context) {
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,
+		IsMultiUser:           r.isMultiUser,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))
