@@ -105,6 +105,8 @@ func TestSingleUserDocumentDowngradesOnlyTheSecondWriter(t *testing.T) {
 	}
 }
 
+// TestMultiUserGateIsAdditiveAndRollingSafe preserves two-writer behavior for
+// licensed documents and for rolling-deploy replies that omit the new field.
 func TestMultiUserGateIsAdditiveAndRollingSafe(t *testing.T) {
 	licensed := true
 	for _, tc := range []struct {

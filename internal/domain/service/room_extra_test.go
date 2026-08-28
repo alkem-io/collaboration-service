@@ -100,6 +100,8 @@ func TestUnknownWireTypeIgnored(t *testing.T) {
 	}
 }
 
+// TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument pins heartbeat as
+// sender-only transport liveness: no peer fan-out and no persistence side effect.
 func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	cfg := fastConfig()
 	mgr, _ := testManager(t, cfg)
