@@ -287,7 +287,8 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 	epoch := m.deleteEpoch
 	m.mu.Unlock()
 
-	if err := m.requireDocument(ctx, req.ID); err != nil {
+	meta, err := m.requireDocument(ctx, req.ID)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -301,7 +302,10 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 		}
 
 		res := make(chan joinResult, 1)
-		if !room.enqueue(command{kind: cmdJoin, conn: req.Conn, identity: req.Identity, mode: mode, done: res}) {
+		if !room.enqueue(command{
+			kind: cmdJoin, conn: req.Conn, identity: req.Identity, mode: mode,
+			isMultiUser: meta.IsMultiUser, done: res,
+		}) {
 			continue
 		}
 		select {
@@ -323,8 +327,10 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 	return nil, nil, errRoomUnavailable
 }
 
-// requireDocument refuses a join for a document that does not exist, before the
-// room is materialized.
+// requireDocument loads the current authoritative row and refuses a join for a
+// document that does not exist, before the room is materialized. The returned
+// row also carries optional admission inputs that the room applies on its
+// serialized join command.
 //
 // The metadata store IS the existence record, and it is durable in every
 // deployment that has one: in the Alkemio topology `collaboration-fetch`
@@ -346,22 +352,22 @@ func (m *Manager) Join(ctx context.Context, req JoinRequest) (*Session, [][]byte
 // A store error that is NOT not-found fails closed: an unreachable backend must
 // not be read as "the document is gone", which would tear down a live document
 // during an outage.
-func (m *Manager) requireDocument(ctx context.Context, id model.DocumentID) error {
+func (m *Manager) requireDocument(ctx context.Context, id model.DocumentID) (model.Metadata, error) {
 	meta, err := m.deps.Metadata.Load(ctx, id)
 	if err != nil {
 		if isNotFound(err) {
-			return fmt.Errorf("%w: %s", ErrDocumentUnknown, id)
+			return model.Metadata{}, fmt.Errorf("%w: %s", ErrDocumentUnknown, id)
 		}
-		return fmt.Errorf("resolve document %s: %w", id, err)
+		return model.Metadata{}, fmt.Errorf("resolve document %s: %w", id, err)
 	}
 	// Temporary progressive-rollout gate. Authorization has already succeeded,
 	// but retained legacy content is not safe to materialize as an empty Y.Doc.
 	// Use the ordinary refusal on the wire; once the migration atomically stores
 	// the snapshot pointer and flips this marker, the next join succeeds.
 	if !meta.Migrated {
-		return ErrForbidden
+		return model.Metadata{}, ErrForbidden
 	}
-	return nil
+	return meta, nil
 }
 
 // authorizeSession evaluates the connecting identity's capability for one
