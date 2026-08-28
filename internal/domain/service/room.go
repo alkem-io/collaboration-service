@@ -1106,6 +1106,9 @@ func (r *Room) handleJoin(c Conn, identity model.Identity, mode model.Collaborat
 		return joinResult{err: ErrRoomFull}
 	}
 	readOnlyReason := readOnlyReasonForIdentity(identity)
+	// Room membership is authoritative in the supported durable topology because
+	// startup rejects Redis fan-out with file-service. Enabling durable multi-pod
+	// operation must move this admission decision into its ownership mechanism.
 	if mode == model.ModeCollaborator && r.isMultiUser != nil && !*r.isMultiUser {
 		for _, member := range r.members {
 			if member.mode == model.ModeCollaborator {

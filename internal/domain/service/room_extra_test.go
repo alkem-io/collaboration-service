@@ -105,6 +105,8 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	mgr, _ := testManager(t, cfg)
 	client := newFakeClient(t)
 	client.join(mgr, "heartbeat", model.ContentTypeMemo)
+	peer := newFakeClient(t)
+	peer.join(mgr, "heartbeat", model.ContentTypeMemo)
 
 	var heartbeat bytes.Buffer
 	protocol.WriteMessage(&heartbeat, uint8(model.WireHeartbeat), nil)
@@ -125,6 +127,15 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	time.Sleep(2 * cfg.SaveDebounce)
 	if hasControlKind(client, model.ControlSaved) {
 		t.Fatal("heartbeat armed persistence")
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	for _, frame := range peer.received {
+		in := bytes.NewBuffer(frame)
+		messageType, _, err := protocol.ReadMessage(in)
+		if err == nil && model.WireMessageType(messageType) == model.WireHeartbeat {
+			t.Fatal("heartbeat was broadcast to a peer")
+		}
 	}
 }
 

@@ -5,6 +5,8 @@ on:
 
 jobs:
   deploy:
+    permissions:
+      contents: read
     uses: alkem-io/github-workflows/.github/workflows/deploy-hetzner.yml@v1
     with:
       environment: test
