@@ -145,8 +145,9 @@ func TestMultiUserGateIsAdditiveAndRollingSafe(t *testing.T) {
 	}
 }
 
-// TestLiveRoomRefreshesMultiUserDecisionAtJoin pins the authoritative metadata
-// read to every new session, even while the room itself remains materialized.
+// TestLiveRoomRefreshesMultiUserDecisionAtJoin pins two ownership invariants:
+// the room never writes its stale admission cache back during a flush, and each
+// new session refreshes that cache from authoritative metadata.
 func TestLiveRoomRefreshesMultiUserDecisionAtJoin(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -168,8 +169,27 @@ func TestLiveRoomRefreshesMultiUserDecisionAtJoin(t *testing.T) {
 
 			first := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
 			first.joinExisting(mgr, id, model.ContentTypeWhiteboard)
+			first.observeUpdates()
 			if err := deps.meta.Save(t.Context(), model.Metadata{ID: id, IsMultiUser: &tc.latest}); err != nil {
 				t.Fatalf("update license decision: %v", err)
+			}
+
+			// Force the already-materialized room to persist after the external
+			// decision changed. Its cached initial value must not overwrite the
+			// server-owned value in the metadata store.
+			first.insertText("force stale room flush ")
+			waitFor(t, "stale room flush", func() bool {
+				return hasControlKind(first, model.ControlSaved)
+			})
+			stored, err := deps.meta.Load(t.Context(), id)
+			if err != nil {
+				t.Fatalf("load metadata after room flush: %v", err)
+			}
+			if stored.IsMultiUser == nil {
+				t.Fatalf("stored license decision = nil, want %v", tc.latest)
+			}
+			if *stored.IsMultiUser != tc.latest {
+				t.Fatalf("stored license decision = %v, want %v", *stored.IsMultiUser, tc.latest)
 			}
 
 			second := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")

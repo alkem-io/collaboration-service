@@ -255,8 +255,9 @@ type Room struct {
 	// fallback: when it is empty the file-service store refuses the first save
 	// rather than writing the blob somewhere the delete cascade will never reach.
 	bucketID string
-	// isMultiUser is the server-owned license decision loaded with the document
-	// metadata. Nil preserves the pre-field behaviour during a rolling deploy.
+	// isMultiUser is a read-only, transient admission cache refreshed from the
+	// server-owned decision on every join. Nil preserves the last known decision
+	// during a rolling deploy. The room never persists this field.
 	isMultiUser *bool
 	// maxConns is the room's effective connection cap. Today it is the configured
 	// fallback (RoomConfig.Limits.MaxConnsPerRoom); per-document refinement from the
@@ -2250,7 +2251,6 @@ func (r *Room) persist(ctx context.Context) {
 		AuthorizationPolicyID: r.policyID,
 		OwnerRef:              r.ownerRef,
 		StorageBucketID:       r.bucketID,
-		IsMultiUser:           r.isMultiUser,
 	}
 	if err := r.deps.Metadata.Save(ctx, meta); err != nil {
 		r.logger.Error("snapshot metadata save failed", zap.String("doc", string(r.id)), zap.Error(err))
