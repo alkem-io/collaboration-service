@@ -240,10 +240,10 @@ type JoinRequest struct {
 	Conn Conn
 }
 
-// Join attaches a connection to the room for the request's document
-// (materializing it on first connect) and returns the session plus the initial
-// frames the connection must send to start the y-protocols handshake (SyncStep1 +
-// the current awareness snapshot). The Manager evaluates per-document authZ ONCE,
+// Join attaches a pending connection to the room for the request's document
+// (materializing it on first connect) and returns the session plus the complete
+// initial frame batch. The handler activates it only after that batch is queued,
+// so no room broadcast can overtake admission. The Manager evaluates per-document authZ ONCE,
 // before the room is materialized, to set the session's collaborator mode; the room
 // enforces the connection cap (FR-024). A join can therefore be refused
 // (ErrForbidden / errRoomFull) or fail closed on an authZ error.
@@ -727,6 +727,23 @@ func (s *Session) Forward(frame []byte) {
 		_ = s.conn.Send(frame)
 	}
 	s.conn.CloseAfterDrain(end)
+}
+
+// Activate publishes a joined session to room broadcasts after its transport
+// has accepted the complete initial frame batch.
+func (s *Session) Activate(ctx context.Context) error {
+	done := make(chan error, 1)
+	if !s.room.enqueue(command{kind: cmdActivate, src: s.id, done2: done}) {
+		return errRoomUnavailable
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-s.room.done:
+		return errRoomUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Leave detaches the connection from its room. The room releases itself (after a

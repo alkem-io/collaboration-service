@@ -172,6 +172,9 @@ func (c *fakeClient) joinExisting(m *Manager, id model.DocumentID, content model
 	c.mu.Lock()
 	c.session = session
 	c.mu.Unlock()
+	if err := session.Activate(context.Background()); err != nil {
+		c.t.Fatalf("activate: %v", err)
+	}
 	for _, f := range initial {
 		_ = c.Send(f)
 	}
@@ -204,7 +207,9 @@ func (c *fakeClient) join(m *Manager, id model.DocumentID, content model.Content
 	c.mu.Lock()
 	c.session = session
 	c.mu.Unlock()
-
+	if err := session.Activate(context.Background()); err != nil {
+		c.t.Fatalf("activate: %v", err)
+	}
 	for _, f := range initial {
 		_ = c.Send(f)
 	}

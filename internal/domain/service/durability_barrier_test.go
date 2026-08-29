@@ -226,22 +226,10 @@ func TestAViewerCannotRequestDurability(t *testing.T) {
 	}
 }
 
-// TestARejectedUpdateBlocksEveryLaterBarrierOnThatConnection is the false-positive
-// regression, and it is the ORDINARY ordering rather than the convenient one.
-//
-// A barrier arrives AFTER the update it covers. So at the moment a write is
-// rejected there is usually NO outstanding request to fail — failing one only
-// covers the inverse order. Without a flag that survives the rejection, the
-// request that follows finds a clean room and is answered `persisted`, claiming
-// durability for a mutation the service explicitly refused.
-//
-// The poison is therefore per-member and STICKY: nothing in the room clears it,
-// and a reconnect gets a fresh member. This asserts the whole shape — including
-// that an unrelated member's successful save cannot launder it.
-//
-// Non-vacuity: delete the durabilityPoisoned check in handleDurabilityRequest and
-// this fails with a `persisted` for a rejected update.
-func TestARejectedUpdateBlocksEveryLaterBarrierOnThatConnection(t *testing.T) {
+// TestARejectedUpdateEndsOnlyTheOffender pins the simple terminal boundary: a
+// malformed local document cannot remain connected, while another writer and
+// the room remain usable.
+func TestARejectedUpdateEndsOnlyTheOffender(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
 	t.Cleanup(mgr.Close)
 	const doc model.DocumentID = "barrier-poison-sticky"
@@ -254,37 +242,19 @@ func TestARejectedUpdateBlocksEveryLaterBarrierOnThatConnection(t *testing.T) {
 	other.join(mgr, doc, model.ContentTypeMemo)
 	other.observeUpdates()
 
-	// A schema-invalid mutation. The connection stays open by design.
+	// A schema-invalid mutation ends the offender so it cannot replay the same
+	// malformed local state through automatic reconnect.
 	author.withDoc(func(d *ycrdt.Doc) { setMemoImage(t, d, "data:image/png;base64,iVBORw0KGgo=") })
 	waitFor(t, "the update to be rejected", func() bool {
-		return hasControlKind(author, model.ControlUpdateRejected)
+		return hasControlCode(author, model.CodeContentRefused)
 	})
 
-	// Now the barrier, on the same connection, in the ordinary order.
-	requestDurability(author, "after-rejection")
-	waitFor(t, "the barrier to be refused", func() bool { return barrierOutcome(author, "after-rejection") != nil })
-	if got := barrierOutcome(author, "after-rejection"); got.Kind != model.ControlPersisted {
-		if got.Kind != model.ControlPersistFailed {
-			t.Fatalf("barrier resolved %s, want persist-failed", got.Kind)
-		}
-	} else {
-		t.Fatal("a barrier following a REJECTED update was answered `persisted`; the service claimed durability for a mutation it refused")
-	}
-
-	// An unrelated member's successful save must not launder the poison.
+	// An unrelated member still saves normally.
 	other.insertText("a perfectly good edit from someone else")
 	requestDurability(other, "others-request")
 	waitFor(t, "the other member's barrier", func() bool { return barrierOutcome(other, "others-request") != nil })
 	if got := barrierOutcome(other, "others-request"); got.Kind != model.ControlPersisted {
 		t.Fatalf("an unpoisoned member's barrier resolved %s, want persisted", got.Kind)
-	}
-
-	requestDurability(author, "after-someone-elses-save")
-	waitFor(t, "the second poisoned request", func() bool {
-		return barrierOutcome(author, "after-someone-elses-save") != nil
-	})
-	if got := barrierOutcome(author, "after-someone-elses-save"); got.Kind == model.ControlPersisted {
-		t.Fatal("another member's successful save laundered the poison and answered the rejected session `persisted`")
 	}
 }
 

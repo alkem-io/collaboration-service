@@ -189,9 +189,9 @@ func TestSendBufferDefault(t *testing.T) {
 	}
 }
 
-// TestSlowConsumerEvicted asserts a member whose Send always errors is dropped
-// from the room (and the connection gauge decremented), so one stuck client
-// cannot stall the room.
+// TestSlowConsumerEvicted asserts a member that accepts its admission but then
+// becomes unreachable is dropped from the room (and the connection gauge
+// decremented), so one stuck client cannot stall the room.
 func TestSlowConsumerEvicted(t *testing.T) {
 	mgr, _ := testManager(t, fastConfig())
 
@@ -201,9 +201,18 @@ func TestSlowConsumerEvicted(t *testing.T) {
 
 	// A second member that always fails to receive.
 	bad := &erroringConn{}
-	_, _, err := mgr.Join(context.Background(), JoinRequest{ID: "evict", Content: model.ContentTypeMemo, Conn: bad})
+	session, initial, err := mgr.Join(context.Background(), JoinRequest{ID: "evict", Content: model.ContentTypeMemo, Conn: bad})
 	if err != nil {
 		t.Fatalf("join bad: %v", err)
+	}
+	bad.accepts.Store(int64(len(initial)))
+	for _, frame := range initial {
+		if err := bad.Send(frame); err != nil {
+			t.Fatalf("initial frame: %v", err)
+		}
+	}
+	if err := session.Activate(context.Background()); err != nil {
+		t.Fatalf("activate bad: %v", err)
 	}
 
 	// An edit triggers a broadcast; the bad member's Send errors and it is
@@ -217,11 +226,17 @@ func TestSlowConsumerEvicted(t *testing.T) {
 	waitFor(t, "good still served", func() bool { return contains(good.text(), "trigger") })
 }
 
-// erroringConn is a service.Conn whose Send always fails.
-type erroringConn struct{ calls atomic.Int64 }
+// erroringConn accepts the complete patient initial batch, then fails every
+// ordinary room send so the post-activation slow-consumer path is exercised.
+type erroringConn struct {
+	calls   atomic.Int64
+	accepts atomic.Int64
+}
 
 func (c *erroringConn) Send(_ []byte) error {
-	c.calls.Add(1)
+	if c.calls.Add(1) <= c.accepts.Load() {
+		return nil
+	}
 	return errors.New("unreachable")
 }
 

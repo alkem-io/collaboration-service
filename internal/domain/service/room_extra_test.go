@@ -141,6 +141,36 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	}
 }
 
+// TestHeartbeatDoesNotConsumeTheUpdateRateBudget keeps transport liveness alive
+// even when ordinary document traffic exhausts the sender's token bucket.
+func TestHeartbeatDoesNotConsumeTheUpdateRateBudget(t *testing.T) {
+	room := newBareRoom(t)
+	client := &captureConn{}
+	room.members[1] = roomMember{
+		id:     1,
+		conn:   client,
+		mode:   model.ModeCollaborator,
+		bucket: newTokenBucket(1, 1, time.Now),
+	}
+
+	var heartbeat bytes.Buffer
+	protocol.WriteMessage(&heartbeat, uint8(model.WireHeartbeat), nil)
+	for range 20 {
+		room.handleMessage(1, heartbeat.Bytes(), false)
+	}
+	if _, ok := room.members[1]; !ok {
+		t.Fatal("heartbeat traffic exhausted the update-rate budget")
+	}
+
+	var ordinary bytes.Buffer
+	protocol.WriteMessage(&ordinary, 99, nil)
+	room.handleMessage(1, ordinary.Bytes(), false)
+	room.handleMessage(1, ordinary.Bytes(), false)
+	if _, ok := room.members[1]; ok {
+		t.Fatal("ordinary traffic did not consume the same one-token budget")
+	}
+}
+
 // TestNopMetricsCallable asserts the no-op metrics default is safe to call (it
 // is the fallback the manager and room install when no metrics are wired).
 func TestNopMetricsCallable(t *testing.T) {

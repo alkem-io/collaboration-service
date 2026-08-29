@@ -9,8 +9,8 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
-// TestACleanReadOnlyJoinIsNotToldItsEditWasRejected is the guard against
-// manufacturing an error out of the ordinary handshake.
+// TestACleanReadOnlyJoinStaysConnected is the guard against manufacturing an
+// error out of the ordinary handshake.
 //
 // Every y-protocols client answers the server's SyncStep1 with a SyncStep2, and
 // for a viewer that reply is normally empty. Treating it as a refused mutation
@@ -20,7 +20,7 @@ import (
 //
 // A viewer with nothing to send has nothing refused. It is told it is read-only,
 // which is the frame that exists for exactly this, and nothing else.
-func TestACleanReadOnlyJoinIsNotToldItsEditWasRejected(t *testing.T) {
+func TestACleanReadOnlyJoinStaysConnected(t *testing.T) {
 	const doc model.DocumentID = "readonly-clean-join"
 	authz := &scriptedAuthZ{decide: decideBy(true, false)}
 	mgr, _ := admissionManager(t, authz, doc)
@@ -48,38 +48,14 @@ func TestACleanReadOnlyJoinIsNotToldItsEditWasRejected(t *testing.T) {
 	barrier := newFakeClient(t)
 	barrier.join(mgr, doc, model.ContentTypeMemo)
 
-	if hasControlKind(viewer, model.ControlUpdateRejected) {
-		t.Fatal("a viewer was told its update was rejected merely for joining; the handshake SyncStep2 is not an edit, and client-web responds to this by resyncing and surfacing an error")
+	if _, ended := viewer.sessionEnd(); ended {
+		t.Fatal("a viewer session ended merely for completing its read-only handshake")
 	}
 }
 
-// TestAReadOnlySessionIsTOLDItsRealEditWasRefused is the regression for a silent
-// permanent divergence, on the case that actually has a producer.
-//
-// A SyncMessageUpdate from a member that may not write was dropped with NO
-// reply. The sender had already applied that struct locally, so its next update
-// sat at clock k+1 against a server that never received k — pending forever,
-// behind a struct the server refused and never mentioned. The two documents
-// could not reconverge and nothing said why.
-//
-// The concrete producer is an established collaborator downgraded mid-session by
-// the inactivity sweep, with edits in flight. It reuses the existing
-// update-rejected signal.
-//
-// WHAT IS ASSERTED HERE IS THE SIGNAL. Client recovery is not universal and this
-// test does not claim it is: the whiteboard consumes update-rejected and resyncs,
-// while the memo control handler ignores the kind entirely. A memo client is
-// therefore told and does not yet act — a client-side residual with its own
-// owner. The service's obligation is to stop being silent, and that is what this
-// pins.
-//
-// SCOPE: this asserts the client is TOLD. It deliberately does NOT assert any
-// restoration of write access — reporting a capability and changing one are
-// different contracts, and only the first is in scope.
-//
-// Non-vacuity: delete the rejectedNotWritable branch in handleSync and this fails
-// on the wait; make it fire for Step2 as well and the sibling test above fails.
-func TestAReadOnlySessionIsTOLDItsRealEditWasRefused(t *testing.T) {
+// TestAReadOnlyWriteEndsTheOffendingSession prevents silent divergence. Viewer
+// capability is immutable for one admission; a real mutation is a protocol fault.
+func TestAReadOnlyWriteEndsTheOffendingSession(t *testing.T) {
 	const doc model.DocumentID = "readonly-write-refused"
 	authz := &scriptedAuthZ{decide: decideBy(true, false)}
 	mgr, _ := admissionManager(t, authz, doc)
@@ -88,12 +64,11 @@ func TestAReadOnlySessionIsTOLDItsRealEditWasRefused(t *testing.T) {
 	viewer.join(mgr, doc, model.ContentTypeMemo)
 	viewer.observeUpdates()
 
-	// A real edit, forwarded as a SyncMessageUpdate — what a browser sends after a
-	// mid-session downgrade.
+	// A real edit, forwarded as a SyncMessageUpdate.
 	viewer.insertText("a viewer writes")
 
 	waitFor(t, "the refused edit to be answered", func() bool {
-		return hasControlKind(viewer, model.ControlUpdateRejected)
+		return hasControlCode(viewer, model.CodeForbidden)
 	})
 }
 
@@ -116,12 +91,11 @@ func TestARefusedReadOnlyEditNeverReachesAnotherMember(t *testing.T) {
 	viewer.insertText("a viewer writes")
 
 	waitFor(t, "the refused edit to be answered", func() bool {
-		return hasControlKind(viewer, model.ControlUpdateRejected)
+		return hasControlCode(viewer, model.CodeForbidden)
 	})
 
-	// The bystander is a viewer too, and its clean join must also be quiet.
-	if hasControlKind(bystander, model.ControlUpdateRejected) {
-		t.Fatal("a bystander that only joined was told an update of its own was rejected")
+	if hasControlCode(bystander, model.CodeForbidden) {
+		t.Fatal("a bystander was ended for another viewer's refused write")
 	}
 
 	var seen string

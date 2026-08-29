@@ -1,12 +1,16 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/alkem-io/collaboration-service/internal/domain/model"
-
+	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"github.com/google/uuid"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
 
 // This file ratchets the residual findings surfaced by the full adversarial review
@@ -109,31 +113,124 @@ func TestInvRateLimitChargesMalformedFrames(t *testing.T) {
 	})
 }
 
-// TestInvJoinDropDuringBroadcastReArmsIdle — finding [5]. A join that returns success
-// but whose presence broadcast immediately drops the just-added member (its first
-// Send fails) leaves the room empty with res.err == nil. The idle re-arm must fire on
-// emptiness, not only on a refused join, or the run-loop goroutine + Y.Doc leak.
-// NON-VACUOUS: restore the `res.err != nil &&` guard on the cmdJoin re-arm and armIdle
-// is never called here.
-func TestInvJoinDropDuringBroadcastReArmsIdle(t *testing.T) {
+// TestInvJoinIsNotBroadcastVisibleBeforeActivation pins the two-phase join: no
+// ordinary room Send may reach a connection before the handler has patiently
+// queued the complete initial batch.
+func TestInvJoinIsNotBroadcastVisibleBeforeActivation(t *testing.T) {
 	room := newBareRoom(t)
 
-	// A failing joiner: handleJoin admits it (ConnOpened, res.err == nil), then
-	// broadcastControl(RoomUserChange) sends to it, the Send fails, dropMember empties
-	// the room — all before handleJoin returns success.
 	var armed bool
+	done := make(chan joinResult, 1)
 	cmd := command{
 		kind:     cmdJoin,
 		conn:     &failingConn{},
 		identity: testIdentity("a"),
-		done:     make(chan joinResult, 1),
+		done:     done,
 	}
 	room.dispatch(cmd, func() {}, func() { armed = true }, time.NewTimer(time.Hour))
 
-	if n := len(room.members); n != 0 {
-		t.Fatalf("expected the failing joiner to be dropped during the presence broadcast, got %d member(s)", n)
+	result := <-done
+	member, ok := room.members[result.id]
+	if !ok || !member.pending {
+		t.Fatalf("joined member = (%v, pending=%v), want pending", ok, member.pending)
 	}
-	if !armed {
-		t.Fatal("a join that succeeded but left the room empty must re-arm the idle timer, else the room leaks its goroutine")
+	if armed {
+		t.Fatal("a pending join was treated as an empty room")
 	}
+	if len(result.frames) == 0 {
+		t.Fatal("pending join returned no patient initial batch")
+	}
+}
+
+// A client may answer the already-queued SyncStep1 before the handler's
+// activation command reaches the room loop. Pending means broadcast-invisible,
+// not unable to complete the handshake.
+func TestInvPendingJoinHandlesHandshakeReply(t *testing.T) {
+	room := newBareRoom(t)
+	conn := &captureConn{}
+	result := room.handleJoin(conn, testIdentity("pending-handshake"), model.ModeCollaborator, nil)
+	if result.err != nil {
+		t.Fatalf("join: %v", result.err)
+	}
+
+	peer := ycrdt.NewDoc("pending-peer")
+	defer peer.Destroy()
+	room.handleMessage(result.id, protocol.EncodeSyncStep1(peer), false)
+	if conn.count() != 1 {
+		t.Fatalf("pending handshake replies = %d, want 1", conn.count())
+	}
+}
+
+func TestInvPendingLeaveReleasesReservationWithoutPresenceBroadcast(t *testing.T) {
+	room := newBareRoom(t)
+	active := &captureConn{}
+	room.members[1] = roomMember{id: 1, conn: active}
+	pending := room.handleJoin(&captureConn{}, testIdentity("pending-leave"), model.ModeCollaborator, nil)
+	if pending.err != nil {
+		t.Fatalf("join: %v", pending.err)
+	}
+
+	room.handleLeave(pending.id)
+	if _, exists := room.members[pending.id]; exists {
+		t.Fatal("pending reservation leaked after leave")
+	}
+	if active.count() != 0 {
+		t.Fatalf("pending leave emitted %d presence frame(s), want 0", active.count())
+	}
+}
+
+func TestInvActivationIsIdempotentAndRejectsUnknownMember(t *testing.T) {
+	room := newBareRoom(t)
+	metrics := &countingMetrics{}
+	room.metrics = metrics
+
+	if err := room.handleActivate(99); !errors.Is(err, errRoomUnavailable) {
+		t.Fatalf("activate absent member = %v, want errRoomUnavailable", err)
+	}
+
+	room.members[1] = roomMember{id: 1, conn: &captureConn{}, pending: true}
+	if err := room.handleActivate(1); err != nil {
+		t.Fatalf("first activation: %v", err)
+	}
+	if err := room.handleActivate(1); err != nil {
+		t.Fatalf("idempotent activation: %v", err)
+	}
+	if got := metrics.connsOpen.Load(); got != 1 {
+		t.Fatalf("ConnOpened calls = %d, want 1", got)
+	}
+}
+
+func TestInvSessionActivationAlwaysSettles(t *testing.T) {
+	t.Run("inactive room refuses before enqueue", func(t *testing.T) {
+		room := newBareRoom(t)
+		room.lc.state.Store(int32(stateDraining))
+		session := &Session{room: room, id: 1}
+		if err := session.Activate(context.Background()); !errors.Is(err, errRoomUnavailable) {
+			t.Fatalf("Activate = %v, want errRoomUnavailable", err)
+		}
+	})
+
+	t.Run("caller cancellation settles an admitted command", func(t *testing.T) {
+		room := newBareRoom(t)
+		room.lc.state.Store(int32(stateActive))
+		session := &Session{room: room, id: 1}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := session.Activate(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Activate = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("room teardown settles an admitted command", func(t *testing.T) {
+		room := newBareRoom(t)
+		room.lc.state.Store(int32(stateActive))
+		session := &Session{room: room, id: 1}
+		result := make(chan error, 1)
+		go func() { result <- session.Activate(context.Background()) }()
+		waitFor(t, "activation command enqueue", func() bool { return len(room.commands) == 1 })
+		close(room.done)
+		if err := <-result; !errors.Is(err, errRoomUnavailable) {
+			t.Fatalf("Activate = %v, want errRoomUnavailable", err)
+		}
+	})
 }

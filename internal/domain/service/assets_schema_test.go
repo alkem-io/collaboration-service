@@ -149,7 +149,7 @@ func TestPoisonFromAPeerPodIsAlsoRefused(t *testing.T) {
 // The follow-up update comes from a DIFFERENT writer, which is all this proves. The
 // rejected writer itself cannot simply continue — its refused struct leaves a gap
 // in its own clock sequence and anything it sends next stays pending behind it, so
-// it must resync. See ControlUpdateRejected.
+// its session is ended with CodeContentRefused.
 func TestTheRoomStaysUsableAfterARejection(t *testing.T) {
 	room := whiteboardRoom(t)
 	if got := room.applyUpdate(poisonUpdate(t, room, "bad", poisonLocator), updateOrigin{src: 1}); got != applyRejectedSchema {
@@ -405,25 +405,38 @@ func TestPoisonOnTheRealRoomPath(t *testing.T) {
 		t.Fatalf("the watcher's files root holds %v; a rejected update was broadcast", watcherFiles)
 	}
 
-	// The sender is told, and ONLY the sender: no other member saw the update, so
-	// telling them would leak one client's failed edit to the room. client-web keys
-	// off this exact control kind to drop and recreate its editor generation.
-	if !hasControlKind(author, model.ControlUpdateRejected) {
-		t.Fatal("the sender was not told its update was rejected; it cannot know to resync")
+	// The offender is ended, and ONLY the offender: replaying the same malformed
+	// local state on an automatic reconnect could never converge.
+	if !hasControlCode(author, model.CodeContentRefused) {
+		t.Fatal("the sender was not ended with content-refused")
 	}
-	if hasControlKind(watcher, model.ControlUpdateRejected) {
-		t.Fatal("a bystander was told about another client's rejected update")
+	// Rolling compatibility is deliberately ordered: an old consumer sees the
+	// legacy refusal before the typed end closes the socket, while a new consumer
+	// treats the typed end as authoritative. Remove this assertion together with
+	// ControlUpdateRejected after both consumers have deployed.
+	legacyIndex, typedIndex := -1, -1
+	for i, control := range author.controlMessages() {
+		if control.Kind == model.ControlUpdateRejected {
+			legacyIndex = i
+		}
+		if control.Kind == model.ControlSessionEnd && control.Code == model.CodeContentRefused {
+			typedIndex = i
+		}
+	}
+	if legacyIndex < 0 || typedIndex < 0 || legacyIndex >= typedIndex {
+		t.Fatalf("rolling refusal order legacy=%d typed=%d, want legacy before typed", legacyIndex, typedIndex)
+	}
+	if hasControlCode(watcher, model.CodeContentRefused) {
+		t.Fatal("a bystander was ended for another client's rejected update")
 	}
 	if _, err := deps.storedState(context.Background(), string(doc)); err == nil {
 		t.Fatal("a rejected update produced a stored snapshot; it was treated as dirty and persisted")
 	}
 
-	// And the room is still usable for OTHER writers: a valid write from the second
-	// member lands and reaches the author. This says nothing about the rejected
-	// writer, which must resync before it can write again.
+	// And the room is still usable for OTHER writers.
 	watcher.addElement("el-good", map[string]interface{}{"x": 42.0})
-	waitFor(t, "the valid update to reach the other member", func() bool {
-		return author.hasElement("el-good")
+	waitFor(t, "the valid update to reach another member", func() bool {
+		return barrier.hasElement("el-good")
 	})
 }
 

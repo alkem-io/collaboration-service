@@ -3,8 +3,19 @@ package service
 import (
 	"bytes"
 
+	ycrdt "github.com/antst/go-yjs/crdt"
 	"github.com/antst/go-yjs/protocol"
 )
+
+var canonicalEmptyUpdateV1 = func() []byte {
+	doc := ycrdt.NewDoc("empty-update")
+	defer doc.Destroy()
+	update, err := ycrdt.EncodeStateAsUpdate(doc, nil)
+	if err != nil {
+		panic(err)
+	}
+	return update
+}()
 
 // syncOutcome reports what dispatchSync did with a sync sub-message so the caller
 // can enforce presence/limits (T013/T014): whether the sub-message was a mutating
@@ -29,14 +40,12 @@ type syncOutcome struct {
 	// socket stays open, but the sender must resync before writing again: its
 	// refused struct leaves a gap in its own clock sequence.
 	rejectedSchema bool
-	// rejectedNotWritable is true when a genuine EDIT (SyncMessageUpdate) arrived
-	// from a member that may not write — a viewer, or a collaborator downgraded
-	// mid-session by the inactivity sweep. Like rejectedSchema it refuses the
+	// rejectedNotWritable is true when a content-bearing update arrived from a
+	// member that may not write. Like rejectedSchema it refuses the
 	// WRITE, not the writer, and the sender must resync before writing again: the
 	// refused struct leaves the same gap in its clock sequence.
 	//
-	// It is deliberately FALSE for a handshake SyncStep2, which every client sends
-	// on connect and which is normally empty for a viewer.
+	// It is deliberately FALSE only for the canonical empty handshake SyncStep2.
 	rejectedNotWritable bool
 }
 
@@ -95,17 +104,14 @@ func (r *Room) dispatchSync(framed []byte, reply *bytes.Buffer, src connID, canM
 			// case with a real producer — an in-session edit after the inactivity
 			// downgrade — and it gets the control frame.
 			//
-			// SyncMessageStep2 is the ORDINARY HANDSHAKE. Every client answers the
-			// server's Step1 with one, and for a viewer it is normally empty. Telling
-			// a viewer its update was rejected merely for connecting would make every
-			// supported read-only join surface an error and drop-and-resync its
-			// generation — churn manufactured out of a normal protocol exchange. A
-			// viewer with nothing to send has nothing refused, so it is dropped
-			// silently, exactly as before.
+			// SyncMessageStep2 is the ordinary handshake and is allowed only when its
+			// update body is canonically empty. A content-bearing Step2 is a write and
+			// must be refused explicitly like SyncMessageUpdate.
+			contentBearing := info.SyncType == protocol.SyncMessageUpdate || !bytes.Equal(info.Body, canonicalEmptyUpdateV1)
 			return syncOutcome{
 				mutating:            true,
 				applied:             false,
-				rejectedNotWritable: info.SyncType == protocol.SyncMessageUpdate,
+				rejectedNotWritable: contentBearing,
 			}, nil
 		}
 		// Enforce MaxDocBytes BEFORE committing to the live doc (FR-024): an

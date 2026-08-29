@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -62,6 +61,10 @@ func TestJoinViewerReadOnlyReasonNoUpdateAccess(t *testing.T) {
 	if reason != model.ReasonNoUpdateAccess {
 		t.Fatalf("read-only reason = %q, want %q", reason, model.ReasonNoUpdateAccess)
 	}
+	admission, ok := controlOf(viewer, model.ControlAdmission)
+	if !ok || admission.Mode != model.AdmissionRead || admission.Reason != model.ReasonNoUpdateAccess {
+		t.Fatalf("admission = %+v, want viewer/no-update-access", admission)
+	}
 }
 
 // TestJoinViewerReadOnlyReasonNotAuthenticated asserts an anonymous connection
@@ -81,6 +84,24 @@ func TestJoinViewerReadOnlyReasonNotAuthenticated(t *testing.T) {
 	reason, _ := readOnlyReason(viewer)
 	if reason != model.ReasonNotAuthenticated {
 		t.Fatalf("read-only reason = %q, want %q", reason, model.ReasonNotAuthenticated)
+	}
+	admission, ok := controlOf(viewer, model.ControlAdmission)
+	if !ok || admission.Mode != model.AdmissionRead || admission.Reason != model.ReasonNotAuthenticated {
+		t.Fatalf("admission = %+v, want viewer/not-authenticated", admission)
+	}
+}
+
+func TestWriterAdmissionIsFirstAndCarriesNoReadReason(t *testing.T) {
+	mgr, _ := testManager(t, fastConfig())
+	writer := newFakeClient(t)
+	writer.join(mgr, "writer-admission", model.ContentTypeMemo)
+
+	controls := writer.controlMessages()
+	if len(controls) == 0 || controls[0].Kind != model.ControlAdmission {
+		t.Fatalf("first control = %+v, want admission", controls)
+	}
+	if controls[0].Mode != model.AdmissionWrite || controls[0].Reason != "" {
+		t.Fatalf("writer admission = %+v, want write with no read-only reason", controls[0])
 	}
 }
 
@@ -110,7 +131,7 @@ func TestSingleUserDocumentDowngradesOnlyTheSecondWriter(t *testing.T) {
 		t.Fatalf("second writer read-only reason = %q, %v; want %q", reason, ok, model.ReasonMultiUserNotAllowed)
 	}
 	mode, ok := controlOf(second, model.ControlCollaboratorMode)
-	if !ok || mode.Mode != model.ModeViewer || mode.Reason != model.ReasonMultiUserNotAllowed {
+	if !ok || mode.Mode != string(model.ModeViewer) || mode.Reason != model.ReasonMultiUserNotAllowed {
 		t.Fatalf("second writer collaborator-mode = %+v, %v", mode, ok)
 	}
 }
@@ -272,41 +293,6 @@ func TestFullRoomStillRefreshesMultiUserDecision(t *testing.T) {
 	reason, readOnly := readOnlyReason(next)
 	if !readOnly || reason != model.ReasonMultiUserNotAllowed {
 		t.Fatalf("omitted decision after full-room refresh: readOnly=%v reason=%q", readOnly, reason)
-	}
-}
-
-// TestInactivityDowngradeReason asserts an idle collaborator downgraded to viewer
-// receives both a read-only-state{reason:inactivity} and a collaborator-mode
-// {mode:viewer, reason:inactivity} control (OPEN-1).
-func TestInactivityDowngradeReason(t *testing.T) {
-	cfg := fastConfig()
-	cfg.CollaboratorInactivity = 30 * time.Millisecond
-	mgr, _ := testManager(t, cfg)
-
-	a := newFakeClientWithIdentity(t, "88888888-8888-8888-8888-888888888888")
-	a.join(mgr, "downgrade-reason", model.ContentTypeMemo)
-	a.observeUpdates()
-	a.insertText("active ") // one mutation, then go idle
-
-	waitFor(t, "collaborator-mode downgrade control", func() bool {
-		_, ok := controlOf(a, model.ControlCollaboratorMode)
-		return ok
-	})
-
-	ro, ok := readOnlyReason(a)
-	if !ok {
-		t.Fatal("no read-only-state control on inactivity downgrade")
-	}
-	if ro != model.ReasonInactivity {
-		t.Fatalf("read-only reason = %q, want %q", ro, model.ReasonInactivity)
-	}
-
-	cm, _ := controlOf(a, model.ControlCollaboratorMode)
-	if cm.Mode != model.ModeViewer {
-		t.Fatalf("collaborator-mode mode = %q, want viewer", cm.Mode)
-	}
-	if cm.Reason != model.ReasonInactivity {
-		t.Fatalf("collaborator-mode reason = %q, want %q", cm.Reason, model.ReasonInactivity)
 	}
 }
 

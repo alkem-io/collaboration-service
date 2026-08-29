@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +102,77 @@ func TestCloseDeletedDoesNotHangWhenRoomTearsDownAfterEnqueue(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("CloseDeleted hung after the room tore down with its command unprocessed")
 	}
+}
+
+// CloseDeleted must settle truthfully for every boundary around its one room
+// command: refusal before enqueue, caller cancellation after enqueue, a room
+// result, and the room's own bounded-queue deadline. These are broker delivery
+// outcomes, so hanging or converting one into success would either block the
+// lifecycle consumer or acknowledge a deletion whose live room remains open.
+func TestCloseDeletedCommandBoundaries(t *testing.T) {
+	newWedge := func(t *testing.T, id model.DocumentID) (*Manager, *Room) {
+		t.Helper()
+		m, deps := testManager(t, RoomConfig{
+			SendBuffer: 16, SaveDebounce: time.Hour, IdleTimeout: time.Hour, BackendTimeout: 5 * time.Second,
+		})
+		return m, wedgeRoom(t, m, deps, id)
+	}
+	fillCommands := func(room *Room) {
+		for i := 0; i < cap(room.commands); i++ {
+			room.commands <- command{kind: cmdMessage}
+		}
+	}
+
+	t.Run("inactive room is already closed", func(t *testing.T) {
+		m, room := newWedge(t, "inactive-close")
+		room.lc.state.Store(int32(stateDraining))
+		if err := m.CloseDeleted(context.Background(), room.id); err != nil {
+			t.Fatalf("CloseDeleted = %v, want success for an already-closing room", err)
+		}
+	})
+
+	t.Run("caller cancellation while enqueue is blocked is returned", func(t *testing.T) {
+		m, room := newWedge(t, "blocked-canceled-close")
+		fillCommands(room)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := m.CloseDeleted(ctx, room.id); !errors.Is(err, context.Canceled) {
+			t.Fatalf("CloseDeleted = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("caller cancellation after enqueue is returned", func(t *testing.T) {
+		m, room := newWedge(t, "accepted-canceled-close")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := m.CloseDeleted(ctx, room.id); !errors.Is(err, context.Canceled) {
+			t.Fatalf("CloseDeleted = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("room result is propagated", func(t *testing.T) {
+		m, room := newWedge(t, "room-result-close")
+		want := errors.New("room close failed")
+		result := make(chan error, 1)
+		go func() { result <- m.CloseDeleted(context.Background(), room.id) }()
+		waitFor(t, "close command enqueue", func() bool { return len(room.commands) == 1 })
+		cmd := <-room.commands
+		cmd.done2 <- want
+		if err := <-result; !errors.Is(err, want) {
+			t.Fatalf("CloseDeleted = %v, want %v", err, want)
+		}
+	})
+
+	t.Run("room enqueue deadline is transient", func(t *testing.T) {
+		m, room := newWedge(t, "enqueue-deadline-close")
+		fillCommands(room)
+		previous := enqueueDeadline
+		enqueueDeadline = time.Millisecond
+		defer func() { enqueueDeadline = previous }()
+		if err := m.CloseDeleted(context.Background(), room.id); !errors.Is(err, errRoomUnavailable) {
+			t.Fatalf("CloseDeleted = %v, want errRoomUnavailable", err)
+		}
+	})
 }
 
 // gateStore wraps a CheckpointStore and holds SaveCheckpoint open until release

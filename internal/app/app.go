@@ -312,7 +312,6 @@ func buildRouter(cfg *config.Config, deps service.Deps, logger *zap.Logger) (htt
 		// would then tear down a healthy room and discard its edits.
 		FlushFailureThreshold: cfg.Limits.FlushFailureThreshold,
 	}
-	roomCfg.CollaboratorInactivity = time.Duration(cfg.Limits.CollaboratorInactivitySeconds) * time.Second
 	roomCfg.ContributionWindow = time.Duration(cfg.Limits.ContributionWindowSeconds) * time.Second
 	roomCfg.IdleTimeout = time.Duration(cfg.Limits.IdleReleaseSeconds) * time.Second
 	// Apply unconditionally: 0 is a meaningful value (disables periodic saves —

@@ -169,6 +169,8 @@ func TestCloseStatusPerCode(t *testing.T) {
 		model.CodeDocumentSizeLimitExceeded: websocket.StatusPolicyViolation,
 		model.CodeDocumentDeleted:           websocket.StatusPolicyViolation,
 		model.CodeEditsNotSaved:             websocket.StatusPolicyViolation,
+		model.CodeContentRefused:            websocket.StatusPolicyViolation,
+		model.CodeForbidden:                 websocket.StatusPolicyViolation,
 		// Member-scoped and transient, like the rate limit: the client should retry,
 		// so it gets 1013 rather than a policy violation. The two remain
 		// distinguishable by the close reason, which is always the code itself.

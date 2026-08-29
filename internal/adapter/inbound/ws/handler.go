@@ -148,6 +148,9 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 
 	wc := newWSConn(connCtx, conn, h.Manager.SendBuffer(), h.Logger)
 	defer wc.close()
+	// Start the one writer before joining so the patient initial batch can drain
+	// immediately even with a one-slot send buffer.
+	wc.startWriter()
 
 	session, initial, err := h.Manager.Join(connCtx, service.JoinRequest{
 		ID: id, Content: content, Identity: identity, Conn: wc,
@@ -163,10 +166,6 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 	}
 	defer session.Leave()
 
-	// Start the writer before enqueuing any frames so the bounded send queue is
-	// drained as it fills rather than after the batch is complete.
-	wc.startWriter()
-
 	// Drive the handshake: the server sends SyncStep1 (+ awareness snapshot) so
 	// the client replies with SyncStep2 and its own SyncStep1.
 	//
@@ -180,6 +179,9 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 		if err := wc.sendInitial(sendCtx, frame); err != nil {
 			return
 		}
+	}
+	if err := session.Activate(sendCtx); err != nil {
+		return
 	}
 
 	h.readLoop(connCtx, conn, session)
@@ -214,7 +216,7 @@ func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *s
 func joinCloseStatus(err error) (websocket.StatusCode, string) {
 	switch {
 	case errors.Is(err, service.ErrRoomFull):
-		return websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached
+		return websocket.StatusTryAgainLater, model.ReasonRoomCapacityReached
 	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrDocumentUnknown):
 		// ONE refusal for both. A separate status or reason for "no such document"
 		// would let anyone holding a socket enumerate which document ids exist by
