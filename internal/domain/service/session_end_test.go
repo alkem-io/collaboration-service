@@ -46,6 +46,8 @@ func TestEverySessionEndCodeCarriesScopeAndDisposition(t *testing.T) {
 		// CLOSED, so emitting it to a client that does not know it would turn a
 		// transient fault into a permanent disconnect.
 		model.CodeUpdateNotAccepted: {Code: model.CodeUpdateNotAccepted, Scope: model.ScopeMember, Disposition: model.DispositionTransient},
+		model.CodeContentRefused:    {Code: model.CodeContentRefused, Scope: model.ScopeMember, Disposition: model.DispositionManual},
+		model.CodeForbidden:         {Code: model.CodeForbidden, Scope: model.ScopeMember, Disposition: model.DispositionTerminal},
 	}
 
 	codes := model.SessionEndCodes()

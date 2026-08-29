@@ -12,9 +12,6 @@ func TestProtectiveDefaultsDoNotChangeOrdinaryTraffic(t *testing.T) {
 	}
 
 	room := DefaultRoomConfig()
-	if room.CollaboratorInactivity != 0 {
-		t.Fatalf("collaborator inactivity default = %v, want disabled", room.CollaboratorInactivity)
-	}
 	if room.ContributionWindow != 10*time.Minute {
 		t.Fatalf("contribution window default = %v, want 10m", room.ContributionWindow)
 	}

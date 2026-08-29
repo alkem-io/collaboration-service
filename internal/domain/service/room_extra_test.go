@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
 )
+
+const heartbeatFixtureHex = "050731353030302d31" // type 5 + VarString("15000-1")
 
 // failingMetaSave is a MetadataStore whose Save errors, to drive the
 // save-error-on-metadata branch of persist (R7).
@@ -110,9 +113,11 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	peer := newFakeClient(t)
 	peer.join(mgr, "heartbeat", model.ContentTypeMemo)
 
-	var heartbeat bytes.Buffer
-	protocol.WriteMessage(&heartbeat, uint8(model.WireHeartbeat), nil)
-	client.session.Forward(heartbeat.Bytes())
+	heartbeat, err := hex.DecodeString(heartbeatFixtureHex)
+	if err != nil {
+		t.Fatalf("decode heartbeat fixture: %v", err)
+	}
+	client.session.Forward(heartbeat)
 
 	waitFor(t, "heartbeat echo", func() bool {
 		client.mu.Lock()
@@ -120,7 +125,7 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 		for _, frame := range client.received {
 			in := bytes.NewBuffer(frame)
 			messageType, _, err := protocol.ReadMessage(in)
-			if err == nil && model.WireMessageType(messageType) == model.WireHeartbeat {
+			if err == nil && model.WireMessageType(messageType) == model.WireHeartbeat && bytes.Equal(frame, heartbeat) {
 				return true
 			}
 		}
@@ -138,6 +143,52 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 		if err == nil && model.WireMessageType(messageType) == model.WireHeartbeat {
 			t.Fatal("heartbeat was broadcast to a peer")
 		}
+	}
+}
+
+// TestHeartbeatBypassesTheRoomQueueAndUpdateRateBudget keeps transport liveness
+// independent of the shared document-command queue and its update-rate budget.
+func TestHeartbeatBypassesTheRoomQueueAndUpdateRateBudget(t *testing.T) {
+	room := newBareRoom(t)
+	client := &captureConn{}
+	room.members[1] = roomMember{
+		id:     1,
+		conn:   client,
+		mode:   model.ModeCollaborator,
+		bucket: newTokenBucket(1, 1, time.Now),
+	}
+
+	heartbeat, err := hex.DecodeString(heartbeatFixtureHex)
+	if err != nil {
+		t.Fatalf("decode heartbeat fixture: %v", err)
+	}
+	for len(room.commands) < cap(room.commands) {
+		room.commands <- command{kind: cmdLeave}
+	}
+	session := &Session{room: room, id: 1, conn: client}
+	for range 20 {
+		session.Forward(heartbeat)
+	}
+	if _, ok := room.members[1]; !ok {
+		t.Fatal("heartbeat traffic exhausted the update-rate budget")
+	}
+	if got := client.count(); got != 20 {
+		t.Fatalf("heartbeat echoes = %d, want 20 while the room queue is full", got)
+	}
+
+	var oversizedHeartbeat bytes.Buffer
+	protocol.WriteMessage(&oversizedHeartbeat, uint8(model.WireHeartbeat), make([]byte, maxHeartbeatFrameBytes))
+	session.Forward(oversizedHeartbeat.Bytes())
+	if got := client.count(); got != 20 {
+		t.Fatalf("oversized heartbeat was echoed; frame count = %d, want 20", got)
+	}
+
+	var ordinary bytes.Buffer
+	protocol.WriteMessage(&ordinary, 99, nil)
+	room.handleMessage(1, ordinary.Bytes(), false)
+	room.handleMessage(1, ordinary.Bytes(), false)
+	if _, ok := room.members[1]; ok {
+		t.Fatal("ordinary traffic did not consume the same one-token budget")
 	}
 }
 

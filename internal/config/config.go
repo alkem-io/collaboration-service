@@ -128,10 +128,6 @@ type LimitsConfig struct {
 	UpdateRatePerSec int
 	// UpdateBurst is the token-bucket depth (UPDATE_BURST, default = rate).
 	UpdateBurst int
-	// CollaboratorInactivitySeconds downgrades an idle collaborator to viewer
-	// (COLLABORATOR_INACTIVITY_SECONDS, default 0/off). The current activity model
-	// counts document mutations, not volatile cursor activity.
-	CollaboratorInactivitySeconds int
 	// ContributionWindowSeconds is the contribution-metric flush cadence
 	// (CONTRIBUTION_WINDOW_SECONDS, default 600s; 0 disables).
 	ContributionWindowSeconds int
@@ -286,14 +282,13 @@ const (
 	// added, so the snapshot would be refused by the transport after passing our
 	// own budget check — the document would be accepted and then permanently
 	// unsaveable. 30 MiB leaves headroom for framing.
-	defaultMaxDocBytes               = 30 << 20 // 30 MiB
-	defaultMaxConnsPerRoom           = 50
-	defaultUpdateRatePerSec          = 0
-	defaultCollaboratorInactivitySec = 0
-	defaultContributionWindowSec     = 600
-	defaultIdleReleaseSec            = 30   // matches service.DefaultRoomConfig().IdleTimeout
-	defaultSaveDebounceMillis        = 2000 // matches service.DefaultRoomConfig().SaveDebounce
-	defaultFlushFailureThreshold     = 5    // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold
+	defaultMaxDocBytes           = 30 << 20 // 30 MiB
+	defaultMaxConnsPerRoom       = 50
+	defaultUpdateRatePerSec      = 0
+	defaultContributionWindowSec = 600
+	defaultIdleReleaseSec        = 30   // matches service.DefaultRoomConfig().IdleTimeout
+	defaultSaveDebounceMillis    = 2000 // matches service.DefaultRoomConfig().SaveDebounce
+	defaultFlushFailureThreshold = 5    // matches service.DefaultRoomConfig().Limits.FlushFailureThreshold
 )
 
 // loadLimitsConfig reads the Wave-3 enforcement/presence tunables, applying the
@@ -310,7 +305,6 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		{"MAX_CONNS_PER_ROOM", defaultMaxConnsPerRoom, &lc.MaxConnsPerRoom},
 		{"UPDATE_RATE_PER_SEC", defaultUpdateRatePerSec, &lc.UpdateRatePerSec},
 		{"UPDATE_BURST", 0, &lc.UpdateBurst},
-		{"COLLABORATOR_INACTIVITY_SECONDS", defaultCollaboratorInactivitySec, &lc.CollaboratorInactivitySeconds},
 		{"CONTRIBUTION_WINDOW_SECONDS", defaultContributionWindowSec, &lc.ContributionWindowSeconds},
 		{"IDLE_RELEASE_SECONDS", defaultIdleReleaseSec, &lc.IdleReleaseSeconds},
 		{"SAVE_DEBOUNCE_MILLIS", defaultSaveDebounceMillis, &lc.SaveDebounceMillis},
@@ -323,15 +317,14 @@ func loadLimitsConfig() (LimitsConfig, error) {
 		*f.dst = v
 	}
 	for name, v := range map[string]int{
-		"MAX_DOC_BYTES":                   lc.MaxDocBytes,
-		"MAX_CONNS_PER_ROOM":              lc.MaxConnsPerRoom,
-		"UPDATE_RATE_PER_SEC":             lc.UpdateRatePerSec,
-		"UPDATE_BURST":                    lc.UpdateBurst,
-		"COLLABORATOR_INACTIVITY_SECONDS": lc.CollaboratorInactivitySeconds,
-		"CONTRIBUTION_WINDOW_SECONDS":     lc.ContributionWindowSeconds,
-		"IDLE_RELEASE_SECONDS":            lc.IdleReleaseSeconds,
-		"SAVE_DEBOUNCE_MILLIS":            lc.SaveDebounceMillis,
-		"FLUSH_FAILURE_THRESHOLD":         lc.FlushFailureThreshold,
+		"MAX_DOC_BYTES":               lc.MaxDocBytes,
+		"MAX_CONNS_PER_ROOM":          lc.MaxConnsPerRoom,
+		"UPDATE_RATE_PER_SEC":         lc.UpdateRatePerSec,
+		"UPDATE_BURST":                lc.UpdateBurst,
+		"CONTRIBUTION_WINDOW_SECONDS": lc.ContributionWindowSeconds,
+		"IDLE_RELEASE_SECONDS":        lc.IdleReleaseSeconds,
+		"SAVE_DEBOUNCE_MILLIS":        lc.SaveDebounceMillis,
+		"FLUSH_FAILURE_THRESHOLD":     lc.FlushFailureThreshold,
 	} {
 		if v < 0 {
 			return LimitsConfig{}, fmt.Errorf("%s must be >= 0 (0 disables)", name)

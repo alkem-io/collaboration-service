@@ -200,11 +200,14 @@ func TestMemoPoisonOnTheRealRoomPath(t *testing.T) {
 		t.Fatalf("the watcher holds %d image node(s); a rejected update was broadcast", watcherImages)
 	}
 
-	if !hasControlKind(author, model.ControlUpdateRejected) {
-		t.Fatal("the sender was not told its update was rejected; it cannot know to resync")
+	if !hasControlCode(author, model.CodeContentRefused) {
+		t.Fatal("the sender was not ended with content-refused")
 	}
-	if hasControlKind(watcher, model.ControlUpdateRejected) {
-		t.Fatal("a bystander was told about another client's rejected update")
+	if !hasControlKind(author, model.ControlUpdateRejected) {
+		t.Fatal("the sender did not receive the legacy update-rejected compatibility signal")
+	}
+	if hasControlCode(watcher, model.CodeContentRefused) {
+		t.Fatal("a bystander was ended for another client's rejected update")
 	}
 	// A snapshot legitimately EXISTS here, and asserting its absence would be wrong:
 	// the fixture emits the paragraph and the image as two updates, and the

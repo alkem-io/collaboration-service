@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -28,52 +27,7 @@ func (r *Room) disconnect(id connID, code model.SessionEndCode) {
 	}
 	m.conn.CloseAfterDrain(end)
 	if r.dropMember(id) {
-		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomUserChange, Users: len(r.members)})
-	}
-}
-
-// sweepInactive downgrades every collaborator that has not mutated the document
-// within CollaboratorInactivity to viewer, emitting a read-only-state control so
-// the client disables local editing (FR-014). The optional downgrade currently
-// measures document mutations, not volatile cursor activity. It carries the
-// `inactivity` reason (OPEN-1) on both the
-// read-only-state and the additive collaborator-mode frame, so the client mirrors
-// today's collaborator-mode UX. Runs on the room loop, so the member map access is
-// race-free.
-func (r *Room) sweepInactive() {
-	if r.cfg.CollaboratorInactivity <= 0 {
-		return
-	}
-	cutoff := time.Now().Add(-r.cfg.CollaboratorInactivity)
-	for id, m := range r.members {
-		if m.mode != model.ModeCollaborator || m.lastActivity.After(cutoff) {
-			continue
-		}
-		m.mode = model.ModeViewer
-		r.members[id] = m
-		r.sendModeDowngrade(m, model.ReasonInactivity)
-	}
-}
-
-// sendModeDowngrade tells a single member it is now read-only for the given
-// reason (OPEN-1). It sends the read-only-state frame (backward-compatible: a
-// client only reading readOnly keeps working) carrying the reason code, plus the
-// additive collaborator-mode frame {mode: viewer, reason} the WS-D client uses to
-// preserve its collaborator-mode UX granularity.
-func (r *Room) sendModeDowngrade(m roomMember, reason model.CollaboratorModeReason) {
-	if frame := encodeControl(model.ControlMessage{
-		Kind:     model.ControlReadOnlyState,
-		ReadOnly: model.ReadOnlyState(true),
-		Reason:   reason,
-	}); frame != nil {
-		r.sendMember(m, frame)
-	}
-	if frame := encodeControl(model.ControlMessage{
-		Kind:   model.ControlCollaboratorMode,
-		Mode:   model.ModeViewer,
-		Reason: reason,
-	}); frame != nil {
-		r.sendMember(m, frame)
+		r.broadcastControl(model.ControlMessage{Kind: model.ControlRoomUserChange, Users: r.activeMemberCount()})
 	}
 }
 
@@ -190,7 +144,7 @@ func (r *Room) settleContributionFlight() {
 // collected at all.
 //
 // A zero/negative window DISABLES the feature rather than meaning "every tick".
-// ONE guard, at the only producer (recordActivity), is what turns it off
+// ONE guard, at the only producer (recordContribution), is what turns it off
 // everywhere — deliberately, rather than repeating the check on each emit path:
 //   - periodic: newOptionalTicker STOPS the timer at this setting, so the tick
 //     never fires;

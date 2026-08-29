@@ -50,6 +50,9 @@ const (
 type ControlKind string
 
 const (
+	// ControlAdmission is the first frame of every accepted session. It makes the
+	// immutable read/write capability explicit before either side starts Yjs sync.
+	ControlAdmission ControlKind = "admission"
 	// ControlSaved signals a debounced snapshot was persisted (R7). Carries the
 	// persisted Version.
 	ControlSaved ControlKind = "saved"
@@ -73,27 +76,9 @@ const (
 	// ControlRoomUserChange notifies clients that the room's participant set
 	// changed (join/leave); carries the current participant count.
 	ControlRoomUserChange ControlKind = "room-user-change"
-	// ControlUpdateRejected tells one client its update was refused and NOT applied.
-	// It is sent only to the sender: no other member saw the update, and telling
-	// them about it would leak one client's failed edit to the room.
-	//
-	// The server does not close the connection: a rejected update is a refused
-	// write, not grounds for disconnection.
-	//
-	// But the SENDER cannot simply carry on. The server is missing that client's
-	// struct at clock k, so its next incremental struct at k+1 arrives with a gap in
-	// front of it and stays pending rather than materializing. The sender must
-	// discard that local generation and resync — recreate the editor — before it can
-	// write again. That recovery is the client's, and this message is what tells it
-	// to start.
-	//
-	// CONSUMED by `client-web`: 8d69ef4ff handles this kind by discarding the editor
-	// generation and reloading server state, 5c6f4600f corrects its teardown. So the
-	// contract is closed on both sides — the server refuses and says so, the client
-	// resets rather than keeping an edit the document does not contain.
-	//
-	// The literal matters: the client keys off this exact kind string. Renaming it is
-	// a cross-repo change, not a local one.
+	// ControlUpdateRejected is emitted alongside the typed content-refused end for
+	// one rolling-deployment window. Older browser bundles use it to stop editing;
+	// new consumers use the session end. Remove after both consumers deploy.
 	ControlUpdateRejected ControlKind = "update-rejected"
 	// ControlSessionEnd tells a client its session is over, and why, in TYPED
 	// fields it can branch on: Code (what happened), Scope (whether the whole
@@ -129,6 +114,19 @@ const (
 	// never an outcome the server intends, so a caller that sees silence has
 	// grounds to treat the barrier as failed rather than guess.
 	ControlPersistFailed ControlKind = "persist-failed"
+)
+
+// AdmissionMode is the immutable content capability declared before sync. It is
+// deliberately not CollaboratorMode: admission is a transport contract about
+// read/write, while viewer/collaborator is legacy product vocabulary retained
+// only by ControlCollaboratorMode during the rolling compatibility window.
+type AdmissionMode = string
+
+const (
+	// AdmissionRead grants sync without document mutation.
+	AdmissionRead AdmissionMode = "read"
+	// AdmissionWrite grants sync and document mutation.
+	AdmissionWrite AdmissionMode = "write"
 )
 
 // SessionEndCode names WHAT ended a session. It is a closed set: every value is
@@ -195,6 +193,13 @@ const (
 	// unknown and fails CLOSED (terminal, no reconnect), which is the opposite of
 	// the intent. Clients must understand it BEFORE this service emits it.
 	CodeUpdateNotAccepted SessionEndCode = "update-not-accepted"
+	// CodeContentRefused means a client update failed the content contract before
+	// application. Replaying the same local state would be refused again, so the
+	// client retains it for export and reloads only by explicit user action.
+	CodeContentRefused SessionEndCode = "content-refused"
+	// CodeForbidden means a read-admitted connection attempted to mutate content.
+	// Honest clients cannot produce it; a buggy or malicious viewer is terminated.
+	CodeForbidden SessionEndCode = "forbidden"
 )
 
 // SessionEndScope says WHO the end applies to, so a client can tell "the
@@ -248,6 +253,8 @@ var sessionEndTable = map[SessionEndCode]SessionEnd{
 	CodeEditsNotSaved:             {CodeEditsNotSaved, ScopeDocument, DispositionTerminal},
 	CodeServerShutdown:            {CodeServerShutdown, ScopeDocument, DispositionTransient},
 	CodeUpdateNotAccepted:         {CodeUpdateNotAccepted, ScopeMember, DispositionTransient},
+	CodeContentRefused:            {CodeContentRefused, ScopeMember, DispositionManual},
+	CodeForbidden:                 {CodeForbidden, ScopeMember, DispositionTerminal},
 }
 
 // NewSessionEnd resolves a code to its full session-end intent. An unknown code
@@ -341,9 +348,8 @@ type ControlMessage struct {
 	// Kind (and on Code for a session end), never on this prose, so it may be
 	// reworded freely.
 	//
-	// Carried today by ControlSaveError (a flush failed), ControlUpdateRejected (a
-	// write was refused — schema violation, or a session that may not write), and
-	// ControlPersistFailed (a durability request cannot be satisfied). Listed
+	// Carried today by ControlSaveError, ControlPersistFailed, and the temporary
+	// ControlUpdateRejected compatibility frame. Listed
 	// because the set has already drifted twice; the RULE is what governs, so a
 	// new refusal kind should carry it without needing this comment changed.
 	Error string `json:"error,omitempty"`
@@ -368,9 +374,10 @@ type ControlMessage struct {
 	// string aliases, so the wire field is one string. It is additive and
 	// backward-compatible: clients that ignore it still work. Omitted when empty.
 	Reason string `json:"reason,omitempty"`
-	// Mode is the resulting collaborator mode for ControlCollaboratorMode
-	// (viewer/collaborator). Omitted when empty.
-	Mode CollaboratorMode `json:"mode,omitempty"`
+	// Mode is kind-specific: ControlAdmission carries read/write, while the
+	// temporary ControlCollaboratorMode compatibility frame carries the legacy
+	// viewer/collaborator vocabulary. Consumers always branch on Kind first.
+	Mode string `json:"mode,omitempty"`
 	// Users is the current participant count for ControlRoomUserChange.
 	Users int `json:"users,omitempty"`
 	// Code is the SessionEndCode on a ControlSessionEnd: what ended the session.

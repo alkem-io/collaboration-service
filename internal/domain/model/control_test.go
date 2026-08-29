@@ -80,7 +80,7 @@ func TestControlMessageReadOnlyReason(t *testing.T) {
 func TestControlMessageCollaboratorMode(t *testing.T) {
 	b, err := json.Marshal(ControlMessage{
 		Kind:   ControlCollaboratorMode,
-		Mode:   ModeViewer,
+		Mode:   string(ModeViewer),
 		Reason: ReasonInactivity,
 	})
 	if err != nil {
