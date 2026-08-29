@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -176,6 +177,47 @@ func TestInvPendingLeaveReleasesReservationWithoutPresenceBroadcast(t *testing.T
 	}
 	if active.count() != 0 {
 		t.Fatalf("pending leave emitted %d presence frame(s), want 0", active.count())
+	}
+}
+
+func TestInvActivationIsTheOnlyOwnerOfAuthoritativeParticipantCount(t *testing.T) {
+	room := newBareRoom(t)
+	a := newFakeClient(t)
+	b := newFakeClient(t)
+
+	joinA := room.handleJoin(a, testIdentity("pending-a"), model.ModeCollaborator, nil)
+	joinB := room.handleJoin(b, testIdentity("pending-b"), model.ModeCollaborator, nil)
+	for _, frame := range joinA.frames {
+		_ = a.Send(frame)
+	}
+	for _, frame := range joinB.frames {
+		_ = b.Send(frame)
+	}
+	if hasControlKind(a, model.ControlRoomUserChange) || hasControlKind(b, model.ControlRoomUserChange) {
+		t.Fatal("a pending join received an optimistic participant count")
+	}
+
+	if err := room.handleActivate(joinA.id); err != nil {
+		t.Fatalf("activate A: %v", err)
+	}
+	if err := room.handleActivate(joinB.id); err != nil {
+		t.Fatalf("activate B: %v", err)
+	}
+
+	counts := func(client *fakeClient) []int {
+		var result []int
+		for _, control := range client.controlMessages() {
+			if control.Kind == model.ControlRoomUserChange {
+				result = append(result, control.Users)
+			}
+		}
+		return result
+	}
+	if got := counts(a); !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("A participant counts = %v, want [1 2]", got)
+	}
+	if got := counts(b); !slices.Equal(got, []int{2}) {
+		t.Fatalf("B participant counts = %v, want [2]", got)
 	}
 }
 

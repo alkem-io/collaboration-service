@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
+	"github.com/antst/go-yjs/protocol"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -656,6 +658,19 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 // serialized processing. Non-blocking from the caller's view beyond the room's
 // command-channel buffer.
 func (s *Session) Forward(frame []byte) {
+	// Heartbeat is transport-local liveness. Validate and echo it through this
+	// session's already-serialized outbound port instead of occupying the room's
+	// shared command queue; a heartbeat flood can then shed only its own slow
+	// connection, never starve document commands for other collaborators.
+	in := bytes.NewBuffer(frame)
+	msgType, payload, err := protocol.ReadMessage(in)
+	if err == nil && model.WireMessageType(msgType) == model.WireHeartbeat {
+		if len(payload) == 0 && s.conn != nil {
+			_ = s.conn.Send(frame)
+		}
+		return
+	}
+
 	// OBSERVE THE REFUSAL, AND ACT ON ITS REASON. This used to discard enqueue's
 	// bool entirely: the frame vanished, the client was told nothing, and the
 	// session carried on editing a generation the server never received.

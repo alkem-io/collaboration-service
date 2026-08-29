@@ -135,7 +135,7 @@ func newTestServerWithManager(t *testing.T, mgr *service.Manager) string {
 }
 
 // TestRefusedJoinClosesSocket asserts that a second connection to a room at its
-// connection cap is upgraded then closed with a policy-violation status (FR-024,
+// connection cap is upgraded then closed with a retryable status (FR-024,
 // the handler's joinCloseStatus path).
 func TestRefusedJoinClosesSocket(t *testing.T) {
 	deps := service.Deps{
@@ -173,7 +173,7 @@ func TestRefusedJoinClosesSocket(t *testing.T) {
 	if readErr == nil {
 		t.Fatal("second connection should have been closed by the server")
 	}
-	// A refused-on-full join closes with policy-violation (joinCloseStatus); assert
+	// A refused-on-full join closes with try-again-later (joinCloseStatus); assert
 	// that specific status rather than accepting any read error, so a regression in
 	// the close mapping is caught.
 	if status := websocket.CloseStatus(readErr); status != websocket.StatusTryAgainLater {

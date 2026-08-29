@@ -141,9 +141,9 @@ func TestHeartbeatRoundTripsToSenderWithoutMutatingTheDocument(t *testing.T) {
 	}
 }
 
-// TestHeartbeatDoesNotConsumeTheUpdateRateBudget keeps transport liveness alive
-// even when ordinary document traffic exhausts the sender's token bucket.
-func TestHeartbeatDoesNotConsumeTheUpdateRateBudget(t *testing.T) {
+// TestHeartbeatBypassesTheRoomQueueAndUpdateRateBudget keeps transport liveness
+// independent of the shared document-command queue and its update-rate budget.
+func TestHeartbeatBypassesTheRoomQueueAndUpdateRateBudget(t *testing.T) {
 	room := newBareRoom(t)
 	client := &captureConn{}
 	room.members[1] = roomMember{
@@ -155,11 +155,25 @@ func TestHeartbeatDoesNotConsumeTheUpdateRateBudget(t *testing.T) {
 
 	var heartbeat bytes.Buffer
 	protocol.WriteMessage(&heartbeat, uint8(model.WireHeartbeat), nil)
+	for len(room.commands) < cap(room.commands) {
+		room.commands <- command{kind: cmdLeave}
+	}
+	session := &Session{room: room, id: 1, conn: client}
 	for range 20 {
-		room.handleMessage(1, heartbeat.Bytes(), false)
+		session.Forward(heartbeat.Bytes())
 	}
 	if _, ok := room.members[1]; !ok {
 		t.Fatal("heartbeat traffic exhausted the update-rate budget")
+	}
+	if got := client.count(); got != 20 {
+		t.Fatalf("heartbeat echoes = %d, want 20 while the room queue is full", got)
+	}
+
+	var invalidHeartbeat bytes.Buffer
+	protocol.WriteMessage(&invalidHeartbeat, uint8(model.WireHeartbeat), []byte("payload-not-allowed"))
+	session.Forward(invalidHeartbeat.Bytes())
+	if got := client.count(); got != 20 {
+		t.Fatalf("invalid heartbeat was echoed; frame count = %d, want 20", got)
 	}
 
 	var ordinary bytes.Buffer

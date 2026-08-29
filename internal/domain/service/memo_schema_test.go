@@ -203,6 +203,9 @@ func TestMemoPoisonOnTheRealRoomPath(t *testing.T) {
 	if !hasControlCode(author, model.CodeContentRefused) {
 		t.Fatal("the sender was not ended with content-refused")
 	}
+	if !hasControlKind(author, model.ControlUpdateRejected) {
+		t.Fatal("the sender did not receive the legacy update-rejected compatibility signal")
+	}
 	if hasControlCode(watcher, model.CodeContentRefused) {
 		t.Fatal("a bystander was ended for another client's rejected update")
 	}

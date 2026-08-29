@@ -48,7 +48,7 @@ func TestACleanReadOnlyJoinStaysConnected(t *testing.T) {
 	barrier := newFakeClient(t)
 	barrier.join(mgr, doc, model.ContentTypeMemo)
 
-	if _, ended := viewer.sessionEnd(); ended {
+	if end, _ := viewer.sessionEnd(); end != nil {
 		t.Fatal("a viewer session ended merely for completing its read-only handshake")
 	}
 }

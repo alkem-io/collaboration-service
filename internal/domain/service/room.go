@@ -1154,9 +1154,9 @@ func (r *Room) handleActivate(id connID) error {
 	member.pending = false
 	r.members[id] = member
 	r.metrics.ConnOpened()
-	r.broadcastControlExcept(model.ControlMessage{
+	r.broadcastControl(model.ControlMessage{
 		Kind: model.ControlRoomUserChange, Users: r.activeMemberCount(),
-	}, id)
+	})
 	return nil
 }
 
@@ -1196,19 +1196,11 @@ func (r *Room) initialJoinFrames(
 	mode model.CollaboratorMode,
 	reason model.ReadOnlyReason,
 ) [][]byte {
-	frames := make([][]byte, 0, 6)
+	frames := make([][]byte, 0, 5)
 	frames = append(frames, admission)
 	frames = append(frames, protocol.EncodeSyncStep1(r.doc))
 	if awareness := awarenessSnapshot(r.awareness); awareness != nil {
 		frames = append(frames, awareness)
-	}
-	// The joiner is not broadcast-visible until activation, so its own count is
-	// part of the patient initial batch. Other active members receive the same
-	// count from handleActivate after this batch has been queued.
-	if control := encodeControl(model.ControlMessage{
-		Kind: model.ControlRoomUserChange, Users: r.activeMemberCount() + 1,
-	}); control != nil {
-		frames = append(frames, control)
 	}
 	if mode != model.ModeViewer {
 		return frames
@@ -1375,7 +1367,7 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 		r.logger.Warn("dropping malformed frame", zap.Error(err))
 		return false
 	}
-	if model.WireMessageType(msgType) != model.WireHeartbeat && !r.allowRate(src) {
+	if !r.allowRate(src) {
 		r.disconnect(src, model.CodeUpdateRateExceeded)
 		return false
 	}
@@ -1421,12 +1413,6 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 
 	case model.WireDurabilityRequest:
 		return r.handleDurabilityRequest(src, payload, sessionDropped)
-
-	case model.WireHeartbeat:
-		// Echo only to the sender. This is transport liveness, not awareness:
-		// it never fans out, touches the Y.Doc, or arms persistence.
-		r.sendTo(src, frame)
-		return false
 
 	default:
 		// Control is server→client only; ignore client-sent control/unknown

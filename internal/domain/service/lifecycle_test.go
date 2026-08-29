@@ -10,6 +10,7 @@ import (
 
 	"github.com/antst/go-yjs/backend"
 	"github.com/antst/go-yjs/backend/persistence"
+	"go.uber.org/zap"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
 
@@ -193,7 +194,9 @@ func TestSendBufferDefault(t *testing.T) {
 // becomes unreachable is dropped from the room (and the connection gauge
 // decremented), so one stuck client cannot stall the room.
 func TestSlowConsumerEvicted(t *testing.T) {
-	mgr, _ := testManager(t, fastConfig())
+	deps := newTestDeps()
+	metrics := &countingMetrics{}
+	mgr := NewManager(deps.Deps, fastConfig(), metrics, zap.NewNop())
 
 	good := newFakeClient(t)
 	good.join(mgr, "evict", model.ContentTypeMemo)
@@ -220,7 +223,7 @@ func TestSlowConsumerEvicted(t *testing.T) {
 	good.insertText("trigger ")
 
 	waitFor(t, "bad member evicted", func() bool {
-		return bad.calls.Load() >= 1
+		return bad.calls.Load() > bad.accepts.Load() && metrics.connsClosed.Load() == 1
 	})
 	// The good client still converges (the room kept serving).
 	waitFor(t, "good still served", func() bool { return contains(good.text(), "trigger") })

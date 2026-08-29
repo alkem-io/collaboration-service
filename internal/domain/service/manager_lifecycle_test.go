@@ -141,7 +141,7 @@ func TestCloseDeletedCommandBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("caller cancellation after enqueue is returned", func(t *testing.T) {
+	t.Run("caller cancellation is returned", func(t *testing.T) {
 		m, room := newWedge(t, "accepted-canceled-close")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
