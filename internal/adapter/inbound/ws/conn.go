@@ -347,7 +347,8 @@ func closeStatusFor(end model.SessionEnd) (websocket.StatusCode, string) {
 		// backoff is the right response. They stay distinguishable by the close
 		// REASON, which is the code itself.
 		return websocket.StatusTryAgainLater, end.Code
-	case model.CodeDocumentSizeLimitExceeded, model.CodeDocumentDeleted, model.CodeEditsNotSaved:
+	case model.CodeDocumentSizeLimitExceeded, model.CodeDocumentDeleted, model.CodeEditsNotSaved,
+		model.CodeContentRefused, model.CodeForbidden:
 		return websocket.StatusPolicyViolation, end.Code
 	default:
 		if end.Disposition == model.DispositionTransient {

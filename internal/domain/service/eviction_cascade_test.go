@@ -62,6 +62,10 @@ func announceAwareness(r *Room, id connID, clientID ycrdt.Number, conn Conn) {
 		panic(err)
 	}
 	r.members[id] = roomMember{id: id, conn: conn, awarenessID: clientID, hasAwareness: true}
+	if r.awarenessOwners == nil {
+		r.awarenessOwners = make(map[ycrdt.Number]connID)
+	}
+	r.awarenessOwners[clientID] = id
 }
 
 // TestDropMemberBoundsCrossFailingCascade defends the dropMember deregister-before-

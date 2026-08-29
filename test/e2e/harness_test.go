@@ -81,14 +81,13 @@ func standaloneConfig() *config.Config {
 		AuthMode:        config.AuthModeOpen,
 		AuthZMode:       config.AuthZModeOpen,
 		Limits: config.LimitsConfig{
-			MaxDocBytes:                   32 << 20,
-			MaxConnsPerRoom:               50,
-			UpdateRatePerSec:              50,
-			UpdateBurst:                   50,
-			CollaboratorInactivitySeconds: 120,
-			ContributionWindowSeconds:     60,
-			SaveDebounceMillis:            20, // persist quickly so the round-trip is fast
-			IdleReleaseSeconds:            0,  // release the room immediately on last leave
+			MaxDocBytes:               32 << 20,
+			MaxConnsPerRoom:           50,
+			UpdateRatePerSec:          50,
+			UpdateBurst:               50,
+			ContributionWindowSeconds: 60,
+			SaveDebounceMillis:        20, // persist quickly so the round-trip is fast
+			IdleReleaseSeconds:        0,  // release the room immediately on last leave
 		},
 	}
 }

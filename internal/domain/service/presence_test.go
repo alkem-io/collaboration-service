@@ -46,44 +46,24 @@ func TestAwarenessEvictedOnDisconnect(t *testing.T) {
 	})
 }
 
-// TestCollaboratorDowngradedOnInactivity asserts a collaborator that goes idle
-// past CollaboratorInactivity is downgraded to viewer (read-only-state control),
-// mirroring the legacy whiteboard collaborator_inactivity behaviour (FR-014).
-func TestCollaboratorDowngradedOnInactivity(t *testing.T) {
-	cfg := fastConfig()
-	cfg.CollaboratorInactivity = 30 * time.Millisecond
-	mgr, _ := testManager(t, cfg)
+// TestReplacedAwarenessOwnerSurvivesOldDisconnect pins one-current-owner
+// semantics: reconnecting may reuse a Yjs client id, and the stale socket's close
+// must not erase the replacement's cursor.
+func TestReplacedAwarenessOwnerSurvivesOldDisconnect(t *testing.T) {
+	room := newBareRoom(t)
+	oldConn := &captureConn{}
+	newConn := &captureConn{}
+	const clientID ycrdt.Number = 4242
+	announceAwareness(room, 1, clientID, oldConn)
+	room.members[2] = roomMember{id: 2, conn: newConn, awarenessID: clientID, hasAwareness: true}
+	room.awarenessOwners[clientID] = 2
 
-	a := newFakeClient(t)
-	a.join(mgr, "downgrade", model.ContentTypeMemo)
-	a.observeUpdates()
-	a.insertText("active ") // one mutation, then go idle
-
-	waitFor(t, "read-only-state downgrade control", func() bool {
-		return hasReadOnly(a, true)
-	})
-}
-
-// TestMutationResetsInactivity asserts a collaborator that keeps editing is NOT
-// downgraded — each mutation resets the inactivity timer (FR-014).
-func TestMutationResetsInactivity(t *testing.T) {
-	cfg := fastConfig()
-	cfg.CollaboratorInactivity = 80 * time.Millisecond
-	mgr, _ := testManager(t, cfg)
-
-	a := newFakeClient(t)
-	a.join(mgr, "stay-active", model.ContentTypeMemo)
-	a.observeUpdates()
-
-	// Edit repeatedly for longer than the inactivity window; the timer must keep
-	// resetting so no downgrade fires.
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		a.insertText("x ")
-		time.Sleep(20 * time.Millisecond)
+	room.dropMember(1)
+	if owner := room.awarenessOwners[clientID]; owner != 2 {
+		t.Fatalf("awareness owner = %d, want replacement connection 2", owner)
 	}
-	if hasReadOnly(a, true) {
-		t.Fatal("an actively-editing collaborator was downgraded to viewer")
+	if state := room.awareness.GetStates()[clientID]; state.IsNil() {
+		t.Fatal("stale disconnect removed the replacement's awareness state")
 	}
 }
 
@@ -179,8 +159,8 @@ func TestContributionIncludesAnonymousButExcludesOpenMode(t *testing.T) {
 	room.members[1] = roomMember{id: 1, actorID: nil}
 	room.members[2] = roomMember{id: 2, actorID: &anonymous}
 
-	room.recordActivity(1)
-	room.recordActivity(2)
+	room.recordContribution(1)
+	room.recordContribution(2)
 	if len(room.contributors) != 1 {
 		t.Fatalf("contributors = %v, want only the resolvable anonymous UUID", room.contributors)
 	}
@@ -468,7 +448,7 @@ func TestTeardownCompletesCriticalWorkBeforeAnalytics(t *testing.T) {
 // drains — an unbounded set on a long-lived room — and then emit to a bus the
 // operator switched off.
 //
-// Non-vacuity: drop the contributionEnabled guard from recordActivity and the
+// Non-vacuity: drop the contributionEnabled guard from recordContribution and the
 // contributors set is non-empty; drop it from flushContribution and the teardown
 // emit fires, so calls becomes 1.
 func TestDisabledContributionWindowCollectsAndEmitsNothing(t *testing.T) {
@@ -479,7 +459,7 @@ func TestDisabledContributionWindowCollectsAndEmitsNothing(t *testing.T) {
 
 	actor := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	room.members[1] = roomMember{id: 1, conn: newFakeClient(t), actorID: &actor}
-	room.recordActivity(1)
+	room.recordContribution(1)
 	if len(room.contributors) != 0 {
 		t.Fatalf("contributors = %v, want none collected with the window disabled", room.contributors)
 	}
@@ -564,7 +544,7 @@ func TestActorsArrivingDuringAnInFlightEmitLandInTheNextWindow(t *testing.T) {
 
 	// Arrives after the detach, while the first batch is being emitted.
 	room.members[1] = roomMember{id: 1, conn: newFakeClient(t), actorID: &second}
-	room.recordActivity(1)
+	room.recordContribution(1)
 
 	room.finishContributionFlush(completion.contribution)
 

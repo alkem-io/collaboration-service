@@ -1,13 +1,16 @@
 package ws
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/antst/go-yjs/protocol"
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -64,8 +67,8 @@ func TestStartWriterClosesOnSocketWriteFailure(t *testing.T) {
 }
 
 // viewerAuthZ grants read but denies update-content, so every join resolves to a
-// read-only viewer — which receives a SyncStep1 PLUS a read-only-state control as
-// its initial frames (two frames), enough to overflow a depth-1 send buffer.
+// read-only viewer — which receives several initial frames, enough to overflow a
+// depth-1 send buffer.
 type viewerAuthZ struct{}
 
 func (viewerAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.DocumentID, p model.Privilege) (model.AuthDecision, error) {
@@ -75,10 +78,54 @@ func (viewerAuthZ) Evaluate(_ context.Context, _ model.Identity, _ model.Documen
 	return model.AuthDecision{Allowed: false}, nil
 }
 
+type handshakeSignal uint8
+
+const (
+	sawAdmission handshakeSignal = 1 << iota
+	sawSync
+	sawReadOnly
+	sawUsers
+)
+
+func readHandshakeSignal(t *testing.T, ctx context.Context, conn *websocket.Conn) handshakeSignal {
+	t.Helper()
+	for {
+		typ, frame, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("complete handshake not delivered over a depth-1 queue: %v", err)
+		}
+		if typ != websocket.MessageBinary {
+			continue
+		}
+		msgType, payload, err := protocol.ReadMessage(bytes.NewBuffer(frame))
+		if err != nil {
+			t.Fatalf("parse handshake frame: %v", err)
+		}
+		if model.WireMessageType(msgType) == model.WireSync {
+			return sawSync
+		}
+		if model.WireMessageType(msgType) != model.WireControl {
+			continue
+		}
+		var control model.ControlMessage
+		if err := json.Unmarshal(payload, &control); err != nil {
+			t.Fatalf("decode handshake control: %v", err)
+		}
+		switch control.Kind {
+		case model.ControlAdmission:
+			return sawAdmission
+		case model.ControlReadOnlyState:
+			return sawReadOnly
+		case model.ControlRoomUserChange:
+			return sawUsers
+		}
+	}
+}
+
 // TestHandshakeBatchIsNotShedOnASmallSendBuffer asserts the joiner-facing
-// outcome of the handshake-send policy: a viewer whose join yields two initial
-// frames (SyncStep1 + the read-only control frame) receives BOTH over a
-// connection whose outbound queue holds only one, and is not dropped.
+// outcome of the handshake-send policy: a viewer receives the complete initial
+// batch and its post-activation participant count over a connection whose
+// outbound queue holds only one, and is not dropped.
 //
 // This replaces an earlier test that asserted the opposite — that the second
 // frame overflowed and the server shed the connection. That was never the
@@ -95,7 +142,7 @@ func TestHandshakeBatchIsNotShedOnASmallSendBuffer(t *testing.T) {
 		AuthZ:      viewerAuthZ{},
 	}
 	// SendBuffer 1 is a valid (>0) config, so SendBuffer() returns it verbatim —
-	// one slot for a two-frame batch.
+	// one slot for a multi-frame batch.
 	mgr := service.NewManager(deps, service.RoomConfig{
 		SaveDebounce: 20 * time.Millisecond,
 		IdleTimeout:  5 * time.Second,
@@ -126,10 +173,10 @@ func TestHandshakeBatchIsNotShedOnASmallSendBuffer(t *testing.T) {
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
-	for i := range 2 {
-		if _, _, readErr := conn.Read(ctx); readErr != nil {
-			t.Fatalf("handshake frame %d not delivered over a depth-1 queue: %v", i+1, readErr)
-		}
+	const completeHandshake = sawAdmission | sawSync | sawReadOnly | sawUsers
+	var seen handshakeSignal
+	for seen != completeHandshake {
+		seen |= readHandshakeSignal(t, ctx, conn)
 	}
 }
 

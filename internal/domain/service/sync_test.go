@@ -110,6 +110,36 @@ func TestDispatchSyncUpdateAppliesToServer(t *testing.T) {
 	}
 }
 
+func TestReadAdmissionDistinguishesEmptyAndContentBearingSyncStep2(t *testing.T) {
+	room := newBareRoom(t)
+	peer := ycrdt.NewDoc("viewer")
+	empty, err := protocol.EncodeSyncStep2(peer, ycrdt.EncodeStateVector(room.doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply bytes.Buffer
+	outcome, err := room.dispatchSync(empty, &reply, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.rejectedNotWritable {
+		t.Fatal("canonical empty viewer handshake was rejected as a write")
+	}
+
+	insertText(peer, "private")
+	content, err := protocol.EncodeSyncStep2(peer, ycrdt.EncodeStateVector(room.doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err = room.dispatchSync(content, &reply, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.rejectedNotWritable {
+		t.Fatal("content-bearing viewer SyncStep2 was not rejected explicitly")
+	}
+}
+
 // TestOnDocUpdateSkipsOriginator asserts the update observer fans an applied
 // delta to every member except the one that produced it (echo filtering), and
 // marks the room dirty for the debounce.

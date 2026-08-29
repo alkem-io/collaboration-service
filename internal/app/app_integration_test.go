@@ -54,7 +54,7 @@ func TestNewRabbitMQModeWires(t *testing.T) {
 		Limits: config.LimitsConfig{
 			MaxDocBytes: 32 << 20, MaxConnsPerRoom: 50,
 			UpdateRatePerSec: 50, UpdateBurst: 50,
-			CollaboratorInactivitySeconds: 120, ContributionWindowSeconds: 60,
+			ContributionWindowSeconds: 60,
 		},
 	}
 

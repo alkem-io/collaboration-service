@@ -135,7 +135,7 @@ func newTestServerWithManager(t *testing.T, mgr *service.Manager) string {
 }
 
 // TestRefusedJoinClosesSocket asserts that a second connection to a room at its
-// connection cap is upgraded then closed with a policy-violation status (FR-024,
+// connection cap is upgraded then closed with a retryable status (FR-024,
 // the handler's joinCloseStatus path).
 func TestRefusedJoinClosesSocket(t *testing.T) {
 	deps := service.Deps{
@@ -173,12 +173,12 @@ func TestRefusedJoinClosesSocket(t *testing.T) {
 	if readErr == nil {
 		t.Fatal("second connection should have been closed by the server")
 	}
-	// A refused-on-full join closes with policy-violation (joinCloseStatus); assert
+	// A refused-on-full join closes with try-again-later (joinCloseStatus); assert
 	// that specific status rather than accepting any read error, so a regression in
 	// the close mapping is caught.
-	if status := websocket.CloseStatus(readErr); status != websocket.StatusPolicyViolation {
-		t.Fatalf("close status = %d, want StatusPolicyViolation (%d): %v",
-			status, websocket.StatusPolicyViolation, readErr)
+	if status := websocket.CloseStatus(readErr); status != websocket.StatusTryAgainLater {
+		t.Fatalf("close status = %d, want StatusTryAgainLater (%d): %v",
+			status, websocket.StatusTryAgainLater, readErr)
 	}
 }
 
@@ -299,8 +299,8 @@ func (c *wsTestClient) hasElement(id string) bool {
 }
 
 // TestJoinCloseStatusMapsRefusalToWSCloseCode asserts each refused-join error
-// maps to the right WebSocket close status: a full room and a forbidden actor are
-// policy violations (the client should not blindly retry), while any other
+// maps to the right WebSocket close status: a full room is retryable, a forbidden
+// actor is a policy violation, while any other
 // (fail-closed authZ) error is an internal-error close. The close code drives
 // client reconnect behaviour, so it is a real invariant.
 func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
@@ -312,7 +312,7 @@ func TestJoinCloseStatusMapsRefusalToWSCloseCode(t *testing.T) {
 	}{
 		// A full room rides the canonical room-capacity-reached code (OPEN-1) on the
 		// close reason — the join is refused so no control frame carries it.
-		{"room full", service.ErrRoomFull, websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached},
+		{"room full", service.ErrRoomFull, websocket.StatusTryAgainLater, model.ReasonRoomCapacityReached},
 		{"forbidden", service.ErrForbidden, websocket.StatusPolicyViolation, "forbidden"},
 		// A document that was deleted is refused by the EXISTENCE gate, which is
 		// indistinguishable from forbidden on the wire — see the ErrDocumentUnknown

@@ -63,11 +63,11 @@ func TestApplyPeerEphemeralAwareness(t *testing.T) {
 	room.applyPeerEphemeral([]byte{0xff})
 }
 
-// TestRecordActivityUnknownSrcIsNoOp asserts recording activity for an unknown
+// TestRecordContributionUnknownSrcIsNoOp asserts recording a contribution for an unknown
 // connection is a no-op (it was already evicted).
-func TestRecordActivityUnknownSrcIsNoOp(t *testing.T) {
+func TestRecordContributionUnknownSrcIsNoOp(t *testing.T) {
 	room := newBareRoom(t)
-	room.recordActivity(99) // no member 99 → no panic, no contribution
+	room.recordContribution(99) // no member 99 → no panic, no contribution
 	if len(room.contributors) != 0 {
 		t.Fatal("recording activity for an unknown src added a contributor")
 	}
@@ -78,19 +78,6 @@ func TestRecordActivityUnknownSrcIsNoOp(t *testing.T) {
 func TestDisconnectUnknownIsNoOp(t *testing.T) {
 	room := newBareRoom(t)
 	room.disconnect(42, "gone") // no member 42
-}
-
-// TestSweepInactiveDisabled asserts the inactivity sweep is a no-op when the
-// downgrade window is zero (the feature is opt-in).
-func TestSweepInactiveDisabled(t *testing.T) {
-	room := newBareRoom(t)
-	room.cfg.CollaboratorInactivity = 0
-	c := &captureConn{}
-	room.members[1] = roomMember{id: 1, conn: c, mode: model.ModeCollaborator}
-	room.sweepInactive()
-	if c.count() != 0 {
-		t.Fatal("a disabled inactivity sweep emitted a control message")
-	}
 }
 
 // TestFlushContributionEmptyWindow asserts an empty contribution window sets the
