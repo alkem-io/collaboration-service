@@ -37,6 +37,10 @@ var ErrShuttingDown = errors.New("collaboration manager is shutting down")
 // collaborators are unaffected.
 var ErrRoomFull = errors.New("collaboration room is full")
 
+// maxHeartbeatFrameBytes bounds transport-local echo amplification. The nonce
+// payload is opaque to the service and is echoed verbatim for client correlation.
+const maxHeartbeatFrameBytes = 256
+
 // ErrDocumentUnknown is returned from Join when no document with that id exists.
 //
 // It is deliberately NOT distinguishable from a denial on the wire — both close
@@ -663,9 +667,9 @@ func (s *Session) Forward(frame []byte) {
 	// shared command queue; a heartbeat flood can then shed only its own slow
 	// connection, never starve document commands for other collaborators.
 	in := bytes.NewBuffer(frame)
-	msgType, payload, err := protocol.ReadMessage(in)
+	msgType, _, err := protocol.ReadMessage(in)
 	if err == nil && model.WireMessageType(msgType) == model.WireHeartbeat {
-		if len(payload) == 0 && s.conn != nil {
+		if len(frame) <= maxHeartbeatFrameBytes && s.conn != nil {
 			_ = s.conn.Send(frame)
 		}
 		return
