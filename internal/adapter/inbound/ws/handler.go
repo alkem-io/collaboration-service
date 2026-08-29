@@ -148,24 +148,23 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 
 	wc := newWSConn(connCtx, conn, h.Manager.SendBuffer(), h.Logger)
 	defer wc.close()
+	// Start the one writer before joining so the patient initial batch can drain
+	// immediately even with a one-slot send buffer.
+	wc.startWriter()
 
 	session, initial, err := h.Manager.Join(connCtx, service.JoinRequest{
 		ID: id, Content: content, Identity: identity, Conn: wc,
 	})
 	if err != nil {
-		// A refused join (full room / access denied) closes the upgraded socket
-		// with a policy-violation status so the client does not retry blindly; a
-		// fail-closed authZ error closes with an internal status.
+		// A refused join closes the upgraded socket with a reason-specific status:
+		// room-full is retryable, access-denied is a policy violation, and a
+		// fail-closed authZ error is internal.
 		status, reason := joinCloseStatus(err)
 		h.Logger.Warn("room join refused", zap.String("doc", string(id)), zap.Error(err))
 		_ = conn.Close(status, reason)
 		return
 	}
 	defer session.Leave()
-
-	// Start the writer before enqueuing any frames so the bounded send queue is
-	// drained as it fills rather than after the batch is complete.
-	wc.startWriter()
 
 	// Drive the handshake: the server sends SyncStep1 (+ awareness snapshot) so
 	// the client replies with SyncStep2 and its own SyncStep1.
@@ -180,6 +179,9 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 		if err := wc.sendInitial(sendCtx, frame); err != nil {
 			return
 		}
+	}
+	if err := session.Activate(sendCtx); err != nil {
+		return
 	}
 
 	h.readLoop(connCtx, conn, session)
@@ -205,8 +207,8 @@ func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *s
 }
 
 // joinCloseStatus maps a refused-join error to a WebSocket close status and
-// reason. A full room or access denial is a policy violation (the client should
-// not retry blindly); any other error (a fail-closed authZ failure) is internal.
+// reason. A full room is retryable, access denial is a policy violation, and
+// any other error (a fail-closed authZ failure) is internal.
 // The close reason for a full room is the canonical room-capacity-reached code
 // (OPEN-1) so the client preserves its read-only/collaborator-mode UX granularity
 // — the join is refused (no control frame is sent on a refused join), so the code
@@ -214,7 +216,7 @@ func (h *Handler) readLoop(ctx context.Context, conn *websocket.Conn, session *s
 func joinCloseStatus(err error) (websocket.StatusCode, string) {
 	switch {
 	case errors.Is(err, service.ErrRoomFull):
-		return websocket.StatusPolicyViolation, model.ReasonRoomCapacityReached
+		return websocket.StatusTryAgainLater, model.ReasonRoomCapacityReached
 	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrDocumentUnknown):
 		// ONE refusal for both. A separate status or reason for "no such document"
 		// would let anyone holding a socket enumerate which document ids exist by

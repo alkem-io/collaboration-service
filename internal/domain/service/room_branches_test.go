@@ -351,6 +351,8 @@ func TestEvictAwarenessFansRemovalForTrackedMember(t *testing.T) {
 	// A member that announced an awareness id absent from the room awareness:
 	// forcedAwarenessRemoval still encodes a (null-state) frame, which is fanned.
 	m := roomMember{id: 1, conn: &captureConn{}, hasAwareness: true, awarenessID: 999}
+	room.awarenessOwners = make(map[ycrdt.Number]connID)
+	room.awarenessOwners[999] = 1
 	room.evictAwareness(m)
 	// The eviction frame is broadcast to peer 2 (the removal is real).
 	if peer.count() == 0 {

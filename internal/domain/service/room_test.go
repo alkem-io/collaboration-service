@@ -38,6 +38,7 @@ type fakeClient struct {
 	mu        sync.Mutex
 	session   *Session
 	received  [][]byte // every frame the room sent us, in order
+	staged    [][]byte // handshake replies held until the pending session is activated
 	ephemeral [][]byte // type-2 ephemeral payloads (post-frame)
 	control   []model.ControlMessage
 	blocked   bool // simulates the inbound side of a network partition: Send drops frames
@@ -132,8 +133,12 @@ func (c *fakeClient) Send(frame []byte) error {
 		// Apply to the local doc; a SyncStep1 from the server yields a SyncStep2
 		// reply, which we forward back through the session.
 		var reply bytes.Buffer
-		if _, err := c.handler.HandleMessage(cp, &reply); err == nil && reply.Len() > 0 && c.session != nil {
-			c.session.Forward(reply.Bytes())
+		if _, err := c.handler.HandleMessage(cp, &reply); err == nil && reply.Len() > 0 {
+			if c.session != nil {
+				c.session.Forward(reply.Bytes())
+			} else {
+				c.staged = append(c.staged, append([]byte(nil), reply.Bytes()...))
+			}
 		}
 	case model.WireAwareness:
 		// Decode the canonical y-protocols awareness framing
@@ -170,11 +175,16 @@ func (c *fakeClient) joinExisting(m *Manager, id model.DocumentID, content model
 		c.t.Fatalf("join: %v", err)
 	}
 	c.mu.Lock()
-	c.session = session
+	c.session = nil
+	c.staged = nil
 	c.mu.Unlock()
 	for _, f := range initial {
 		_ = c.Send(f)
 	}
+	if err := session.Activate(context.Background()); err != nil {
+		c.t.Fatalf("activate: %v", err)
+	}
+	c.installActivatedSession(session)
 	c.withDoc(func(doc *ycrdt.Doc) {
 		c.session.Forward(protocol.EncodeSyncStep1(doc))
 	})
@@ -202,16 +212,31 @@ func (c *fakeClient) join(m *Manager, id model.DocumentID, content model.Content
 		c.t.Fatalf("join: %v", err)
 	}
 	c.mu.Lock()
-	c.session = session
+	c.session = nil
+	c.staged = nil
 	c.mu.Unlock()
-
 	for _, f := range initial {
 		_ = c.Send(f)
 	}
+	if err := session.Activate(context.Background()); err != nil {
+		c.t.Fatalf("activate: %v", err)
+	}
+	c.installActivatedSession(session)
 	// The client initiates its own sync so it receives the server's state.
 	c.withDoc(func(doc *ycrdt.Doc) {
 		c.session.Forward(protocol.EncodeSyncStep1(doc))
 	})
+}
+
+func (c *fakeClient) installActivatedSession(session *Session) {
+	c.mu.Lock()
+	c.session = session
+	staged := c.staged
+	c.staged = nil
+	c.mu.Unlock()
+	for _, reply := range staged {
+		session.Forward(reply)
+	}
 }
 
 // withDoc runs fn with the local doc under the client lock so doc access is

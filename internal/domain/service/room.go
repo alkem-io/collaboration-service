@@ -101,6 +101,7 @@ type cmdKind uint8
 
 const (
 	cmdJoin cmdKind = iota
+	cmdActivate
 	cmdLeave
 	cmdMessage
 	cmdClose
@@ -136,17 +137,17 @@ type joinResult struct {
 }
 
 // roomMember is the room-side bookkeeping for one connection: its outbound port,
-// the authenticated actor behind it, its current collaborator mode (viewer vs.
-// collaborator, subject to inactivity downgrade), the per-connection update-rate
+// the authenticated actor behind it, its immutable collaborator mode (viewer vs.
+// collaborator), the per-connection update-rate
 // token bucket, and the y-awareness client id (learned from the member's first
 // awareness frame) used for server-forced eviction on leave (T013/T014).
 type roomMember struct {
-	id           connID
-	conn         Conn
-	actorID      *uuid.UUID
-	mode         model.CollaboratorMode
-	lastActivity time.Time
-	bucket       *tokenBucket
+	id      connID
+	conn    Conn
+	actorID *uuid.UUID
+	mode    model.CollaboratorMode
+	pending bool
+	bucket  *tokenBucket
 	// awarenessID is the member's y-protocols awareness client id, learned when
 	// it first sends an awareness frame; 0 means not yet seen.
 	awarenessID  ycrdt.Number
@@ -214,6 +215,10 @@ type Room struct {
 	done    chan struct{}
 	members map[connID]roomMember
 	nextID  connID
+	// awarenessOwners records which current connection owns each y-awareness
+	// client id. A replacement may reuse an id; an older disconnect must not
+	// evict the replacement's presence.
+	awarenessOwners map[ycrdt.Number]connID
 
 	// dirty is set when the doc changed since the last persisted snapshot;
 	// it drives the save timer and the final save-on-release.
@@ -460,10 +465,6 @@ type RoomConfig struct {
 
 	// Limits carries the configurable enforcement bounds (FR-024, epic R9).
 	Limits Limits
-	// CollaboratorInactivity downgrades an idle collaborator to viewer after this
-	// long with no document mutation. Zero disables the downgrade and is the
-	// default because volatile cursor activity is not counted here.
-	CollaboratorInactivity time.Duration
 	// ContributionWindow is the flush cadence for the north-star contribution
 	// metric/event: the set of actors that contributed in the window is emitted
 	// then reset (FR-014). Zero disables contribution flushing.
@@ -525,7 +526,6 @@ const (
 	defaultMaxDocBytes             = 30 << 20 // 30 MiB
 	defaultMaxConnsPerRoom         = 50
 	defaultUpdateRatePerSec        = 0
-	defaultCollaboratorInactivity  = 0
 	defaultContributionWindowEvery = 10 * time.Minute
 	// defaultBackendTimeout bounds each backend call on the run loop (authZ,
 	// persist, teardown, publish) so a hung backend cannot wedge the single-writer
@@ -556,13 +556,12 @@ func DefaultLimits() Limits {
 // limit/presence defaults (epic R9, OPEN-4) layered on.
 func DefaultRoomConfig() RoomConfig {
 	return RoomConfig{
-		SaveDebounce:           2 * time.Second,
-		IdleTimeout:            30 * time.Second,
-		SendBuffer:             64,
-		Limits:                 DefaultLimits(),
-		CollaboratorInactivity: defaultCollaboratorInactivity,
-		ContributionWindow:     defaultContributionWindowEvery,
-		BackendTimeout:         defaultBackendTimeout,
+		SaveDebounce:       2 * time.Second,
+		IdleTimeout:        30 * time.Second,
+		SendBuffer:         64,
+		Limits:             DefaultLimits(),
+		ContributionWindow: defaultContributionWindowEvery,
+		BackendTimeout:     defaultBackendTimeout,
 	}
 }
 
@@ -611,20 +610,21 @@ func newRoom(ctx context.Context, id model.DocumentID, content model.ContentType
 	// needs somewhere to record what it learned.
 	roomCtx, cancel := context.WithCancel(ctx)
 	r := &Room{
-		id:           id,
-		content:      content,
-		deps:         deps,
-		cfg:          cfg,
-		metrics:      metrics,
-		logger:       logger,
-		commands:     make(chan command, 256),
-		peerUpdates:  make(chan peerUpdate, 256),
-		done:         make(chan struct{}),
-		members:      make(map[connID]roomMember),
-		maxConns:     cfg.Limits.MaxConnsPerRoom,
-		contributors: make(map[uuid.UUID]struct{}),
-		ctx:          roomCtx,
-		cancel:       cancel,
+		id:              id,
+		content:         content,
+		deps:            deps,
+		cfg:             cfg,
+		metrics:         metrics,
+		logger:          logger,
+		commands:        make(chan command, 256),
+		peerUpdates:     make(chan peerUpdate, 256),
+		done:            make(chan struct{}),
+		members:         make(map[connID]roomMember),
+		awarenessOwners: make(map[ycrdt.Number]connID),
+		maxConns:        cfg.Limits.MaxConnsPerRoom,
+		contributors:    make(map[uuid.UUID]struct{}),
+		ctx:             roomCtx,
+		cancel:          cancel,
 	}
 
 	// Bound the materialization I/O (metadata load + state fetch) so a hung backend
@@ -931,7 +931,7 @@ func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc) error {
 
 // run is the room's single goroutine. It owns the Y.Doc and the member registry,
 // draining commands until closed and managed by the save/idle timers plus the
-// Wave-3 presence tickers (inactivity sweep, contribution-window flush). All
+// contribution-window ticker. All
 // Y.Doc, awareness, and member mutation happens here, making the room the lone
 // writer.
 func (r *Room) run() {
@@ -957,12 +957,7 @@ func (r *Room) run() {
 	idleTimer := time.NewTimer(time.Hour)
 	stopTimer(idleTimer)
 
-	// Presence tickers (T013): the inactivity sweep downgrades idle collaborators;
-	// the contribution ticker flushes the per-window contributing-actor set. Both
-	// are disabled (a stopped far-future timer) when their interval is zero.
-	sweepTimer, sweepEvery := newOptionalTicker(r.cfg.CollaboratorInactivity)
 	contribTimer, contribEvery := newOptionalTicker(r.cfg.ContributionWindow)
-	defer sweepTimer.Stop()
 	defer contribTimer.Stop()
 
 	armSave := func() { r.armSaveTimer(saveTimer) }
@@ -1005,10 +1000,6 @@ func (r *Room) run() {
 			if r.releaseIfEmpty(saveTimer, idleTimer) {
 				return
 			}
-
-		case <-sweepTimer.C:
-			r.sweepInactive()
-			sweepTimer.Reset(sweepEvery)
 
 		case <-contribTimer.C:
 			r.startContributionFlush()
@@ -1066,6 +1057,11 @@ func (r *Room) dispatch(cmd command, armSave, armIdle func(), idleTimer *time.Ti
 			armIdle()
 		}
 
+	case cmdActivate:
+		if cmd.done2 != nil {
+			cmd.done2 <- r.handleActivate(cmd.src)
+		}
+
 	case cmdLeave:
 		r.handleLeave(cmd.src)
 		if len(r.members) == 0 {
@@ -1112,74 +1108,116 @@ func (r *Room) handleJoin(
 	mode model.CollaboratorMode,
 	isMultiUser *bool,
 ) joinResult {
-	if isMultiUser != nil {
-		decision := *isMultiUser
-		r.isMultiUser = &decision
-	}
+	mode, readOnlyReason := r.resolveJoinCapability(identity, mode, isMultiUser)
 	if r.maxConns > 0 && len(r.members) >= r.maxConns {
 		return joinResult{err: ErrRoomFull}
-	}
-	readOnlyReason := readOnlyReasonForIdentity(identity)
-	// Room membership is authoritative in the supported durable topology because
-	// startup rejects Redis fan-out with file-service. Enabling durable multi-pod
-	// operation must move this admission decision into its ownership mechanism.
-	if mode == model.ModeCollaborator && r.isMultiUser != nil && !*r.isMultiUser {
-		for _, member := range r.members {
-			if member.mode == model.ModeCollaborator {
-				mode = model.ModeViewer
-				readOnlyReason = model.ReasonMultiUserNotAllowed
-				break
-			}
-		}
 	}
 
 	r.nextID++
 	id := r.nextID
-	r.members[id] = roomMember{
-		id:           id,
-		conn:         c,
-		actorID:      identity.ActorID,
-		mode:         mode,
-		lastActivity: time.Now(),
-		bucket:       newTokenBucket(r.cfg.Limits.UpdateRatePerSec, r.cfg.Limits.UpdateBurst, time.Now),
+	member := roomMember{
+		id:      id,
+		conn:    c,
+		actorID: identity.ActorID,
+		mode:    mode,
+		pending: true,
+		bucket:  newTokenBucket(r.cfg.Limits.UpdateRatePerSec, r.cfg.Limits.UpdateBurst, time.Now),
 	}
-	r.metrics.ConnOpened()
-
-	frames := [][]byte{protocol.EncodeSyncStep1(r.doc)}
-	if aw := awarenessSnapshot(r.awareness); aw != nil {
-		frames = append(frames, aw)
-	}
-	// Tell a viewer it is read-only up front so the client disables local editing
-	// (the collaborator default needs no control — editing is the baseline). The
-	// reason mirrors today's read-only UX (OPEN-1): an authenticated actor denied
-	// update-content is no-update-access; an unauthenticated one is not-authenticated.
+	admissionMode := model.AdmissionWrite
 	if mode == model.ModeViewer {
-		ctrl := encodeControl(model.ControlMessage{
-			Kind:     model.ControlReadOnlyState,
-			ReadOnly: model.ReadOnlyState(true),
-			Reason:   readOnlyReason,
-		})
-		if ctrl != nil {
-			frames = append(frames, ctrl)
-		}
-		if readOnlyReason == model.ReasonMultiUserNotAllowed {
-			ctrl = encodeControl(model.ControlMessage{
-				Kind:   model.ControlCollaboratorMode,
-				Mode:   model.ModeViewer,
-				Reason: model.ReasonMultiUserNotAllowed,
-			})
-			if ctrl != nil {
-				frames = append(frames, ctrl)
+		admissionMode = model.AdmissionRead
+	}
+	admission := encodeControl(model.ControlMessage{
+		Kind:   model.ControlAdmission,
+		Mode:   admissionMode,
+		Reason: readOnlyReason,
+	})
+	if admission == nil {
+		return joinResult{err: errRoomUnavailable}
+	}
+	r.members[id] = member
+	frames := r.initialJoinFrames(admission, mode, readOnlyReason)
+
+	return joinResult{id: id, frames: frames}
+}
+
+// handleActivate makes a joined member visible only after the transport has
+// accepted its complete initial batch through the patient handshake path.
+func (r *Room) handleActivate(id connID) error {
+	member, ok := r.members[id]
+	if !ok {
+		return errRoomUnavailable
+	}
+	if !member.pending {
+		return nil
+	}
+	member.pending = false
+	r.members[id] = member
+	r.metrics.ConnOpened()
+	r.broadcastControl(model.ControlMessage{
+		Kind: model.ControlRoomUserChange, Users: r.activeMemberCount(),
+	})
+	return nil
+}
+
+// resolveJoinCapability derives the immutable capability for one admitted
+// connection. Room membership is authoritative in the supported durable
+// topology because startup rejects Redis fan-out with file-service. Enabling
+// durable multi-pod operation must move this decision into its ownership
+// mechanism.
+func (r *Room) resolveJoinCapability(
+	identity model.Identity,
+	requested model.CollaboratorMode,
+	isMultiUser *bool,
+) (model.CollaboratorMode, model.ReadOnlyReason) {
+	if isMultiUser != nil {
+		decision := *isMultiUser
+		r.isMultiUser = &decision
+	}
+	reason := readOnlyReasonForIdentity(identity)
+	if requested == model.ModeCollaborator && r.isMultiUser != nil && !*r.isMultiUser {
+		for _, member := range r.members {
+			if member.mode == model.ModeCollaborator {
+				return model.ModeViewer, model.ReasonMultiUserNotAllowed
 			}
 		}
 	}
+	if requested == model.ModeViewer {
+		return requested, reason
+	}
+	return requested, ""
+}
 
-	r.broadcastControl(model.ControlMessage{
-		Kind:  model.ControlRoomUserChange,
-		Users: len(r.members),
-	})
-
-	return joinResult{id: id, frames: frames}
+// initialJoinFrames builds the patient handshake batch. Admission stays first
+// so a viewer never sends local-only content before learning its immutable
+// capability.
+func (r *Room) initialJoinFrames(
+	admission []byte,
+	mode model.CollaboratorMode,
+	reason model.ReadOnlyReason,
+) [][]byte {
+	frames := make([][]byte, 0, 5)
+	frames = append(frames, admission)
+	frames = append(frames, protocol.EncodeSyncStep1(r.doc))
+	if awareness := awarenessSnapshot(r.awareness); awareness != nil {
+		frames = append(frames, awareness)
+	}
+	if mode != model.ModeViewer {
+		return frames
+	}
+	if control := encodeControl(model.ControlMessage{
+		Kind: model.ControlReadOnlyState, ReadOnly: model.ReadOnlyState(true), Reason: reason,
+	}); control != nil {
+		frames = append(frames, control)
+	}
+	if reason == model.ReasonMultiUserNotAllowed {
+		if control := encodeControl(model.ControlMessage{
+			Kind: model.ControlCollaboratorMode, Mode: string(model.ModeViewer), Reason: reason,
+		}); control != nil {
+			frames = append(frames, control)
+		}
+	}
+	return frames
 }
 
 // readOnlyReasonForIdentity maps a viewer's identity to its read-only reason
@@ -1203,12 +1241,19 @@ func readOnlyReasonForIdentity(identity model.Identity) model.ReadOnlyReason {
 // client (T013) so peers stop rendering its cursor immediately rather than
 // waiting out the y-awareness TTL.
 func (r *Room) handleLeave(id connID) {
-	if !r.dropMember(id) {
+	member, ok := r.members[id]
+	if !ok {
+		return
+	}
+	// The room loop is the sole registry writer. Since the member was present
+	// above, nothing can remove it between that lookup and this call.
+	r.dropMember(id)
+	if member.pending {
 		return
 	}
 	r.broadcastControl(model.ControlMessage{
 		Kind:  model.ControlRoomUserChange,
-		Users: len(r.members),
+		Users: r.activeMemberCount(),
 	})
 }
 
@@ -1225,6 +1270,10 @@ func (r *Room) evictAwareness(m roomMember) {
 	if !m.hasAwareness {
 		return
 	}
+	if owner, ok := r.awarenessOwners[m.awarenessID]; !ok || owner != m.id {
+		return
+	}
+	delete(r.awarenessOwners, m.awarenessID)
 	frame := r.forcedAwarenessRemoval(m.awarenessID)
 	if frame == nil {
 		return
@@ -1281,7 +1330,9 @@ func (r *Room) dropMember(id connID) bool {
 	// drop per member. Safe on the single-writer run loop (no concurrent r.members
 	// access); evictAwareness only needs the already-captured member value.
 	delete(r.members, id)
-	r.metrics.ConnClosed()
+	if !m.pending {
+		r.metrics.ConnClosed()
+	}
 	r.evictAwareness(m)
 	return true
 }
@@ -1305,20 +1356,20 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 		return false
 	}
 
-	// Enforce the per-connection update rate BEFORE parsing (the doc above promises
-	// this): a flood of malformed frames must be charged a token — and ultimately
-	// disconnected — exactly like valid ones. Parsing first would let a client spam
-	// unparseable frames (each costing a parse attempt and a WARN log) without ever
-	// tripping the limit (FR-024).
-	if !r.allowRate(src) {
-		r.disconnect(src, model.CodeUpdateRateExceeded)
-		return false
-	}
-
 	in := bytes.NewBuffer(frame)
 	msgType, payload, err := protocol.ReadMessage(in)
 	if err != nil {
+		// Malformed traffic still consumes the sender's rate budget. Valid,
+		// size-capped heartbeats are handled at Session.Forward and never enter the
+		// room; anything that reaches this parse failure is ordinary malformed input.
+		if !r.allowRate(src) {
+			r.disconnect(src, model.CodeUpdateRateExceeded)
+		}
 		r.logger.Warn("dropping malformed frame", zap.Error(err))
+		return false
+	}
+	if !r.allowRate(src) {
+		r.disconnect(src, model.CodeUpdateRateExceeded)
 		return false
 	}
 
@@ -1338,7 +1389,6 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 			r.logger.Warn("dropping malformed awareness frame")
 			return false
 		}
-		r.trackAwarenessID(src, body)
 		if err := ycrdt.ApplyAwarenessUpdate(r.awareness, body, updateOrigin{src: src}); err != nil {
 			// DROP it. An earlier version relayed the frame anyway, reasoning that peers
 			// would "apply it against their own state" — but an awareness apply fails on
@@ -1349,6 +1399,7 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 			r.logger.Warn("dropping awareness frame the decoder rejected", zap.Error(err))
 			return false
 		}
+		r.trackAwarenessID(src, body)
 		r.broadcast(frame, src)
 		r.publishToPeers(frame, true)
 		return false
@@ -1363,12 +1414,6 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 
 	case model.WireDurabilityRequest:
 		return r.handleDurabilityRequest(src, payload, sessionDropped)
-
-	case model.WireHeartbeat:
-		// Echo only to the sender. This is transport liveness, not awareness:
-		// it never fans out, touches the Y.Doc, or arms persistence.
-		r.sendTo(src, frame)
-		return false
 
 	default:
 		// Control is server→client only; ignore client-sent control/unknown
@@ -1648,6 +1693,10 @@ func (r *Room) trackAwarenessID(src connID, payload []byte) {
 	m.awarenessID = clientID
 	m.hasAwareness = true
 	r.members[src] = m
+	if r.awarenessOwners == nil {
+		r.awarenessOwners = make(map[ycrdt.Number]connID)
+	}
+	r.awarenessOwners[clientID] = src
 }
 
 // handlePeer applies a payload received from another pod via the
@@ -1923,23 +1972,12 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		return false
 	}
 
-	// A schema rejection refuses the WRITE, not the writer: nothing was applied,
-	// broadcast or saved, and the connection stays open. Only the sender is told —
-	// no other member ever saw the update.
-	//
-	// The sender cannot just continue after this: its rejected struct leaves a gap
-	// in its own clock sequence, so anything it writes next stays pending behind the
-	// missing one. It has to drop that generation and resync. That recovery is the
-	// client's; the server's job is to refuse the write and say so.
 	if outcome.rejectedSchema {
 		// POISON ANY OUTSTANDING BARRIER FIRST. A refused write must never be
 		// convertible into a durability success: without this, a request parked
 		// before the rejection would be resolved `persisted` by the next unrelated
 		// flush, telling the caller its refused edit is safely stored.
 		//
-		// The failure is queued BEFORE the update-rejected frame, on the same
-		// per-connection FIFO, so the client learns the barrier died before it
-		// learns why.
 		r.poisonDurability(src)
 		r.failMemberBarrier(src, "the update this request covered was rejected")
 		if ctrl := encodeControl(model.ControlMessage{
@@ -1948,44 +1986,19 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		}); ctrl != nil {
 			r.sendTo(src, ctrl)
 		}
+		r.disconnect(src, model.CodeContentRefused)
 		return false
 	}
 
-	// A write from a member that may not write is refused the same way, and for the
-	// same reason: silence is what makes it dangerous. The sender applied the
-	// struct locally and, told nothing, keeps writing at k+1, k+2 against a server
-	// that never received k — every one of them pending behind the missing struct,
-	// forever.
-	//
-	// WHAT THIS GUARANTEES IS THE SIGNAL, NOT THE RECOVERY. The service truthfully
-	// reports that the write was refused; what a client does with that is the
-	// client's. Today that differs by surface: the whiteboard consumes
-	// update-rejected and discards its generation to resync
-	// (client-web useCollab.ts), while the memo editor's control handler does not
-	// handle the kind at all (client-web useCollaboration.ts handles saved,
-	// save-error and read-only-state, then falls through). So a memo client is
-	// told and does not act — a known client-side residual with a separate owner,
-	// not something this branch can fix or should pretend away.
-	//
-	// This reports the CURRENT capability; it does not change it. Restoring write
-	// access is a separate question and deliberately not answered here.
 	if outcome.rejectedNotWritable {
-		// Same rule for a refused write from a member that may not write.
 		r.poisonDurability(src)
 		r.failMemberBarrier(src, "the update this request covered was rejected")
-		if ctrl := encodeControl(model.ControlMessage{
-			Kind:  model.ControlUpdateRejected,
-			Error: "update rejected: this session is read-only",
-		}); ctrl != nil {
-			r.sendTo(src, ctrl)
-		}
+		r.disconnect(src, model.CodeForbidden)
 		return false
 	}
 
 	if outcome.applied {
-		// A collaborator just wrote: record activity (resets the inactivity
-		// downgrade timer) and record the actor for the contribution window.
-		r.recordActivity(src)
+		r.recordContribution(src)
 	}
 
 	// onDocUpdate flips dirty=true synchronously inside ApplyUpdate when the
@@ -2001,15 +2014,13 @@ func (r *Room) canMutate(src connID) bool {
 	return ok && m.mode == model.ModeCollaborator
 }
 
-// recordActivity marks a member as active now (resetting the inactivity-downgrade
-// window) and records its actor id in the current contribution window (T013).
-func (r *Room) recordActivity(src connID) {
+// recordContribution records the writer's actor id in the current contribution
+// window. Session capability is immutable and therefore unrelated to activity.
+func (r *Room) recordContribution(src connID) {
 	m, ok := r.members[src]
 	if !ok {
 		return
 	}
-	m.lastActivity = time.Now()
-	r.members[src] = m
 	// Collect only when the feature is on — see contributionEnabled. An actor id
 	// recorded with the window disabled would never be emitted, only accumulated.
 	if m.actorID != nil && r.contributionEnabled() {
@@ -2154,7 +2165,7 @@ func (r *Room) publishToPeers(frame []byte, ephemeral bool) {
 // broadcast fans a framed message to every member except the one identified by except.
 func (r *Room) broadcast(frame []byte, except connID) {
 	for id, m := range r.members {
-		if id == except {
+		if id == except || m.pending {
 			continue
 		}
 		r.sendMember(m, frame)
@@ -2164,11 +2175,25 @@ func (r *Room) broadcast(frame []byte, except connID) {
 // broadcastControl encodes a control message (type 3) and fans it out to every
 // member. Control messages are server-originated, so there is no sender to skip.
 func (r *Room) broadcastControl(msg model.ControlMessage) {
+	r.broadcastControlExcept(msg, 0)
+}
+
+func (r *Room) broadcastControlExcept(msg model.ControlMessage, except connID) {
 	frame := encodeControl(msg)
 	if frame == nil {
 		return
 	}
-	r.broadcast(frame, 0)
+	r.broadcast(frame, except)
+}
+
+func (r *Room) activeMemberCount() int {
+	count := 0
+	for _, member := range r.members {
+		if !member.pending {
+			count++
+		}
+	}
+	return count
 }
 
 // sendTo delivers a framed message to a single member.
@@ -2423,7 +2448,9 @@ func (r *Room) teardown(end model.SessionEnd, flush func()) {
 		}
 		m.conn.CloseAfterDrain(end)
 		delete(r.members, id)
-		r.metrics.ConnClosed()
+		if !m.pending {
+			r.metrics.ConnClosed()
+		}
 	}
 
 	// ANALYTICS LAST, and deliberately so. Everything above is critical: the

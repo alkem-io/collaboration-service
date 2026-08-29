@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/antst/go-yjs/backend/hub"
 	"github.com/antst/go-yjs/backend/memory"
+	"github.com/antst/go-yjs/protocol"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -34,6 +36,10 @@ var ErrShuttingDown = errors.New("collaboration manager is shutting down")
 // (FR-024 max connections per room). The handshake is refused; existing
 // collaborators are unaffected.
 var ErrRoomFull = errors.New("collaboration room is full")
+
+// maxHeartbeatFrameBytes bounds transport-local echo amplification. The nonce
+// payload is opaque to the service and is echoed verbatim for client correlation.
+const maxHeartbeatFrameBytes = 256
 
 // ErrDocumentUnknown is returned from Join when no document with that id exists.
 //
@@ -240,10 +246,10 @@ type JoinRequest struct {
 	Conn Conn
 }
 
-// Join attaches a connection to the room for the request's document
-// (materializing it on first connect) and returns the session plus the initial
-// frames the connection must send to start the y-protocols handshake (SyncStep1 +
-// the current awareness snapshot). The Manager evaluates per-document authZ ONCE,
+// Join attaches a pending connection to the room for the request's document
+// (materializing it on first connect) and returns the session plus the complete
+// initial frame batch. The handler activates it only after that batch is queued,
+// so no room broadcast can overtake admission. The Manager evaluates per-document authZ ONCE,
 // before the room is materialized, to set the session's collaborator mode; the room
 // enforces the connection cap (FR-024). A join can therefore be refused
 // (ErrForbidden / errRoomFull) or fail closed on an authZ error.
@@ -656,6 +662,19 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 // serialized processing. Non-blocking from the caller's view beyond the room's
 // command-channel buffer.
 func (s *Session) Forward(frame []byte) {
+	// Heartbeat is transport-local liveness. Validate and echo it through this
+	// session's already-serialized outbound port instead of occupying the room's
+	// command queue; a heartbeat flood can then shed only its own slow connection,
+	// never starve document commands for other collaborators.
+	in := bytes.NewBuffer(frame)
+	msgType, _, err := protocol.ReadMessage(in)
+	if err == nil && model.WireMessageType(msgType) == model.WireHeartbeat {
+		if len(frame) <= maxHeartbeatFrameBytes && s.conn != nil {
+			_ = s.conn.Send(frame)
+		}
+		return
+	}
+
 	// OBSERVE THE REFUSAL, AND ACT ON ITS REASON. This used to discard enqueue's
 	// bool entirely: the frame vanished, the client was told nothing, and the
 	// session carried on editing a generation the server never received.
@@ -727,6 +746,26 @@ func (s *Session) Forward(frame []byte) {
 		_ = s.conn.Send(frame)
 	}
 	s.conn.CloseAfterDrain(end)
+}
+
+// Activate publishes a joined session to room broadcasts after its transport
+// has accepted the complete initial frame batch.
+func (s *Session) Activate(ctx context.Context) error {
+	done := make(chan error, 1)
+	if !s.room.enqueueCtx(ctx, command{kind: cmdActivate, src: s.id, done2: done}) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errRoomUnavailable
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-s.room.done:
+		return errRoomUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Leave detaches the connection from its room. The room releases itself (after a
