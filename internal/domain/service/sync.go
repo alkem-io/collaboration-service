@@ -36,14 +36,14 @@ type syncOutcome struct {
 	// offender.
 	rejectedTooLarge bool
 	// rejectedSchema is true when the update violated the assets-root contract.
-	// Unlike rejectedTooLarge it does NOT disconnect. The write is refused and the
-	// socket stays open, but the sender must resync before writing again: its
-	// refused struct leaves a gap in its own clock sequence.
+	// The write is refused and the offending session ends with content-refused:
+	// its rejected struct leaves a gap in its own clock sequence, so continuing
+	// on the same session would silently diverge.
 	rejectedSchema bool
 	// rejectedNotWritable is true when a content-bearing update arrived from a
-	// member that may not write. Like rejectedSchema it refuses the
-	// WRITE, not the writer, and the sender must resync before writing again: the
-	// refused struct leaves the same gap in its clock sequence.
+	// member that may not write. The update is refused and the offending session
+	// ends with forbidden; continuing after the refused struct would leave the
+	// writer silently divergent.
 	//
 	// It is deliberately FALSE only for the canonical empty handshake SyncStep2.
 	rejectedNotWritable bool

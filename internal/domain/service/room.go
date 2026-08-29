@@ -1359,8 +1359,9 @@ func (r *Room) handleMessage(src connID, frame []byte, sessionDropped bool) (mut
 	in := bytes.NewBuffer(frame)
 	msgType, payload, err := protocol.ReadMessage(in)
 	if err != nil {
-		// Malformed traffic still consumes the sender's rate budget. Heartbeats are
-		// exempt only after successfully parsing their dedicated wire type.
+		// Malformed traffic still consumes the sender's rate budget. Valid,
+		// size-capped heartbeats are handled at Session.Forward and never enter the
+		// room; anything that reaches this parse failure is ordinary malformed input.
 		if !r.allowRate(src) {
 			r.disconnect(src, model.CodeUpdateRateExceeded)
 		}

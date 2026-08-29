@@ -263,6 +263,20 @@ func TestInvSessionActivationAlwaysSettles(t *testing.T) {
 		}
 	})
 
+	t.Run("caller cancellation bounds a saturated enqueue", func(t *testing.T) {
+		room := newBareRoom(t)
+		room.lc.state.Store(int32(stateActive))
+		for len(room.commands) < cap(room.commands) {
+			room.commands <- command{kind: cmdMessage}
+		}
+		session := &Session{room: room, id: 1}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := session.Activate(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Activate = %v, want context.Canceled", err)
+		}
+	})
+
 	t.Run("room teardown settles an admitted command", func(t *testing.T) {
 		room := newBareRoom(t)
 		room.lc.state.Store(int32(stateActive))

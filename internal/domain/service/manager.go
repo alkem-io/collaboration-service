@@ -664,8 +664,8 @@ func (m *Manager) remove(id model.DocumentID, room *Room) {
 func (s *Session) Forward(frame []byte) {
 	// Heartbeat is transport-local liveness. Validate and echo it through this
 	// session's already-serialized outbound port instead of occupying the room's
-	// shared command queue; a heartbeat flood can then shed only its own slow
-	// connection, never starve document commands for other collaborators.
+	// command queue; a heartbeat flood can then shed only its own slow connection,
+	// never starve document commands for other collaborators.
 	in := bytes.NewBuffer(frame)
 	msgType, _, err := protocol.ReadMessage(in)
 	if err == nil && model.WireMessageType(msgType) == model.WireHeartbeat {
@@ -752,7 +752,10 @@ func (s *Session) Forward(frame []byte) {
 // has accepted the complete initial frame batch.
 func (s *Session) Activate(ctx context.Context) error {
 	done := make(chan error, 1)
-	if !s.room.enqueue(command{kind: cmdActivate, src: s.id, done2: done}) {
+	if !s.room.enqueueCtx(ctx, command{kind: cmdActivate, src: s.id, done2: done}) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errRoomUnavailable
 	}
 	select {
