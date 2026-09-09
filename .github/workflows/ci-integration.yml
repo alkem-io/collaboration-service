@@ -31,7 +31,7 @@ jobs:
         # argument means something different.
         # -management matches the image the environments run. No test uses the
         # management API, so its port and env are deliberately not wired.
-        image: rabbitmq:4.0.5-management
+        image: rabbitmq:4.3.5-management
         ports:
           - 5672:5672
         options: >-
@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
 
