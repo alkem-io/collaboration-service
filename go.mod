@@ -3,7 +3,7 @@ module github.com/alkem-io/collaboration-service
 go 1.26.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/antst/go-yjs v0.1.1
 	github.com/coder/websocket v1.8.15
 	github.com/go-chi/chi/v5 v5.3.2
