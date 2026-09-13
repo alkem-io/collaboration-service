@@ -31,7 +31,7 @@ jobs:
         # argument means something different.
         # -management matches the image the environments run. No test uses the
         # management API, so its port and env are deliberately not wired.
-        image: rabbitmq:4.0.5-management
+        image: rabbitmq:4.0.9-management
         ports:
           - 5672:5672
         options: >-
