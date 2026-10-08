@@ -38,7 +38,7 @@ components:
 info:
   contact:
     email: info@alkem.io
-    name: Alkemio Foundation
+    name: Alkemio
     url: https://alkem.io
   description: |
     Unified real-time collaboration backend for the Alkemio platform. One Go
