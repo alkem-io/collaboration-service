@@ -59,7 +59,8 @@ try:
  bp=port();brokerid=create('container',run+'-broker',['docker','run','-d','--name',run+'-broker','--network',run+'-net','--network-alias','broker','-p',f'127.0.0.1:{bp}:5672','-e','RABBITMQ_DEFAULT_USER=forge','-e','RABBITMQ_DEFAULT_PASS=synthetic-only',broker])
  resources['resources'][-1]['mounts']=json.loads(command(['docker','inspect',brokerid]))[0]['Mounts'];save()
  for _ in range(60):
-  if subprocess.run(['docker','exec',brokerid,'rabbitmq-diagnostics','-q','ping'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:break
+  ready=subprocess.run(['docker','logs',brokerid],capture_output=True,text=True)
+  if 'Server startup complete' in ready.stdout+ready.stderr:break
   time.sleep(1)
  else:raise RuntimeError('broker not ready')
  queue=run+'-metadata';lifecycle=run+'-lifecycle'

@@ -30,7 +30,8 @@ ws.on('message', data => {
   if (encoding.length(enc) > 1) ws.send(encoding.toUint8Array(enc))
   if (reply === sync.messageYjsSyncStep2 && !synced) { synced = true; console.log('READY') }
  } else if (type === 3) {
-  const control = JSON.parse(decoding.readVarString(dec))
+  // Control frames carry raw UTF-8 JSON after the message type.
+  const control = JSON.parse(Buffer.from(data).subarray(dec.pos).toString('utf8'))
   if (control.type === 'session-end' || control.kind === 'session-end') {
    assert.equal(control.code, 'document-deleted')
    assert.equal(control.disposition, 'terminal')
