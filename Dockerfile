@@ -1,10 +1,7 @@
 # syntax=docker/dockerfile:1.24
 
-ARG GO_VERSION=1.26
-ARG ALPINE_VERSION=3.24
-
 # Build Stage — static CGO-free build (no native image libs; pure Go CRDT core)
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
 
 WORKDIR /app
 
@@ -19,7 +16,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /bin/collaboration-service ./cmd/server/
 
 # Runtime Stage — distroless-equivalent minimal Alpine
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN apk add --no-cache ca-certificates
 

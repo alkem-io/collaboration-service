@@ -20,18 +20,15 @@ package authzeval
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
-	"golang.org/x/net/http2"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
@@ -219,17 +216,13 @@ func (a *Adapter) doEvaluate(ctx context.Context, actorID, privilege, policyID s
 }
 
 // newH2CClient builds an HTTP/2 cleartext client with persistent connection
-// multiplexing (the file-service/wopi pattern). http2.Transport re-establishes
-// the TCP connection automatically if it drops.
+// multiplexing. The standard transport reconnects if the TCP connection drops.
 func newH2CClient() *http.Client {
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
 	return &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			},
-		},
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{Protocols: protocols},
 	}
 }
 
