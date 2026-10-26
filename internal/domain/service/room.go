@@ -273,6 +273,11 @@ type Room struct {
 	// contributors is the set of actor ids that mutated the document in the
 	// current contribution window; flushed and reset on the window tick (T013).
 	contributors map[uuid.UUID]struct{}
+	// docUpdates counts the update events the doc observer has seen. The observer
+	// fires only when an apply added structs or deletions, so comparing it around
+	// an apply tells a real change from a no-op (the empty SyncStep2 handshake, a
+	// replay of known structs) — which is what a contribution has to be.
+	docUpdates uint64
 	// contributionFlight is the one periodic batch currently being emitted off
 	// the room loop. While it is non-nil, new actors stay in contributors for the
 	// next window.
@@ -1949,6 +1954,7 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 	canMutate := r.canMutate(src)
 
 	wasDirty := r.dirty
+	updatesBefore := r.docUpdates
 	var reply bytes.Buffer
 	outcome, err := r.dispatchSync(framed.Bytes(), &reply, src, canMutate)
 	if err != nil {
@@ -1997,7 +2003,10 @@ func (r *Room) handleSync(src connID, payload []byte) (mutated bool) {
 		return false
 	}
 
-	if outcome.applied {
+	// Applied is not enough: the handshake SyncStep2 and a replay of known
+	// structs apply cleanly but change nothing, and must not count as a
+	// contribution — only an apply that fired the doc observer did.
+	if outcome.applied && r.docUpdates != updatesBefore {
 		r.recordContribution(src)
 	}
 
@@ -2118,6 +2127,7 @@ func (r *Room) onDocUpdate(v ...interface{}) {
 		}
 	}
 	r.dirty = true
+	r.docUpdates++
 	// Keep the cached encoded-size estimate sound between exact budget checks: every
 	// applied update (client edit, peer update, or snapshot load) only grows the
 	// doc, and a v1 update of length L adds at most ~L of re-encoded v2 content, so
