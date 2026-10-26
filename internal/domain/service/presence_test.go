@@ -9,6 +9,7 @@ import (
 	"time"
 
 	ycrdt "github.com/antst/go-yjs/crdt"
+	"github.com/antst/go-yjs/protocol"
 	"github.com/google/uuid"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
@@ -119,6 +120,78 @@ func TestContributionFlushesWhenTheLastEditorLeaves(t *testing.T) {
 	})
 	if got := contrib.lastActors(); len(got) != 1 || got[0].String() != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("teardown contribution actors = %v, want the editor once", got)
+	}
+}
+
+// TestJoiningWithoutEditingIsNotAContribution pins that the sync handshake is
+// not a contribution. Every client answers the server's SyncStep1 with a
+// SyncStep2, which is canonically empty when the client has nothing new; that
+// reply used to count as an applied update and record the actor, so merely
+// opening a document as a collaborator showed up in analytics.
+func TestJoiningWithoutEditingIsNotAContribution(t *testing.T) {
+	cfg := fastConfig()
+	cfg.IdleTimeout = 20 * time.Millisecond
+	cfg.ContributionWindow = time.Hour
+	contrib := &recordingContributor{}
+	deps := newTestDeps()
+	deps.Contributor = contrib
+	mgr := NewManager(deps.Deps, cfg, nil, nil)
+
+	editor := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+	editor.join(mgr, "handshake-only", model.ContentTypeMemo)
+	editor.observeUpdates()
+	reader := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+	reader.join(mgr, "handshake-only", model.ContentTypeMemo)
+
+	editor.insertText("one edit")
+	waitFor(t, "reader catches up", func() bool { return reader.text() == "one edit" })
+	editor.session.Leave()
+	reader.session.Leave()
+
+	waitFor(t, "contribution flush on idle release", func() bool {
+		return contrib.callCount() == 1
+	})
+	if got := contrib.lastActors(); len(got) != 1 || got[0].String() != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("contribution actors = %v, want only the editor", got)
+	}
+}
+
+// TestResendingKnownContentIsNotAContribution pins the same rule for a
+// content-bearing update that changes nothing: a client pushing structs the
+// server already has (a reconnect replay, say) applies cleanly but adds no
+// content, so it must not record the actor.
+func TestResendingKnownContentIsNotAContribution(t *testing.T) {
+	cfg := fastConfig()
+	cfg.IdleTimeout = 20 * time.Millisecond
+	cfg.ContributionWindow = time.Hour
+	contrib := &recordingContributor{}
+	deps := newTestDeps()
+	deps.Contributor = contrib
+	mgr := NewManager(deps.Deps, cfg, nil, nil)
+
+	editor := newFakeClientWithIdentity(t, "11111111-1111-1111-1111-111111111111")
+	editor.join(mgr, "replay", model.ContentTypeMemo)
+	editor.observeUpdates()
+	editor.insertText("one edit")
+
+	replayer := newFakeClientWithIdentity(t, "22222222-2222-2222-2222-222222222222")
+	replayer.join(mgr, "replay", model.ContentTypeMemo)
+	waitFor(t, "replayer catches up", func() bool { return replayer.text() == "one edit" })
+	replayer.withDoc(func(doc *ycrdt.Doc) {
+		state, err := ycrdt.EncodeStateAsUpdate(doc, nil)
+		if err != nil {
+			t.Fatalf("encode state: %v", err)
+		}
+		replayer.session.Forward(protocol.EncodeUpdate(state))
+	})
+	editor.session.Leave()
+	replayer.session.Leave()
+
+	waitFor(t, "contribution flush on idle release", func() bool {
+		return contrib.callCount() == 1
+	})
+	if got := contrib.lastActors(); len(got) != 1 || got[0].String() != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("contribution actors = %v, want only the editor", got)
 	}
 }
 
