@@ -11,3 +11,8 @@ specs/
 .claude/
 Dockerfile*
 .dockerignore
+
+.forge-evidence/
+node_modules/
+**/node_modules/
+coverage-merged.out

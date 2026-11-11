@@ -61,6 +61,9 @@ type evalRequest struct {
 func TestEvaluateGrantedPrivilege(t *testing.T) {
 	var gotReq evalRequest
 	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			t.Errorf("authorization request used %s; require cleartext HTTP/2", r.Proto)
+		}
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
 		writeEval(w, true, "granted")
 	}))
