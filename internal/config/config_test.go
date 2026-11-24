@@ -7,6 +7,37 @@ import (
 	"testing"
 )
 
+func TestMemoMarkdownAlwaysUsesAPrivateListener(t *testing.T) {
+	pinKnownGood(t)
+	t.Setenv("PORT", "4006")
+	for _, tt := range []struct {
+		addr string
+		want string
+	}{
+		{"", "127.0.0.1:4016"}, {"127.0.0.1:4017", "127.0.0.1:4017"},
+		{"[::1]:4016", "[::1]:4016"}, {"10.42.0.17:4016", "10.42.0.17:4016"},
+		{":4016", ""}, {"0.0.0.0:4016", ""}, {"[::]:4016", ""},
+		{"8.8.8.8:4016", ""}, {"127.0.0.1:0", ""}, {"127.0.0.1:4006", ""}, {"off", ""},
+	} {
+		t.Run(tt.addr, func(t *testing.T) {
+			t.Setenv("MEMO_MARKDOWN_ADDR", tt.addr)
+			cfg, err := Load()
+			if tt.want != "" {
+				if err != nil || cfg.MemoMarkdownAddr != tt.want {
+					t.Fatalf("load %q: config=%+v, err=%v", tt.addr, cfg, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "MEMO_MARKDOWN_ADDR") {
+				t.Fatalf("accepted unsafe memo listener %q: %v", tt.addr, err)
+			}
+		})
+	}
+	t.Setenv("PORT", "4016")
+	t.Setenv("MEMO_MARKDOWN_ADDR", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MEMO_MARKDOWN_ADDR") {
+		t.Fatalf("default private port collided with public port: %v", err)
+	}
+}
+
 // TestLoadDefaults asserts what still defaults once the BACKEND SELECTORS are
 // explicit. Port, AuthN mode and the token header have safe defaults; the
 // selectors that decide where data lives do not — see the four tests below.
@@ -418,6 +449,20 @@ func TestAuthZEvalLoadsBreakerDefaults(t *testing.T) {
 	}
 	if cfg.AuthZEval.BreakerFailureThreshold != 3 || cfg.AuthZEval.BreakerTimeoutSeconds != 15 {
 		t.Errorf("breaker defaults = %+v", cfg.AuthZEval)
+	}
+}
+
+func TestAuthZEvalDoesNotIgnoreMalformedCircuitBreakerLimits(t *testing.T) {
+	for _, key := range []string{"AUTH_BREAKER_FAILURE_THRESHOLD", "AUTH_BREAKER_HALF_OPEN_MAX_REQUESTS"} {
+		t.Run(key, func(t *testing.T) {
+			pinKnownGood(t)
+			t.Setenv("AUTHZ_MODE", "authzeval")
+			t.Setenv("AUTH_SERVICE_URL", "http://auth:6060")
+			t.Setenv(key, "not-an-integer")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("malformed auth breaker setting was ignored or misreported: %v", err)
+			}
+		})
 	}
 }
 

@@ -121,10 +121,11 @@ type Metrics interface {
 // when the room releases (idle/empty or owner delete). It is the only component
 // that creates or destroys rooms, so room identity is process-unique per id.
 type Manager struct {
-	deps    Deps
-	cfg     RoomConfig
-	metrics Metrics
-	logger  *zap.Logger
+	deps     Deps
+	cfg      RoomConfig
+	metrics  Metrics
+	logger   *zap.Logger
+	previews *previewWorker
 
 	mu    sync.Mutex
 	rooms map[model.DocumentID]*Room
@@ -188,7 +189,7 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 	if deps.Contributor == nil {
 		deps.Contributor = noopContributor{}
 	}
-	return &Manager{
+	manager := &Manager{
 		registry:         registry,
 		deps:             deps,
 		cfg:              cfg,
@@ -196,6 +197,27 @@ func NewManager(deps Deps, cfg RoomConfig, metrics Metrics, logger *zap.Logger) 
 		logger:           logger,
 		rooms:            make(map[model.DocumentID]*Room),
 		deleteTombstones: make(map[model.DocumentID]time.Time),
+	}
+	if deps.PreviewFiles != nil && deps.PreviewCheckpoint != nil {
+		manager.previews = newDocumentPreviewWorker(deps, logger.Named("preview"))
+		manager.deps.offerPreview = manager.offerPreview
+	}
+	return manager
+}
+
+func (m *Manager) offerPreview(candidate previewCandidate) {
+	// Order saved preview offers against the existing owner-deletion marker.
+	// The queue lock spans no rendering or storage, so room close remains
+	// independent of the derivative operation.
+	m.mu.Lock()
+	if m.closed || time.Now().Before(m.deleteTombstones[candidate.id]) {
+		m.mu.Unlock()
+		return
+	}
+	accepted := m.previews.offer(candidate)
+	m.mu.Unlock()
+	if !accepted {
+		m.logger.Warn("document preview", zap.String("stage", "queue"), zap.String("outcome", "full"))
 	}
 }
 
@@ -443,6 +465,9 @@ func (m *Manager) CloseDeleted(ctx context.Context, id model.DocumentID) error {
 	m.mu.Lock()
 	m.deleteEpoch++
 	m.deleteTombstones[id] = expires
+	if m.previews != nil {
+		m.previews.invalidate(id)
+	}
 	room, live := m.rooms[id]
 	m.mu.Unlock()
 	time.AfterFunc(deleteTombstoneTTL, func() {
@@ -785,6 +810,10 @@ func (m *Manager) Close() {
 	}
 	m.mu.Unlock()
 
+	if m.previews != nil {
+		m.previews.stop()
+		defer m.previews.close()
+	}
 	// ONE deadline bounds the WHOLE shutdown — both the cmdClose signal AND the
 	// drain. App.Close drains closers last-in-first-out — Manager.Close first, THEN
 	// the durable backends (rabbitmq/redis) — so returning early would let

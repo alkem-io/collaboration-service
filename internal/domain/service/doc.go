@@ -55,6 +55,13 @@ type Deps struct {
 	// registry, which is correct for a lone room (one room owns one document) and
 	// keeps a directly-constructed Room usable.
 	Registry memory.Registry
+	// Optional derivative handoff; called only for an ordinary, durable idle
+	// release. The manager supplies a nonblocking queue offer.
+	offerPreview func(previewCandidate)
+	// The artifact writer is wired only when this port is supplied.
+	PreviewFiles port.PreviewFiles
+	// Bounded saved-content reads for both publication and the private memo endpoint.
+	PreviewCheckpoint persistence.CheckpointStore
 }
 
 // noopContributor is the no-bus default used when Deps.Contributor is nil:

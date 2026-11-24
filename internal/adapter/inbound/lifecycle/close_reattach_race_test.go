@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestAdoptRefusesAfterCloseSoAReattachCannotLeakAConnection is the regression
@@ -42,6 +43,40 @@ func TestAdoptRefusesAfterCloseSoAReattachCannotLeakAConnection(t *testing.T) {
 	late := &session{conn: &fakeConn{}, ch: &fakeChannel{}}
 	if c.adopt(late) {
 		t.Fatal("adopt accepted a session established AFTER Close; that connection and its goroutine leak past shutdown")
+	}
+}
+
+func TestLateLifecycleReattachClosesTheConnectionRatherThanConsumingAfterShutdown(t *testing.T) {
+	prev := dialBroker
+	t.Cleanup(func() { dialBroker = prev })
+	ch := &fakeChannel{}
+	late := &fakeConn{ch: ch}
+	entered, allowed := make(chan struct{}), make(chan struct{})
+	dialBroker = func(string) (brokerConn, error) {
+		close(entered)
+		<-allowed
+		return late, nil
+	}
+	c := consumerForTest(t, &fakeManager{}, &fakeChannel{})
+	c.cfg = Config{URL: "amqp://stub", Queue: "lifecycle-q"}
+	done := make(chan *session, 1)
+	go func() { done <- c.reattach() }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("the supervisor did not start a reconnect")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(allowed)
+	select {
+	case sess := <-done:
+		if sess != nil || late.closeCount() != 1 || ch.closeCount() != 1 {
+			t.Fatal("reconnect left a live lifecycle consumer after shutdown")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconnect did not settle after shutdown")
 	}
 }
 

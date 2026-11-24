@@ -1,0 +1,43 @@
+MIT License
+
+Copyright (c) 2019 Preet Shihn
+Copyright (c) 2020 Preet Shihn
+Copyright (c) 2023 Preet Shihn
+Copyright (c) 2026 rough-go contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+rough-go implements the Rough.js 4.6.6 rendering surface used by D2.
+
+Upstream source:
+  Project: Rough.js
+  Version: 4.6.6
+  Commit: 56a2762171b1294d643501e8d14f120db6b27bd7
+  Repository: https://github.com/rough-stuff/rough
+  License: MIT
+  Copyright (c) 2019 Preet Shihn
+
+The pristine Rough.js 4.6.6 browser bundle used as the test oracle has SHA-256
+6853af8619532f3939b156cd16824d2e14f31e71d3df306ad5558eeafacab194.
+
+The port also derives implementation details from these Rough.js dependencies:
+  hachure-fill 0.5.2, Copyright (c) 2023 Preet Shihn, MIT
+  path-data-parser 0.1.0, Copyright (c) 2020 Preet Shihn, MIT
+
+No Rough.js JavaScript is linked into or executed by rough-go at runtime. The Go
+source is a translation and remains available under the MIT license in LICENSE.

@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -286,6 +287,11 @@ type Room struct {
 	// onReleased is invoked once, on the run loop, after the room has drained
 	// and persisted, so the Manager can drop it from its registry.
 	onReleased func()
+	// Render identity uses all saved bytes, including the delete set. Compute it
+	// only when derivative publication is wired.
+	initialPreview, savedPreview [sha256.Size]byte
+	previewTimer                 *time.Timer
+	previewOffer                 previewCandidate
 
 	// source is this room's fan-out identity. The hub suppresses echoes by it, so
 	// a room never re-applies an update it published itself. Per-room rather than
@@ -931,6 +937,10 @@ func (r *Room) restoreInto(ctx context.Context, doc *ycrdt.Doc) error {
 		return fmt.Errorf("applying stored state: %w", err)
 	}
 	r.docBytes = len(cp.Update)
+	if r.deps.offerPreview != nil {
+		r.initialPreview = sha256.Sum256(cp.Update)
+		r.savedPreview = r.initialPreview
+	}
 	return nil
 }
 
@@ -961,6 +971,11 @@ func (r *Room) run() {
 	stopTimer(saveTimer)
 	idleTimer := time.NewTimer(time.Hour)
 	stopTimer(idleTimer)
+	defer func() {
+		if r.previewTimer != nil {
+			r.previewTimer.Stop()
+		}
+	}()
 
 	contribTimer, contribEvery := newOptionalTicker(r.cfg.ContributionWindow)
 	defer contribTimer.Stop()
@@ -969,6 +984,10 @@ func (r *Room) run() {
 	armIdle := func() { r.armIdleTimer(idleTimer) }
 
 	for {
+		var previewDue <-chan time.Time
+		if r.previewTimer != nil {
+			previewDue = r.previewTimer.C
+		}
 		select {
 		case cmd := <-r.commands:
 			if !r.dispatch(cmd, armSave, armIdle, idleTimer) {
@@ -1005,6 +1024,10 @@ func (r *Room) run() {
 			if r.releaseIfEmpty(saveTimer, idleTimer) {
 				return
 			}
+
+		case <-previewDue:
+			r.previewTimer = nil
+			r.offerSavedPreview()
 
 		case <-contribTimer.C:
 			r.startContributionFlush()
@@ -2298,6 +2321,7 @@ func (r *Room) persist(ctx context.Context) {
 	// version — a redelivered no-op PreRegister can bump the persisted row ahead of
 	// it; harmless while Metadata.Version is reserved/unused (FR-025).
 	r.dirty = false
+	r.notePreviewSave(snapshot)
 	// RESOLVE OUTSTANDING BARRIERS HERE, and only here. This is the single point
 	// where dirty is cleared, and it is reached only after SaveCheckpoint AND
 	// Metadata.Save both returned success — so a `persisted` answer can never
@@ -2404,6 +2428,9 @@ func (r *Room) releaseIfEmpty(saveTimer, idleTimer *time.Timer) bool {
 	// No members by construction (checked at the top), so the code is unobservable
 	// here. It is still the honest one: the room is being released and the
 	// document is intact and flushed, which is precisely "come back later".
+	if !r.dirty {
+		r.offerSavedPreview()
+	}
 	r.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 	return true
 }

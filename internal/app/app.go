@@ -48,6 +48,8 @@ type App struct {
 	// Handler is the chi router serving /healthz, /metrics, /collab/{id} (WS),
 	// and the optional no-bus document-create REST endpoint (tests/local).
 	Handler http.Handler
+	// MemoHandler serves saved memo Markdown only on the private listener.
+	MemoHandler http.Handler
 	// Manager is the started room registry; the lifecycle consumer and the REST
 	// API drive it. Exposed for the e2e suite to assert room state directly.
 	Manager *service.Manager
@@ -69,7 +71,7 @@ func New(cfg *config.Config, logger *zap.Logger) (*App, error) {
 
 	handler, manager := buildRouter(cfg, deps, logger)
 
-	a := &App{Handler: handler, Manager: manager}
+	a := &App{Handler: handler, MemoHandler: buildMemoHandler(deps), Manager: manager}
 	// Order matters on Close: stop the lifecycle consumer, then release rooms
 	// (Manager.Close), then close the durable backends. We append in that reverse
 	// order below and Close drains last-in-first-out.
@@ -81,6 +83,10 @@ func New(cfg *config.Config, logger *zap.Logger) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+func buildMemoHandler(deps service.Deps) http.Handler {
+	return httpAdapter.NewMemoMarkdownRouter(service.NewMemoMarkdownReader(deps.Metadata, deps.PreviewCheckpoint))
 }
 
 // Close releases every live room (final snapshot + teardown) and closes the
@@ -130,14 +136,36 @@ func buildDeps(cfg *config.Config, logger *zap.Logger) (service.Deps, func(), er
 	auth := buildAuthN(cfg)
 	authz := buildAuthZ(cfg, metadata)
 
-	return service.Deps{
-		Hub:         fanout,
-		Metadata:    metadata,
-		Checkpoint:  checkpoint,
-		Auth:        auth,
-		AuthZ:       authz,
-		Contributor: contributor,
-	}, cleanup, nil
+	deps := service.Deps{
+		Hub:               fanout,
+		Metadata:          metadata,
+		Checkpoint:        checkpoint,
+		Auth:              auth,
+		AuthZ:             authz,
+		Contributor:       contributor,
+		PreviewCheckpoint: checkpoint,
+	}
+	if cfg.CheckpointStore == config.CheckpointStoreFileService {
+		bounded := *cfg
+		if n := bounded.FileService.MaxUploadSize; n <= 0 || n > service.PreviewSnapshotLimit {
+			bounded.FileService.MaxUploadSize = service.PreviewSnapshotLimit
+		}
+		deps.PreviewCheckpoint, err = buildCheckpoint(&bounded, metadata)
+		if err != nil {
+			cleanup()
+			return service.Deps{}, nil, err
+		}
+	}
+	// The durable topology already controls which writer may exist; private
+	// artifacts do not require a feature flag or another deployment check.
+	if cfg.CheckpointStore == config.CheckpointStoreFileService && cfg.HubMode == config.HubInMemory {
+		deps.PreviewFiles, err = persistfileservice.NewPreviewFiles(persistfileservice.Config{BaseURL: cfg.FileService.BaseURL})
+		if err != nil {
+			cleanup()
+			return service.Deps{}, nil, err
+		}
+	}
+	return deps, cleanup, nil
 }
 
 func buildHub(cfg *config.Config, logger *zap.Logger, closers *[]func()) (hub.Hub, error) {

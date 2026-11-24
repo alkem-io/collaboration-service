@@ -1,0 +1,27 @@
+[
+  {
+    "name": "empty",
+    "snapshot": "AAEABIfalgEAAAEHExBkZWZhdWx0cGFyYWdyYXBoBwkBAQEDAAEBAAA=",
+    "markdown": ""
+  },
+  {
+    "name": "cleared",
+    "snapshot": "AAAEiNqWAQAAAwEAAAkHZGVmYXVsdAcBAQACAQgBAgABiK1LAQAI",
+    "markdown": ""
+  },
+  {
+    "name": "marks-and-text",
+    "snapshot": "AAMAAxUFydqWAS8rAAJCACICHgIIAwEEAwMSAwMWAwEMAwES2AKcAgLgArQCAwBCDAJCEAMAQgBRBwEEACgAhwAHAAQAhgCEAIYAhACGAIQAhgCEAIYChACGAoQAhgCEAIYAhACGAIQAhgCEAIYAhACGAIcBBACHAQcABACHAAcABACHAQcABAAovAKVAmRlZmF1bHRoZWFkaW5nTWVtbyDwn5GLIGNhZsOpIM6bbGV2ZWxwYXJhZ3JhcGhhIHwgYiwgPHZhbHVlPiBib2xkYm9sZGJvbGQgaXRhbGljZW1pdGFsaWMgYm9sZGl0YWxpY2xpbmtmb3JtYXR0ZWRib2xkaXRhbGljbGluayBjb2RlaW5saW5lIGNvZGVjb2RlIHN0cmlrZXN0cmlrZXN0cmlrZSBoaWdobGlnaHRoaWdobGlnaHRoaWdobGlnaHRoYXJkQnJlYWtuZXh0IGxpbmVwYXJhZ3JhcGhwYXJhZ3JhcGg8YnI+cGFyYWdyYXBoQmVmb3JlaG9yaXpvbnRhbFJ1bGVoZWFkaW5nRW5kbGV2ZWxHAA4FCQ9EAQEGAgYBBAYECQQGBAEECwQBRgEBSQUECQYOBwMFAwEAAA4DBgMGAwZDAAYDBkMABgJBAAExAH0BdgB+dgB+dgB2AHYBBGhyZWZ3HGh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL2RvY3N+fn52AH52AH52AH59BgA=",
+    "markdown": "# Memo 👋 café Λ\n\n\n\na | b, <value> **bold** _em_ ***[formatted](https://example.invalid/docs)*** `inline code` ~~strike~~ ==highlight==\nnext line\n\n\n \n\n \n\n\nBefore\n\n\n\n---\n\n\n###### End"
+  },
+  {
+    "name": "blocks-and-nesting",
+    "snapshot": "AAMAAxQFytqWAS4vAAMAQg4CQhADAGQ+AkIAjAEDAUIQAwFCDgJSHAMAYlKAAQMAxgGSAQMCRBoDAGAARQcCBACHAAcABACHAAcBBACHAAcABAAoAIcABwIEAIcABwIEAIcABwAEAIcABwEEACgAhwAHAQQAhwAHAwQAhwAHAQQAKPgC0AJkZWZhdWx0YmxvY2txdW90ZXBhcmFncmFwaEZpcnN0cGFyYWdyYXBoU2Vjb25kYmxvY2txdW90ZXBhcmFncmFwaE5lc3RlZCBxdW90ZWNvZGVCbG9ja3BhY2thZ2UgbWFpbgoKLy8gbGl0ZXJhbCAqIG1hcmtkb3dubGFuZ3VhZ2VidWxsZXRMaXN0bGlzdEl0ZW1wYXJhZ3JhcGhQYXJlbnRvcmRlcmVkTGlzdGxpc3RJdGVtcGFyYWdyYXBoSW5uZXJwYXJhZ3JhcGhNb3JlbGlzdEl0ZW1wYXJhZ3JhcGhOZXh0c3RhcnRsaXN0SXRlbXBhcmFncmFwaE90aGVyYmxvY2txdW90ZW9yZGVyZWRMaXN0bGlzdEl0ZW1wYXJhZ3JhcGhRdW90ZWQgb25lbGlzdEl0ZW1wYXJhZ3JhcGhRdW90ZWQgdHdvc3RhcnQHCgkFCQYKCQwJIwgKCAkGCwgJBQkECAkEBQgJBQoLCAkKCAkKBQMBAAAeQwAGAwZDAAYDBkMBBkMBBgMGQwAGQwAGQwIGQwAGAkEBATAAdwJnb30IfQUA",
+    "markdown": "> First\n> \n> Second\n> \n> > Nested quote\n\n\n```go\npackage main\n\n// literal * markdown\n```\n\n\n- Parent\n\n  1. Inner\n\n     More\n  1. Next\n- Other\n\n\n> 1. Quoted one\n> 2. Quoted two"
+  },
+  {
+    "name": "tables-and-embeds",
+    "snapshot": "AAMAAxMFy9qWASckAAMCRAgDAE4SAwFCCgJOFgJaHgMBRA7CAYYBAgEAQgoABAECADUHBAQAhwAHAQQAhwAHAgQAhwAHAAQAhwAHAYcABwIEAIcABwCHAAcAKAKHACgAhwAoA4EAAJsC9wFkZWZhdWx0dGFibGV0YWJsZVJvd3RhYmxlSGVhZGVycGFyYWdyYXBoQXRhYmxlSGVhZGVycGFyYWdyYXBoQnRhYmxlUm93dGFibGVDZWxscGFyYWdyYXBob25lcGFyYWdyYXBodHdvdGFibGVDZWxscGFyYWdyYXBoaGFyZEJyZWFrdGFibGVSb3d0YWJsZUNlbGxwYXJhZ3JhcGg8YnI+dGFibGVDZWxscGFyYWdyYXBocGFyYWdyYXBoaW1hZ2VzcmNhbHR0aXRsZWlmcmFtZXNyY2lmcmFtZXNyY3dpZHRoaGVpZ2h0YWxsb3dmdWxsc2NyZWVuBwUICwkBCwkBCEkAAwkDSQEISQAESQEFQwAFBgMGAwUGDwMBAAAQQwIGQwAGQwEGAwZDBAZDBANBBxABKgB3J2h0dHBzOi8vZmlsZXMuZXhhbXBsZS5pbnZhbGlkL2ltYWdlLnBuZ3cJaW1hZ2UgYWx0dwtub3QgZW1pdHRlZHcdaHR0cHM6Ly9leGFtcGxlLmludmFsaWQvbW92aWV3Hmh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL3NlY29uZHcDNzUldwM0MDB5AYutSwEvEA==",
+    "markdown": "| A | B |\n| ---- | ---- |\n| onetwo |   |\n|   |   |\n\n\n![image alt](https://files.example.invalid/image.png)\n\n\n<div class=\"iframe-wrapper\" style=\"position: relative; height: 442px; width: 100%;\"><iframe src=\"https://example.invalid/movie\" position=\"absolute\" top=0 left=0 width=\"100%\" height=\"100%\" frameborder=0 allowFullScreen=1 allowfullscreen=true/></div>\n\n<div class=\"iframe-wrapper\" style=\"position: relative; height: 442px; width: 100%;\"><iframe src=\"https://example.invalid/second\" position=\"absolute\" top=0 left=0 width=\"75%\" height=\"400\" frameborder=0 allowFullScreen=1 allowfullscreen=false/></div>"
+  }
+]

@@ -26,6 +26,7 @@ RUN addgroup -g 65532 -S nonroot && adduser -u 65532 -S -G nonroot nonroot
 WORKDIR /app
 
 COPY --from=builder /bin/collaboration-service /bin/collaboration-service
+COPY internal/domain/service/whiteboardrender/notices/ /usr/share/licenses/collaboration-service/
 
 USER nonroot:nonroot
 

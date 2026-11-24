@@ -159,6 +159,111 @@ type mapResolver struct {
 	records  int
 }
 
+type checkpointRoundTripper func(*http.Request) (*http.Response, error)
+
+func (rt checkpointRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return rt(r) }
+
+type unavailablePointerIndex struct {
+	err error
+}
+
+func (i unavailablePointerIndex) Pointer(context.Context, backend.DocumentID) (string, string, error) {
+	return "", "", i.err
+}
+
+func (unavailablePointerIndex) Record(context.Context, backend.DocumentID, string) error {
+	panic("must not change a pointer when lookup failed")
+}
+
+func TestUnavailablePointerIndexIsNotAnEmptyCheckpointOrABootstrap(t *testing.T) {
+	unavailable := errors.New("metadata backend unavailable")
+	store, err := New(Config{BaseURL: "http://storage.invalid", HTTPClient: &http.Client{
+		Transport: checkpointRoundTripper(func(r *http.Request) (*http.Response, error) {
+			t.Errorf("untrustworthy pointer caused file-service I/O: %s", r.Method)
+			return nil, unavailable
+		}),
+	}}, unavailablePointerIndex{unavailable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := store.LoadCheckpoint(t.Context(), "saved")
+	if !errors.Is(err, unavailable) || errors.Is(err, persistence.ErrNotFound) || len(cp.Update) != 0 {
+		t.Fatalf("index outage was mistaken for a checkpoint outcome: %+v (%v)", cp, err)
+	}
+	rev, err := store.SaveCheckpoint(t.Context(), persistence.SaveCheckpointRequest{DocumentID: "saved", Encoding: persistence.EncodingV2})
+	if !errors.Is(err, unavailable) || rev != 0 {
+		t.Fatalf("index outage was mistaken for a durable save: %v (%v)", rev, err)
+	}
+}
+
+func TestCheckpointTransportFailureDoesNotChangeTheFileMapping(t *testing.T) {
+	const existing, first backend.DocumentID = "existing", "first-save"
+	resolver := &mapResolver{pointers: map[backend.DocumentID]string{existing: "stable-file"}, bucket: "owning-bucket"}
+	outage := errors.New("disconnected from storage")
+	for _, tc := range []struct {
+		method string
+		path   string
+		doc    backend.DocumentID
+	}{
+		{http.MethodGet, "/internal/file/stable-file/content", existing},
+		{http.MethodPut, "/internal/file/stable-file/content", existing},
+		{http.MethodPost, "/internal/file", first},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			attempts := 0
+			store, err := New(Config{BaseURL: "http://storage.invalid", HTTPClient: &http.Client{
+				Transport: checkpointRoundTripper(func(r *http.Request) (*http.Response, error) {
+					attempts++
+					if r.Method != tc.method || r.URL.Path != tc.path {
+						t.Errorf("unexpected attempt/fallback: %s %s", r.Method, r.URL.Path)
+					}
+					return nil, outage
+				}),
+			}}, resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.method == http.MethodGet {
+				cp, err := store.LoadCheckpoint(t.Context(), tc.doc)
+				if !errors.Is(err, outage) || len(cp.Update) != 0 {
+					t.Fatalf("outage must not load a checkpoint: %+v (%v)", cp, err)
+				}
+			} else {
+				rev, err := store.SaveCheckpoint(t.Context(), persistence.SaveCheckpointRequest{
+					DocumentID: tc.doc, Encoding: persistence.EncodingV2, Update: []byte("changed"),
+				})
+				if !errors.Is(err, outage) || rev != 0 {
+					t.Fatalf("outage must not acknowledge a save: revision=%v (%v)", rev, err)
+				}
+			}
+			if attempts != 1 || resolver.recordCount() != 0 {
+				t.Fatalf("failed attempt retried or relinked: attempts=%d records=%d", attempts, resolver.recordCount())
+			}
+		})
+	}
+}
+
+func TestColdCheckpointLoadRejectsTruncatedTransport(t *testing.T) {
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("read failure tried to change storage: %s", r.Method)
+		}
+		w.Header().Set("Content-Length", "200")
+		_, _ = io.WriteString(w, "truncated")
+	}))
+	defer host.Close()
+	store, err := New(Config{BaseURL: host.URL, MaxUploadSize: 500}, &mapResolver{
+		pointers: map[backend.DocumentID]string{"saved": "checkpoint"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := store.LoadCheckpoint(t.Context(), "saved")
+	if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, persistence.ErrNotFound) || len(cp.Update) != 0 {
+		t.Fatalf("truncated source must not look like an empty checkpoint: %+v (%v)", cp, err)
+	}
+}
+
 func (m *mapResolver) Pointer(_ context.Context, id backend.DocumentID) (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

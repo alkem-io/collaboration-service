@@ -52,6 +52,9 @@ func TestNewStandaloneWiresAndCloses(t *testing.T) {
 	if application.Handler == nil {
 		t.Fatal("standalone app has no HTTP handler")
 	}
+	if application.MemoHandler == nil {
+		t.Fatal("standalone app must wire the internal memo route without an address override")
+	}
 	if application.Manager == nil {
 		t.Fatal("standalone app has no room manager")
 	}

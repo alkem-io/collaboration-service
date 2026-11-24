@@ -368,7 +368,11 @@ func (c *wsClient) close() {
 
 // eventually polls cond up to 5s; cross-pod and persistence delivery are async.
 func eventually(cond func() bool) bool {
-	deadline := time.Now().Add(5 * time.Second)
+	return eventuallyWithin(5*time.Second, cond)
+}
+
+func eventuallyWithin(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true

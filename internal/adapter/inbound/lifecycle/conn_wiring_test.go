@@ -10,6 +10,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeChannel records what Connect asked the broker to do and can fail any one
@@ -600,6 +601,45 @@ func TestAnUnactionableEnvelopeIsRejectedToTheDeadLetterQueue(t *testing.T) {
 			}
 			if flags := acker.requeueFlags(); len(flags) != 1 || flags[0] {
 				t.Fatalf("requeue flags = %v, want [false]; requeue=true spins poison through the consumer forever", flags)
+			}
+		})
+	}
+}
+
+func TestLostBrokerAcknowledgementDoesNotStopTheDeletionConsumer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		poison   bool
+		closeErr error
+		log      string
+	}{
+		{"ack", false, nil, "lifecycle ack failed"},
+		{"requeue", false, errors.New("owner close timed out"), "lifecycle requeue failed"},
+		{"dead-letter", true, nil, "lifecycle reject failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &fakeManager{closeErr: tc.closeErr}
+			c := consumerForTest(t, mgr, &fakeChannel{})
+			core, entries := observer.New(zap.WarnLevel)
+			c.logger = zap.New(core)
+			lost := errors.New("broker lost acknowledgement")
+			broken := &fakeAcker{ackErr: lost, nackErr: lost}
+			next := &fakeAcker{}
+			body := eventBody(t, PatternDocumentDeleted, map[string]any{"id": "doc-1"})
+			first := body
+			if tc.poison {
+				first = []byte("not an event")
+			}
+			c.processOne(amqp.Delivery{Body: first, Acknowledger: broken, DeliveryTag: 1})
+			mgr.closeErr = nil
+			c.processOne(amqp.Delivery{Body: body, Acknowledger: next, DeliveryTag: 2})
+			acks, nacks := broken.snapshot()
+			a, n := next.snapshot()
+			if acks+nacks != 1 || a != 1 || n != 0 {
+				t.Fatalf("broker failure caused a contradictory retry or stopped processing: first=%d/%d next=%d/%d", acks, nacks, a, n)
+			}
+			if entries.FilterMessageSnippet(tc.log).Len() != 1 {
+				t.Fatal("settlement failure was not reported")
 			}
 		})
 	}

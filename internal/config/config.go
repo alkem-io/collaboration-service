@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -82,6 +83,8 @@ const (
 type Config struct {
 	// Port is the HTTP/WS listen port.
 	Port int
+	// MemoMarkdownAddr is the always-on private memo listener's bind address.
+	MemoMarkdownAddr string
 	// HubMode selects the cross-pod hub. REQUIRED; no default.
 	HubMode HubMode
 	// MetadataStore selects the metadata/index adapter (rabbitmq default).
@@ -217,6 +220,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	memoAddr := getenv("MEMO_MARKDOWN_ADDR", "127.0.0.1:4016")
+	if err := validateMemoAddress(memoAddr, port); err != nil {
+		return nil, err
+	}
 
 	fanout, err := parseHubMode(os.Getenv("HUB_MODE"))
 	if err != nil {
@@ -232,7 +239,6 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	// AuthN mode and the independently-selected AuthZ mode (derived from AuthN
 	// when AUTHZ_MODE is unset). OPEN-5.
 	authMode, authZMode, err := parseAuthModes(
@@ -244,12 +250,13 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:            port,
-		HubMode:         fanout,
-		MetadataStore:   metadataStore,
-		CheckpointStore: checkpointStore,
-		AuthMode:        authMode,
-		AuthZMode:       authZMode,
+		Port:             port,
+		MemoMarkdownAddr: memoAddr,
+		HubMode:          fanout,
+		MetadataStore:    metadataStore,
+		CheckpointStore:  checkpointStore,
+		AuthMode:         authMode,
+		AuthZMode:        authZMode,
 		Auth: AuthConfig{
 			// AUTH_TOKEN_HEADER is the deployed env name and is kept as-is; it
 			// supplies the actor-id header NAME. ("Token" is legacy — bearer/token
@@ -264,13 +271,24 @@ func Load() (*Config, error) {
 	if err := loadAdapterConfig(cfg); err != nil {
 		return nil, err
 	}
-
 	limits, err := loadLimitsConfig()
 	if err != nil {
 		return nil, err
 	}
 	cfg.Limits = limits
 	return cfg, nil
+}
+
+func validateMemoAddress(addr string, publicPort int) error {
+	endpoint, err := netip.ParseAddrPort(addr)
+	if err != nil || endpoint.Port() == 0 ||
+		(!endpoint.Addr().IsLoopback() && !endpoint.Addr().IsPrivate()) {
+		return fmt.Errorf("MEMO_MARKDOWN_ADDR must be an explicit loopback or private IP with a nonzero port")
+	}
+	if int(endpoint.Port()) == publicPort {
+		return fmt.Errorf("MEMO_MARKDOWN_ADDR must use a port separate from PORT")
+	}
+	return nil
 }
 
 // Default limit/presence values (epic R9, OPEN-4) — kept in sync with the domain
