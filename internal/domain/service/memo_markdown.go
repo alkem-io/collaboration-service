@@ -463,12 +463,15 @@ func (m *memoMarkdown) cell(children ycrdt.ArrayAny, depth int, root bool) (stri
 		if !ok {
 			return "", ErrSavedContent
 		}
-		if err := m.visit(depth, paragraph.GetLength()); err != nil {
-			return "", err
-		}
 		// The server's custom table serializer concatenates only paragraphs.
 		if paragraph.NodeName != "paragraph" {
+			if _, err := m.block(paragraph, depth, false); err != nil {
+				return "", err
+			}
 			continue
+		}
+		if err := m.visit(depth, paragraph.GetLength()); err != nil {
+			return "", err
 		}
 		text, placeholder, err := m.inline(paragraph.ToArray(), depth+1, false)
 		if err != nil {

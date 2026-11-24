@@ -3,10 +3,14 @@ package whiteboardrender
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"image"
 	"image/color"
 	"image/png"
+	"io/fs"
+	"math"
 	"strings"
 	"testing"
 
@@ -76,7 +80,12 @@ func TestAssetByteAndPixelBoundsAndDuplicateDecode(t *testing.T) {
 	}
 	a.pixels = 0
 	a.bytes = maxAssetBytes - 1
-	a.load = func(context.Context, string, int64) (string, []byte, error) { return "image/png", tiny.Bytes(), nil }
+	a.load = func(_ context.Context, _ string, maxBytes int64) (string, []byte, error) {
+		if maxBytes != 1 {
+			t.Fatalf("wrong remaining byte allowance: %d", maxBytes)
+		}
+		return "image/png", tiny.Bytes(), nil
+	}
 	if _, err := a.get(t.Context(), "b"); err == nil {
 		t.Fatal("oversized storage response was accepted")
 	}
@@ -110,6 +119,7 @@ func TestBadSavedImageCannotReplaceEitherPreview(t *testing.T) {
 		{"invalid flip", map[string]any{"scale": yjs.ArrayAny{3., 1.}}, pngData.Bytes()},
 		{"crop leaves stored image", map[string]any{"crop": yjs.MakeObject("x", 3., "y", 0., "width", 2., "height", 2., "naturalWidth", 4., "naturalHeight", 4.)}, pngData.Bytes()},
 		{"dimensions of asset changed", map[string]any{"crop": yjs.MakeObject("x", 1., "y", 0., "width", 2., "height", 2., "naturalWidth", 8., "naturalHeight", 4.)}, pngData.Bytes()},
+		{"crop transform overflows", map[string]any{"crop": yjs.MakeObject("x", 1., "y", 0., "width", math.SmallestNonzeroFloat64, "height", 2., "naturalWidth", 4., "naturalHeight", 4.)}, pngData.Bytes()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := yjs.NewDoc(tc.name)
@@ -135,4 +145,39 @@ func TestBadSavedImageCannotReplaceEitherPreview(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAVIFCompatibleBrandUsesTheBoundedNativeDecoder(t *testing.T) {
+	raw, err := fs.ReadFile(browserFixtures(t), "codecs-full.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct{ Assets map[string]string }
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range fixture.Assets {
+		if !strings.HasPrefix(asset, "data:image/avif;base64,") {
+			continue
+		}
+		source, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(asset, "data:image/avif;base64,"))
+		if err != nil || len(source) < 20 || string(source[4:8]) != "ftyp" {
+			t.Fatal("missing valid AVIF fixture")
+		}
+		want, pixels, err := normalizeRaster(t.Context(), "image/avif", source, maxAssetPixels)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Change only the major brand, retaining the AVIF compatible brand.
+		copy(source[8:12], "mif1")
+		got, actual, err := normalizeRaster(t.Context(), "image/avif", source, pixels)
+		if err != nil || !bytes.Equal(got, want) || actual != pixels {
+			t.Fatalf("valid compatible-brand AVIF did not preserve its output: %v", err)
+		}
+		if _, _, err := normalizeRaster(t.Context(), "image/avif", source, pixels-1); err == nil {
+			t.Fatal("compatible-brand AVIF bypassed the pixel budget")
+		}
+		return
+	}
+	t.Fatal("no AVIF asset in the browser corpus")
 }

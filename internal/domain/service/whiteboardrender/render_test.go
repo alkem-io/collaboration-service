@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"testing"
+	"time"
 
 	yjs "github.com/antst/go-yjs/crdt"
 )
@@ -235,6 +236,18 @@ func TestInvalidSceneRefusesBothOutputsBeforeResolvingAssets(t *testing.T) {
 			shape.Set("width", 9e5)
 			shape.Set("height", 9e5)
 		}},
+		{"over-budget default hatching", func(_ *yjs.Doc, _, shape *yjs.YMap) {
+			shape.Delete("fillStyle")
+			shape.Set("width", 9e5)
+			shape.Set("height", 9e5)
+		}},
+		{"over-budget embed fallback hatching", func(_ *yjs.Doc, _, shape *yjs.YMap) {
+			shape.Set("type", "iframe")
+			shape.Set("fillStyle", "hachure")
+			shape.Set("backgroundColor", "transparent")
+			shape.Set("width", 9e5)
+			shape.Set("height", 9e5)
+		}},
 		{"invalid background", func(d *yjs.Doc, _, _ *yjs.YMap) {
 			d.GetMap("appState").Set("viewBackgroundColor", `url("https://outside.invalid")`)
 		}},
@@ -257,5 +270,63 @@ func TestInvalidSceneRefusesBothOutputsBeforeResolvingAssets(t *testing.T) {
 				t.Fatalf("invalid input produced partial output: %+v, %v", out, err)
 			}
 		})
+	}
+}
+
+func TestFrameCaptionFitsWithGlyphBoundariesAndEllipsis(t *testing.T) {
+	const title = "AVA 東京 longer"
+	const size = 15
+	if got := clipFrameTitle(title, size, 1000); got != title {
+		t.Fatalf("wide frame changed title: %q", got)
+	}
+	const prefix = "AVA 東..."
+	if got := clipFrameTitle(title, size, captionWidth(prefix, size)); got != prefix {
+		t.Fatalf("unexpected title truncation: %q", got)
+	}
+	if got := clipFrameTitle(title, size, captionWidth("...", size)); got != "..." {
+		t.Fatalf("expected only the fitting ellipsis: %q", got)
+	}
+	if got := clipFrameTitle(title, size, 1); got != "" {
+		t.Fatalf("too-narrow frame emitted a caption: %q", got)
+	}
+}
+
+func TestFrameOnlyCJKTitlesRenderDifferentGlyphs(t *testing.T) {
+	renderTitle := func(title string) Result {
+		t.Helper()
+		doc := yjs.NewDoc("frame-only-cjk")
+		defer doc.Destroy()
+		addRenderElement(doc, map[string]any{
+			"id": "frame", "index": "a0", "type": "frame", "name": title,
+			"width": 250., "height": 100., "opacity": 100., "strokeWidth": 1.,
+			"strokeColor": "transparent", "backgroundColor": "transparent",
+		})
+		// Like the browser corpus, allow for race/coverage instrumentation;
+		// this checks glyph selection, not the production request deadline.
+		ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+		defer cancel()
+		out, err := render(ctx, doc, nil, 500, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	a, b := renderTitle("東京"), renderTitle("大阪")
+	if bytes.Equal(a.Full, b.Full) || bytes.Equal(a.Card, b.Card) {
+		t.Fatal("different CJK frame titles painted the same missing glyphs")
+	}
+}
+
+func TestHiddenEmbedDoesNotLeaveAVisibleCaption(t *testing.T) {
+	doc := yjs.NewDoc("hidden-embed")
+	defer doc.Destroy()
+	addRenderElement(doc, map[string]any{
+		"id": "embed", "index": "a0", "type": "embeddable", "width": 180., "height": 90.,
+		"opacity": 0., "strokeWidth": 2., "fillStyle": "solid",
+		"strokeColor": "#000000", "backgroundColor": "transparent",
+	})
+	out, err := Render(t.Context(), doc, nil)
+	if err != nil || previewContainsInk(t, out.Full) || previewContainsInk(t, out.Card) {
+		t.Fatalf("hidden embed left visible content: %v", err)
 	}
 }

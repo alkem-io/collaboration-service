@@ -13,47 +13,81 @@ import (
 var captionFontOnce sync.Once
 var previewCaptionFont *sfnt.Font
 
-// This is explicitly for exporter-owned captions. Saved whiteboard text is
-// never wrapped or truncated by this renderer.
-func captionWidth(s string, size float64) float64 {
+type captionMeasure struct {
+	buf  sfnt.Buffer
+	ppem fixed.Int26_6
+}
+
+func newCaptionMeasure(size float64) *captionMeasure {
 	captionFontOnce.Do(func() {
 		data, err := fontAssets.readFile("fonts/Liberation/LiberationSans-Regular.ttf")
 		must(err)
 		previewCaptionFont, err = sfnt.Parse(data)
 		must(err)
 	})
-	var buf sfnt.Buffer
-	var previous sfnt.GlyphIndex
-	var width fixed.Int26_6
-	ppem := fixed.Int26_6(math.Round(size * 64))
-	for _, r := range s {
-		glyph, err := previewCaptionFont.GlyphIndex(&buf, r)
-		must(err)
-		advance, err := previewCaptionFont.GlyphAdvance(&buf, glyph, ppem, font.HintingNone)
-		must(err)
-		if previous != 0 {
-			if kern, err := previewCaptionFont.Kern(&buf, previous, glyph, ppem, font.HintingNone); err == nil {
-				width += kern
-			}
+	return &captionMeasure{ppem: fixed.Int26_6(math.Round(size * 64))}
+}
+
+func (m *captionMeasure) glyph(r rune) sfnt.GlyphIndex {
+	g, err := previewCaptionFont.GlyphIndex(&m.buf, r)
+	must(err)
+	return g
+}
+
+func (m *captionMeasure) kern(previous, glyph sfnt.GlyphIndex) int64 {
+	if previous != 0 {
+		if k, err := previewCaptionFont.Kern(&m.buf, previous, glyph, m.ppem, font.HintingNone); err == nil {
+			return int64(k)
 		}
-		width += advance
+	}
+	return 0
+}
+
+func (m *captionMeasure) advance(previous, glyph sfnt.GlyphIndex) int64 {
+	a, err := previewCaptionFont.GlyphAdvance(&m.buf, glyph, m.ppem, font.HintingNone)
+	must(err)
+	return int64(a) + m.kern(previous, glyph)
+}
+
+func (m *captionMeasure) width(s string) int64 {
+	var previous sfnt.GlyphIndex
+	var width int64
+	for _, r := range s {
+		glyph := m.glyph(r)
+		width += m.advance(previous, glyph)
 		previous = glyph
 	}
-	return float64(width) / 64
+	return width
+}
+
+// Only exporter-owned captions are measured here, never saved whiteboard text.
+func captionWidth(s string, size float64) float64 {
+	return float64(newCaptionMeasure(size).width(s)) / 64
 }
 
 func clipFrameTitle(s string, size, maxWidth float64) string {
-	if captionWidth(s, size) <= maxWidth {
+	const suffix = "..."
+	m := newCaptionMeasure(size)
+	limit := maxWidth * 64
+	ellipsis, dot := m.width(suffix), m.glyph('.')
+	var previous sfnt.GlyphIndex
+	var width int64
+	end := 0
+	for i, r := range s {
+		if i > 0 && float64(width+m.kern(previous, dot)+ellipsis) <= limit {
+			end = i
+		}
+		glyph := m.glyph(r)
+		width += m.advance(previous, glyph)
+		previous = glyph
+	}
+	if float64(width) <= limit {
 		return s
 	}
-	rs := []rune(s)
-	for i := len(rs) - 1; i > 0; i-- {
-		candidate := string(rs[:i]) + "..."
-		if captionWidth(candidate, size) <= maxWidth {
-			return candidate
-		}
+	if end > 0 || float64(ellipsis) <= limit {
+		return s[:end] + suffix
 	}
-	return s
+	return ""
 }
 
 func wrapEmbedCaption(s string, size, maxWidth float64) string {

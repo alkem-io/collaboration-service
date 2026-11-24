@@ -1027,7 +1027,7 @@ func (r *Room) run() {
 
 		case <-previewDue:
 			r.previewTimer = nil
-			r.offerSavedPreview()
+			r.offerSavedPreview(false)
 
 		case <-contribTimer.C:
 			r.startContributionFlush()
@@ -2429,7 +2429,7 @@ func (r *Room) releaseIfEmpty(saveTimer, idleTimer *time.Timer) bool {
 	// here. It is still the honest one: the room is being released and the
 	// document is intact and flushed, which is precisely "come back later".
 	if !r.dirty {
-		r.offerSavedPreview()
+		r.offerSavedPreview(true)
 	}
 	r.teardown(model.NewSessionEnd(model.CodeServerShutdown), nil)
 	return true

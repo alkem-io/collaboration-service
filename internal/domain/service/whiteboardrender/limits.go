@@ -147,7 +147,10 @@ func validPaint(e savedElement) bool {
 }
 
 func roughWorkEstimate(e savedElement) float64 {
-	if e.BackgroundColor == "" || e.BackgroundColor == "transparent" || e.FillStyle == "" || e.FillStyle == "solid" {
+	if isEmbed(e) {
+		e = embedShape(e)
+	}
+	if style := roughFillStyle(e); style == "" || style == "solid" {
 		return 0
 	}
 	// A conservative count of hatch traversals independent of output scale;

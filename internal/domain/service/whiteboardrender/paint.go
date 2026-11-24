@@ -13,19 +13,22 @@ import (
 
 func isEmbed(e savedElement) bool { return e.Type == "embeddable" || e.Type == "iframe" }
 
-func paintEmbed(paint *strings.Builder, e savedElement) {
-	shape := e
+func embedShape(e savedElement) savedElement {
 	if e.BackgroundColor == "transparent" && e.StrokeColor == "transparent" {
-		shape.BackgroundColor, shape.FillStyle, shape.Roughness = "#d3d3d3", "solid", 0
+		e.BackgroundColor, e.FillStyle, e.Roughness = "#d3d3d3", "solid", 0
 	} else if e.Type == "iframe" {
 		if e.StrokeColor == "transparent" {
-			shape.StrokeColor = "#000000"
+			e.StrokeColor = "#000000"
 		}
 		if e.BackgroundColor == "transparent" {
-			shape.BackgroundColor = "#f4f4f6"
+			e.BackgroundColor = "#f4f4f6"
 		}
 	}
-	paintShape(paint, shape)
+	return e
+}
+
+func paintEmbed(paint *strings.Builder, e savedElement) {
+	paintShape(paint, embedShape(e))
 	caption := e.Link
 	switch {
 	case e.Type == "iframe":
@@ -42,7 +45,7 @@ func paintEmbed(paint *strings.Builder, e savedElement) {
 	}
 	h := size * 1.15 * float64(1+strings.Count(caption, "\n"))
 	paintText(paint, savedElement{X: e.X, Y: e.Y + (e.Height-h)/2, Width: e.Width, Height: h, Angle: e.Angle,
-		Text: caption, TextAlign: "center", FontFamily: 2, FontSize: size, LineHeight: 1.15, StrokeColor: ink, Opacity: 100})
+		Text: caption, TextAlign: "center", FontFamily: 2, FontSize: size, LineHeight: 1.15, StrokeColor: ink, Opacity: e.Opacity})
 }
 
 func view(items []savedElement, frames, labels map[string]savedElement, ids map[string]bool) (float64, float64, int, int) {
@@ -75,6 +78,8 @@ func view(items []savedElement, frames, labels map[string]savedElement, ids map[
 			t = min(t, e.Y-frameNameOffset-frameNameHeight)
 		}
 	}
+	// The pinned browser getCanvasSize pads getCommonBounds, which does not
+	// inflate ordinary shape bounds by stroke width. Match that export clip.
 	return l - pad, t - pad, int(r - l + 2*pad), int(b - t + 2*pad)
 }
 
@@ -137,6 +142,7 @@ func paintImage(paint *strings.Builder, i int, e savedElement, content []byte) {
 		scaleX, scaleY := e.Width/crop.Width, e.Height/crop.Height
 		ix, iy = -crop.X*scaleX, -crop.Y*scaleY
 		iw, ih = crop.NaturalWidth*scaleX, crop.NaturalHeight*scaleY
+		validateImageTransform(ix, iy, iw, ih)
 		fmt.Fprintf(paint, `<defs><clipPath id="image%d"><rect width="%g" height="%g"/></clipPath></defs><g clip-path="url(#image%d)">`,
 			i, e.Width, e.Height, i)
 	}
@@ -146,6 +152,14 @@ func paintImage(paint *strings.Builder, i int, e savedElement, content []byte) {
 		paint.WriteString("</g>")
 	}
 	paint.WriteString("</g>")
+}
+
+func validateImageTransform(values ...float64) {
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			panic("invalid saved image crop transform")
+		}
+	}
 }
 
 func paintText(paint *strings.Builder, e savedElement) {
@@ -233,17 +247,30 @@ func roughStyle(e savedElement) (*rough.Options, string) {
 		PreserveVertices: rough.Bool(e.Roughness < 2), FillStyle: rough.String(e.FillStyle),
 		FixedDecimalPlaceDigits: rough.Float64(2),
 	}
-	fill := e.BackgroundColor != "transparent"
-	switch e.Type {
-	case "arrow":
-		fill = false
-	case "line":
-		fill = fill && len(e.Points) >= 3 && dist(e.Points[0], e.Points[len(e.Points)-1]) <= 8
-	}
-	if fill {
+	if style := roughFillStyle(e); style != "" {
+		options.FillStyle = rough.String(style)
 		options.Fill = rough.String(e.BackgroundColor)
 	}
 	return options, dashes
+}
+
+func roughFillStyle(e savedElement) string {
+	if e.BackgroundColor == "" || e.BackgroundColor == "transparent" {
+		return ""
+	}
+	switch e.Type {
+	case "line":
+		if len(e.Points) < 3 || dist(e.Points[0], e.Points[len(e.Points)-1]) > 8 {
+			return ""
+		}
+	case "rectangle", "ellipse", "diamond", "iframe", "embeddable":
+	default:
+		return ""
+	}
+	if e.FillStyle == "" {
+		return "hachure"
+	}
+	return e.FillStyle
 }
 
 func effectiveRoughness(e savedElement) float64 {

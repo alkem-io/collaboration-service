@@ -43,7 +43,6 @@ func fontOptions(items []savedElement) []aster.Option {
 	must(err)
 	var opts []aster.Option
 	used := make(map[int]string)
-	needCJK := false
 	chars := make(map[rune]bool)
 	register := func(alias, name string) {
 		b, err := fontAssets.readFile("fonts/" + name)
@@ -52,28 +51,32 @@ func fontOptions(items []savedElement) []aster.Option {
 	}
 	for i := range items {
 		e := &items[i]
-		if e.Type != "text" {
+		caption := e.Text
+		switch {
+		case e.Type == "text":
+			if css, ok := used[e.FontFamily]; ok {
+				e.fontCSS = css
+			} else {
+				face, ok := fontFaces[e.FontFamily]
+				if !ok {
+					panic("unknown saved font family")
+				}
+				css := faceCSS(pack, face, register)
+				e.fontCSS, used[e.FontFamily] = css, css
+			}
+		case isFrame(*e):
+			caption = e.Name
+		default:
 			continue
 		}
-		if css, ok := used[e.FontFamily]; ok {
-			e.fontCSS = css
-		} else {
-			face, ok := fontFaces[e.FontFamily]
-			if !ok {
-				panic("unknown saved font family")
-			}
-			css := faceCSS(pack, face, register)
-			e.fontCSS, used[e.FontFamily] = css, css
-		}
-		for _, r := range e.Text {
+		for _, r := range caption {
 			if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
 				chars[r] = true
-				needCJK = true
 			}
 		}
 	}
 	var fallback []string
-	if needCJK {
+	if len(chars) != 0 {
 		for i, row := range strings.Split(strings.TrimSpace(xiaolaiManifest), "\n") {
 			name, intervals, ok := strings.Cut(row, "\t")
 			if !ok {

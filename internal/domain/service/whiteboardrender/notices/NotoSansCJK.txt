@@ -1,5 +1,6 @@
 Noto Sans CJK JP, release Sans2.004, developed by Adobe and Google.
-Copyright belongs to Adobe; Noto trademarks belong to Google.
+Copyright 2014-2021 Adobe (http://www.adobe.com/).
+Noto is a trademark of Google Inc.
 https://github.com/notofonts/noto-cjk/tree/Sans2.004
 
 This Font Software is licensed under the SIL Open Font License,

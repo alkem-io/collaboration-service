@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/antst/go-yjs/backend"
@@ -22,6 +23,52 @@ import (
 
 func previewTestCandidate(id model.DocumentID, content string) previewCandidate {
 	return previewCandidate{id: id, kind: model.ContentTypeWhiteboard, fingerprint: sha256.Sum256([]byte(content))}
+}
+
+func TestFinalPreviewOfferCoversOnlyAnUnsuccessfulActivePublication(t *testing.T) {
+	for _, result := range []string{"success", "failed", "invalidated"} {
+		t.Run(result, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := previewTestCandidate("released", "final saved content")
+				c.published = new(atomic.Bool)
+				resume := make(chan struct{})
+				calls := 0
+				worker := newPreviewWorker(1, func(ctx context.Context, got previewCandidate) {
+					calls++
+					if calls == 1 {
+						select {
+						case <-resume:
+							if result == "success" {
+								got.published.Store(true)
+							}
+						case <-ctx.Done():
+						}
+					}
+				})
+				defer worker.close()
+				if !worker.offer(c) {
+					t.Fatal("initial offer refused")
+				}
+				synctest.Wait()
+				c.final = true
+				if calls != 1 || !worker.offer(c) {
+					t.Fatal("final release failed to retain its in-flight revision")
+				}
+				if result == "invalidated" {
+					worker.invalidate(c.id)
+				}
+				close(resume)
+				synctest.Wait()
+				want := 1
+				if result == "failed" {
+					want++
+				}
+				if calls != want {
+					t.Fatalf("publication attempts = %d, want %d", calls, want)
+				}
+			})
+		})
+	}
 }
 
 func TestPreviewWorkerCoalescesBoundsAndInvalidates(t *testing.T) {
@@ -119,7 +166,7 @@ func TestPreviewWorkerNewRevisionCancelsAnOlderRender(t *testing.T) {
 
 type blockedPreviewCreation struct {
 	previewFilesFixture
-	started, stopped chan struct{}
+	started, stopped, release chan struct{}
 }
 
 func (f *blockedPreviewCreation) CreatePreview(ctx context.Context, _ uuid.UUID, _, mediaType string, _ []byte) (bool, error) {
@@ -129,15 +176,17 @@ func (f *blockedPreviewCreation) CreatePreview(ctx context.Context, _ uuid.UUID,
 	close(f.started)
 	<-ctx.Done()
 	close(f.stopped)
+	<-f.release // keep the worker busy while the test observes later admissions
 	return false, ctx.Err()
 }
 
 func TestManagerOwnerInvalidationCancelsAnActiveMemoPublication(t *testing.T) {
 	deps := newTestDeps()
-	files := &blockedPreviewCreation{started: make(chan struct{}), stopped: make(chan struct{})}
+	files := &blockedPreviewCreation{started: make(chan struct{}), stopped: make(chan struct{}), release: make(chan struct{})}
 	deps.PreviewFiles, deps.PreviewCheckpoint = files, deps.store
 	m := NewManager(deps.Deps, fastConfig(), nil, zap.NewNop())
 	t.Cleanup(m.Close)
+	defer close(files.release)
 	id := model.DocumentID(uuid.NewString())
 	if err := m.PreRegister(t.Context(), model.Metadata{
 		ID: id, ContentType: model.ContentTypeMemo, ContentPointer: uuid.NewString(),

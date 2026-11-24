@@ -59,7 +59,7 @@ coverage was **93.08% (3,701/3,976 statements)** and scoped combined coverage wa
 **93.5%** with the real file-service and Traefik checks included. Live RabbitMQ
 was not configured in that run.
 
-Final local verification (T021): **95.19% unit-only (3,800/3,992 statements)**,
+Initial PR verification (T021): **95.19% unit-only (3,800/3,992 statements)**,
 with the race detector and no tagged tests, and **95.4% scoped combined**,
 with the full WebSocket suite, real loopback file-service, and Traefik. Build,
 vet (both tag sets), lint, and the race-enabled WebSocket suite passed. New
@@ -83,6 +83,14 @@ is required. A disposable local Docker engine failed to initialize its guest
 networking; the actual image build and RabbitMQ-backed integration tests were
 not run locally. The existing PR image and integration workflows exercise
 those checks. No deployment or consumer cutover was performed.
+
+Review follow-up: **95.31% race-enabled unit-only (3,844/4,033 statements)**.
+The real file-service and Traefik walk still verifies stable output IDs, and
+now compares the stored memo marker and body exactly. A controlled-clock
+test observes no publication offer on unchanged reopen, independent of the
+background worker. The pinned browser's [canvas framing](https://github.com/alkem-io/excalidraw-yjs/blob/90b57f27faa35b570844c2f277e277cf450a7e73/packages/excalidraw/scene/export.ts#L565-L574)
+uses common geometry bounds plus padding; the renderer intentionally matches
+its clipping for ordinary shapes with strokes wider than the padding.
 
 ## 3. Verify the stored artifacts, not just worker completion
 
@@ -113,7 +121,7 @@ COLLAB_TEST_PREVIEW_FILE_SERVICE=http://127.0.0.1:57353 \
   go test -race -tags e2e ./test/e2e -run '^TestDocumentPreviewsPublish' -v
 ```
 
-Result against file-service `259dda0d` and disposable PostgreSQL: the open whiteboard and memo published one missing full PNG and one missing Markdown row; the existing card was overwritten, not recreated. Two POSTs total from collab. Normal release after saved clears produced white PNGs and visually empty Markdown at unchanged IDs. Restart + unchanged reopen added no writes. The memo endpoint returned its exact iframe wrapper without the file marker; direct public requests for all three files returned 403. Deterministic room tests pin multiple save windows, final submission ahead of the next window, and no repeat offer for an already published revision.
+Result against file-service `259dda0d` and disposable PostgreSQL: the open whiteboard and memo published one missing full PNG and one missing Markdown row; the existing card was overwritten, not recreated. Two POSTs total from collab. Normal release after saved clears produced white PNGs and visually empty Markdown at unchanged IDs. Restart and unchanged reopen preserved all IDs. The memo endpoint returned its exact iframe wrapper without the file marker; direct public requests for all three files returned 403. Deterministic room tests pin multiple save windows, the final submission ahead of the next window, and zero offers on an unchanged reopen of a saved board or memo.
 
 ## 4. Verify the memo route boundary
 
@@ -140,7 +148,7 @@ T008 result: private cold nonempty Markdown matched the pinned TS oracle; saved 
 
 Recheck the initial bounds recorded in §1 under combined load. On the same host, compare save/barrier responsiveness and process CPU/memory with the feature off and under representative whiteboard render bursts plus memo reads. Include image-heavy and large supported saved scenes, full bounded queues and injected storage failure. Adjust only from measured evidence, confirm no effect on source bytes or close semantics, and record what was actually measured. Report service-only proof separately from the future live identity handoff and protected routing; no public/client cutover is part of this run.
 
-The in-process pressure test starts a close-triggered preview, fills its four pending slots, rejects the fifth, and concurrently reads cold memos. The closing room has already released while the preview is blocked. With optional real rendering of a 2,300-element fixture (five runs from the same compiled test binary), the unrelated save+barrier was 21.3–22.2 ms before render and 21.0–26.3 ms during render. The matched control, holding the queue without rasterizing, was 21.6–24.0 ms under pressure. Peak RSS was 29.3 MiB without rasterization versus 86.5 MiB with it; CPU (user+system) for five runs was 0.03 s versus 0.99 s. These are local process measurements, not a deployment SLA. [Research R7](research.md#r7--bounded-runtime-and-qualification) separately records the real large/asset-heavy oracle burst.
+The in-process pressure test starts a close-triggered preview, fills its four pending slots, rejects the fifth, and holds two cold memo readers inside checkpoint reads across the timed save. The closing room has already released while the preview slot is held. The optional mode also checks that the renderer produces both outputs for a 2,300-element fixture; that mode does not establish whether rasterization overlapped the save sample. Interpret its barrier duration only as a queue-pressure measurement, not concurrent raster latency or a deployment SLA. [Research R7](research.md#r7--bounded-runtime-and-qualification) separately records the large/asset-heavy oracle burst.
 
 ```sh
 go test -race ./internal/domain/service -run '^TestBlockedPreviewAndFullQueue' -count=5

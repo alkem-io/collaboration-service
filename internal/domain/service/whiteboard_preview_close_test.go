@@ -16,7 +16,9 @@ import (
 
 //nolint:gocyclo // Subtests share the same room trace so only the release cause varies.
 func TestPreviewReleaseRequiresDurableChangedContent(t *testing.T) {
-	for _, mode := range []string{"saved normally", "persist on release", "unchanged", "failed save", "memo", "owner deletion", "shutdown"} {
+	// The already-saved release case is covered on a fake clock by
+	// TestPreviewRefreshCoalescesSuccessfulSavesWhileOpenAndFinishesOnRelease.
+	for _, mode := range []string{"persist on release", "unchanged", "failed save", "memo", "owner deletion", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := fastConfig()
 			cfg.IdleTimeout = 0
@@ -48,16 +50,6 @@ func TestPreviewReleaseRequiresDurableChangedContent(t *testing.T) {
 					client.addElement("live", map[string]interface{}{"type": "rectangle"})
 				}
 			}
-			if mode == "saved normally" {
-				requestDurability(client, "before-close")
-				waitFor(t, "durable save", func() bool { return barrierOutcome(client, "before-close") != nil })
-				if got := barrierOutcome(client, "before-close"); got.Kind != model.ControlPersisted {
-					t.Fatalf("duration barrier changed: %+v", got)
-				}
-				if len(events) != 0 {
-					t.Fatal("preview ran before the open-room coalescing window")
-				}
-			}
 			switch mode {
 			case "owner deletion":
 				if err := manager.CloseDeleted(t.Context(), id); err != nil {
@@ -69,7 +61,7 @@ func TestPreviewReleaseRequiresDurableChangedContent(t *testing.T) {
 				client.session.Leave()
 			}
 			waitFor(t, "room release", func() bool { return manager.RoomCount() == 0 })
-			if mode != "saved normally" && mode != "persist on release" && mode != "memo" {
+			if mode != "persist on release" && mode != "memo" {
 				if len(events) != 0 {
 					t.Fatal("unexpected preview candidate")
 				}
@@ -157,7 +149,7 @@ func TestPreviewRefreshCoalescesSuccessfulSavesWhileOpenAndFinishesOnRelease(t *
 		synctest.Wait()
 		time.Sleep(time.Nanosecond) // zero idle grace releases on the next timer tick
 		final := expectLatest()
-		if final.fingerprint == second.fingerprint || manager.RoomCount() != 0 {
+		if !final.final || final.fingerprint == second.fingerprint || manager.RoomCount() != 0 {
 			t.Fatal("the normal release did not submit the newer save ahead of its window")
 		}
 		time.Sleep(5 * time.Second)
@@ -169,6 +161,12 @@ func TestPreviewRefreshCoalescesSuccessfulSavesWhileOpenAndFinishesOnRelease(t *
 }
 
 func TestPreviewReleaseDoesNotRepeatAPublishedRevision(t *testing.T) {
+	for _, kind := range []model.ContentType{model.ContentTypeMemo, model.ContentTypeWhiteboard} {
+		t.Run(string(kind), func(t *testing.T) { checkPreviewReleaseDoesNotRepeat(t, kind) })
+	}
+}
+
+func checkPreviewReleaseDoesNotRepeat(t *testing.T, kind model.ContentType) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := fastConfig()
 		manager, _ := testManager(t, cfg)
@@ -179,9 +177,13 @@ func TestPreviewReleaseDoesNotRepeatAPublishedRevision(t *testing.T) {
 			c.published.Store(true)
 		}
 		client := newFakeClient(t)
-		client.join(manager, "preview-published", model.ContentTypeMemo)
+		client.join(manager, "preview-published", kind)
 		client.observeUpdates()
-		client.insertText("published memo")
+		if kind == model.ContentTypeMemo {
+			client.insertText("published memo")
+		} else {
+			client.addElement("published-shape", map[string]any{"type": "rectangle"})
+		}
 		synctest.Wait()
 		time.Sleep(cfg.SaveDebounce + previewSaveWindow)
 		synctest.Wait()
@@ -199,10 +201,18 @@ func TestPreviewReleaseDoesNotRepeatAPublishedRevision(t *testing.T) {
 		// receipt. Treat that checkpoint as the initial revision so the
 		// next read-only visit doesn't accidentally trigger another write.
 		reopened := newFakeClient(t)
-		reopened.joinExisting(manager, "preview-published", model.ContentTypeMemo)
+		reopened.joinExisting(manager, "preview-published", kind)
 		synctest.Wait()
-		if got := reopened.text(); got != "published memo" {
-			t.Fatalf("reopen did not use the saved document: %q", got)
+		if kind == model.ContentTypeMemo {
+			if got := reopened.text(); got != "published memo" {
+				t.Fatalf("reopen did not use the saved memo: %q", got)
+			}
+		} else {
+			reopened.withDoc(func(doc *ycrdt.Doc) {
+				if !hasElement(doc, "published-shape") {
+					t.Fatal("reopen did not use the saved whiteboard")
+				}
+			})
 		}
 		reopened.session.Leave()
 		synctest.Wait()
@@ -351,6 +361,10 @@ func TestWhiteboardReleaseStoresClearWithUnchangedStateVector(t *testing.T) {
 // The new editor sees the same unsaved room, and a later ordinary release
 // makes those bytes durable without an extra durability request.
 func TestWhiteboardRejoinDuringIdleGraceKeepsTheUnflushedRoom(t *testing.T) {
+	synctest.Test(t, checkWhiteboardRejoinDuringIdleGrace)
+}
+
+func checkWhiteboardRejoinDuringIdleGrace(t *testing.T) {
 	cfg := fastConfig()
 	cfg.SaveDebounce = time.Hour
 	cfg.IdleTimeout = time.Second
@@ -363,6 +377,7 @@ func TestWhiteboardRejoinDuringIdleGraceKeepsTheUnflushedRoom(t *testing.T) {
 	a.observeUpdates()
 	a.addElement("new", map[string]interface{}{"type": "rectangle"})
 	a.session.Leave()
+	synctest.Wait()
 
 	b := newFakeClient(t)
 	b.joinExisting(manager, id, model.ContentTypeWhiteboard)
@@ -375,6 +390,8 @@ func TestWhiteboardRejoinDuringIdleGraceKeepsTheUnflushedRoom(t *testing.T) {
 		t.Fatalf("grace-period reconnect unexpectedly saved the room: %v", err)
 	}
 	b.session.Leave()
+	synctest.Wait()
+	time.Sleep(cfg.IdleTimeout)
 	waitFor(t, "normal idle release", func() bool { return manager.RoomCount() == 0 })
 	checkpoint, err := deps.storedState(t.Context(), string(id))
 	if err != nil {

@@ -42,7 +42,15 @@ func TestBlockedPreviewAndFullQueueDoNotDelayAnotherBoardDurability(t *testing.T
 	})
 	t.Cleanup(worker.close)
 	offers := make(chan bool, 1)
-	manager.deps.offerPreview = func(c previewCandidate) { offers <- worker.offer(c) }
+	manager.deps.offerPreview = func(c previewCandidate) {
+		accepted := worker.offer(c)
+		if c.id == "held-preview" {
+			select {
+			case offers <- accepted:
+			default:
+			}
+		}
+	}
 	writer := newFakeClient(t)
 	writer.join(manager, "independent-board", model.ContentTypeWhiteboard)
 	writer.observeUpdates()
@@ -70,8 +78,13 @@ func TestBlockedPreviewAndFullQueueDoNotDelayAnotherBoardDurability(t *testing.T
 		t.Fatal("did not receive close-triggered preview")
 	}
 	waitFor(t, "closing room released while its preview is blocked", func() bool { return manager.RoomCount() == 1 })
-	if !<-offers {
-		t.Fatal("close candidate was refused")
+	select {
+	case accepted := <-offers:
+		if !accepted {
+			t.Fatal("close candidate was refused")
+		}
+	default:
+		t.Fatal("no close admission was observed")
 	}
 	for i := 0; i < 4; i++ {
 		if !worker.offer(previewTestCandidate(model.DocumentID(fmt.Sprintf("queued-%d", i)), "fixture")) {
@@ -89,15 +102,26 @@ func TestBlockedPreviewAndFullQueueDoNotDelayAnotherBoardDurability(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	entered := make(chan struct{}, 2)
+	resume, unblock := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	defer func() {
+		unblock()
+		wg.Wait()
+	}()
 	readMemo := NewMemoMarkdownReader(
 		projectionIndex{load: func(_ context.Context, id model.DocumentID) (model.Metadata, error) {
 			return model.Metadata{ID: id, ContentType: model.ContentTypeMemo}, nil
 		}},
 		projectionCheckpoint{load: func(context.Context, backend.DocumentID) (persistence.Checkpoint, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-resume.Done()
 			return persistence.Checkpoint{Update: savedMemo, Encoding: persistence.EncodingV2}, nil
 		}},
 	)
-	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {
 			for range 10 {
@@ -108,8 +132,16 @@ func TestBlockedPreviewAndFullQueueDoNotDelayAnotherBoardDurability(t *testing.T
 			}
 		})
 	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("both memo readers did not enter checkpoint reads")
+		}
+	}
 	close(draw)
 	loaded := save("during-preview")
+	unblock()
 	wg.Wait()
 	if measureRenderer {
 		select {
@@ -121,7 +153,7 @@ func TestBlockedPreviewAndFullQueueDoNotDelayAnotherBoardDurability(t *testing.T
 			t.Fatal("representative render did not settle")
 		}
 	}
-	t.Logf("source barrier: %s baseline, %s with held preview + four queued + concurrent cold memo reads", baseline, loaded)
+	t.Logf("source barrier: %s baseline, %s with held preview + four queued + two blocked memo reads (raster overlap not measured)", baseline, loaded)
 }
 
 func renderLoadFixture(ctx context.Context) error {

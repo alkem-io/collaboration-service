@@ -24,6 +24,7 @@ type previewCandidate struct {
 	kind        model.ContentType
 	fingerprint [sha256.Size]byte
 	published   *atomic.Bool
+	final       bool
 }
 
 func (c previewCandidate) wasPublished() bool {
@@ -46,7 +47,7 @@ func (r *Room) notePreviewSave(snapshot []byte) {
 	}
 }
 
-func (r *Room) offerSavedPreview() {
+func (r *Room) offerSavedPreview(final bool) {
 	if r.deps.offerPreview == nil || r.savedPreview == r.initialPreview {
 		return
 	}
@@ -56,7 +57,9 @@ func (r *Room) offerSavedPreview() {
 		}
 	}
 	if !r.previewOffer.wasPublished() {
-		r.deps.offerPreview(r.previewOffer)
+		candidate := r.previewOffer
+		candidate.final = final
+		r.deps.offerPreview(candidate)
 	}
 }
 
@@ -103,19 +106,22 @@ func (w *previewWorker) offer(c previewCandidate) bool {
 	if c.wasPublished() {
 		return true
 	}
+	final := c.final
+	c.final = false // scheduling intent is not part of the work identity
 	for i, pending := range w.queue {
 		if pending.id == c.id {
 			w.queue[i] = c
 			return true
 		}
 	}
-	if w.cancel != nil && w.active == c {
+	sameActive := w.cancel != nil && w.active == c
+	if sameActive && !final {
 		return true
 	}
 	if len(w.queue) == cap(w.queue) {
 		return false
 	}
-	if w.cancel != nil && w.active.id == c.id {
+	if w.cancel != nil && w.active.id == c.id && !sameActive {
 		w.cancel()
 	}
 	w.queue = append(w.queue, c)
@@ -160,7 +166,11 @@ func (w *previewWorker) run(render func(context.Context, previewCandidate)) {
 				if !ok {
 					break
 				}
-				render(ctx, candidate)
+				// A final release may queue the active revision once. Skip it
+				// if the in-flight attempt published every artifact.
+				if !candidate.wasPublished() {
+					render(ctx, candidate)
+				}
 				w.mu.Lock()
 				w.cancel()
 				w.cancel = nil

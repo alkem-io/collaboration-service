@@ -255,8 +255,18 @@ func normalizeAsset(ctx context.Context, engine *aster.Converter, mime string, r
 }
 
 func normalizeRaster(ctx context.Context, mime string, raw []byte, remaining int64) ([]byte, int64, error) {
-	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
-	if err != nil || "image/"+format != mime {
+	var cfg image.Config
+	var err error
+	if mime == "image/avif" {
+		cfg, err = avif.DecodeConfig(bytes.NewReader(raw))
+	} else {
+		var format string
+		cfg, format, err = image.DecodeConfig(bytes.NewReader(raw))
+		if err == nil && "image/"+format != mime {
+			return nil, 0, errors.New("stored asset does not match declared image MIME")
+		}
+	}
+	if err != nil {
 		return nil, 0, errors.New("stored asset does not match declared image MIME")
 	}
 	pixels, err := boundedPixels(cfg, remaining)
@@ -264,7 +274,7 @@ func normalizeRaster(ctx context.Context, mime string, raw []byte, remaining int
 		return nil, 0, err
 	}
 	var decoded image.Image
-	if format == "avif" {
+	if mime == "image/avif" {
 		decoded, err = avif.Decode(bytes.NewReader(raw), avif.Options{AutoRotate: true, FrameSizeLimit: int(remaining)})
 	} else {
 		decoded, _, err = image.Decode(bytes.NewReader(raw))

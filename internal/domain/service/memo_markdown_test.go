@@ -86,6 +86,7 @@ func TestMemoMarkdownUnsupportedNestedContentNeverReturnsPartialMarkdown(t *test
 		{"table", "tableRow", ""},
 		{"table/tableRow", "paragraph", ""},
 		{"table/tableRow/tableCell", "$text", ""},
+		{"table/tableRow/tableCell", "unsupported", ""},
 		{"table/tableRow/tableCell/paragraph", "unsupported", ""},
 		{"blockquote/table/tableRow/tableCell", "unsupported", ""},
 		{"", "horizontalRule/paragraph", ""},
