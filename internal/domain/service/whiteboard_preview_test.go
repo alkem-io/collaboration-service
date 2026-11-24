@@ -164,6 +164,41 @@ func TestPreviewWorkerNewRevisionCancelsAnOlderRender(t *testing.T) {
 	}
 }
 
+func TestPreviewWorkerCancelsActiveRevisionWhenReplacingItsQueuedFinalOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old := previewTestCandidate("same", "old revision")
+		newer := previewTestCandidate("same", "newer revision")
+		var started []previewCandidate
+		worker := newPreviewWorker(1, func(ctx context.Context, candidate previewCandidate) {
+			started = append(started, candidate)
+			if candidate == old {
+				<-ctx.Done()
+			}
+		})
+		defer worker.close()
+		if !worker.offer(old) {
+			t.Fatal("first offer refused")
+		}
+		synctest.Wait()
+		final := old
+		final.final = true
+		if !worker.offer(final) {
+			t.Fatal("final offer refused")
+		}
+		synctest.Wait()
+		if !slices.Equal(started, []previewCandidate{old}) || worker.offer(previewTestCandidate("other", "unrelated")) {
+			t.Fatal("same-revision final offer must wait in the queue without interrupting the active attempt")
+		}
+		if !worker.offer(newer) {
+			t.Fatal("newer revision did not replace the queued final offer")
+		}
+		synctest.Wait()
+		if !slices.Equal(started, []previewCandidate{old, newer}) {
+			t.Fatalf("obsolete render blocked the newer revision: started %v", started)
+		}
+	})
+}
+
 type blockedPreviewCreation struct {
 	previewFilesFixture
 	started, stopped, release chan struct{}

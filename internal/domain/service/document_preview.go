@@ -108,21 +108,20 @@ func (w *previewWorker) offer(c previewCandidate) bool {
 	}
 	final := c.final
 	c.final = false // scheduling intent is not part of the work identity
-	for i, pending := range w.queue {
-		if pending.id == c.id {
-			w.queue[i] = c
-			return true
-		}
-	}
+	slot := slices.IndexFunc(w.queue, func(pending previewCandidate) bool { return pending.id == c.id })
 	sameActive := w.cancel != nil && w.active == c
 	if sameActive && !final {
 		return true
 	}
-	if len(w.queue) == cap(w.queue) {
+	if slot < 0 && len(w.queue) == cap(w.queue) {
 		return false
 	}
 	if w.cancel != nil && w.active.id == c.id && !sameActive {
 		w.cancel()
+	}
+	if slot >= 0 {
+		w.queue[slot] = c
+		return true
 	}
 	w.queue = append(w.queue, c)
 	select {
