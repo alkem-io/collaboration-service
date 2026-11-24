@@ -4,10 +4,50 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
+
+func TestActivationLeavesRoomForTheFirstRoomBroadcast(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newWSConn(t.Context(), nil, 1, zap.NewNop())
+		if err := c.sendInitial(t.Context(), []byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		ready := make(chan error, 1)
+		go func() { ready <- c.waitForActivation(t.Context()) }()
+		synctest.Wait()
+		select {
+		case err := <-ready:
+			t.Fatalf("activation entered while its first room broadcast could overflow: %v", err)
+		default:
+		}
+		<-c.send
+		c.releaseSpace()
+		if err := <-ready; err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Send([]byte{2}); err != nil {
+			t.Fatalf("first room broadcast could not enqueue: %v", err)
+		}
+	})
+}
+
+func TestActivationDoesNotWaitBehindAnAcceptedTerminalIntent(t *testing.T) {
+	c := newWSConn(t.Context(), nil, 1, zap.NewNop())
+	if got := c.admitEnd(model.NewSessionEnd(model.CodeDocumentDeleted)); got != admitted {
+		t.Fatal("could not stage owner deletion")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := c.waitForActivation(ctx); !errors.Is(err, errConnClosed) || ctx.Err() != nil {
+		t.Fatalf("activation did not honor an admitted terminal intent immediately: %v", err)
+	}
+}
 
 // TestSendInitialWaitsForQueueSpaceInsteadOfShedding is the deterministic ratchet
 // on the handshake-send policy.

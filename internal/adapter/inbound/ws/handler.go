@@ -180,6 +180,9 @@ func (h *Handler) serve(ctx context.Context, conn *websocket.Conn, id model.Docu
 			return
 		}
 	}
+	if err := wc.waitForActivation(sendCtx); err != nil {
+		return
+	}
 	if err := session.Activate(sendCtx); err != nil {
 		return
 	}
