@@ -219,15 +219,43 @@ func (c *wsConn) sendInitial(ctx context.Context, frame []byte) error {
 		// refusedFull: wait for the writer to take something off, then retry the
 		// whole admission — the boundary may have moved while we waited, and it
 		// must be re-checked rather than assumed.
-		select {
-		case <-c.space:
-		case <-c.closed:
-			return errConnClosed
-		case <-ctx.Done():
-			c.logger.Debug("handshake frame could not be enqueued; dropping connection")
-			c.close()
+		if err := c.waitForHandshakeSpace(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// Activation broadcasts the participant count synchronously on the room loop.
+// While pending, this member receives no ordinary room broadcasts, so wait
+// here for one free slot before asking the room to activate it.
+func (c *wsConn) waitForActivation(ctx context.Context) error {
+	for {
+		c.admit.Lock()
+		ending := c.ending || c.isClosed()
+		full := len(c.send) == cap(c.send)
+		c.admit.Unlock()
+		if ending {
 			return errConnClosed
 		}
+		if !full {
+			return ctx.Err()
+		}
+		if err := c.waitForHandshakeSpace(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *wsConn) waitForHandshakeSpace(ctx context.Context) error {
+	select {
+	case <-c.space:
+		return nil
+	case <-c.closed:
+		return errConnClosed
+	case <-ctx.Done():
+		c.logger.Debug("handshake send queue did not drain; dropping connection")
+		c.close()
+		return errConnClosed
 	}
 }
 

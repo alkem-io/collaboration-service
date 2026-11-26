@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,7 +29,7 @@ import (
 	"github.com/alkem-io/collaboration-service/internal/config"
 )
 
-func run() int {
+func run(ctx context.Context) int {
 	logger, err := config.NewLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
@@ -57,22 +58,16 @@ func run() int {
 	)
 
 	srv := newHTTPServer(cfg.Port, application.Handler)
+	private := newPrivateHTTPServer(cfg.MemoMarkdownAddr, application.MemoHandler)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("server starting", zap.Int("port", cfg.Port))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
+	errCh := make(chan error, 2)
+	go serve(srv, logger, errCh)
+	go serve(private, logger, errCh)
 
 	exitCode := 0
 	select {
-	case sig := <-sigCh:
-		logger.Info("received signal, shutting down", zap.String("signal", sig.String()))
+	case <-ctx.Done():
+		logger.Info("shutting down")
 	case err := <-errCh:
 		logger.Error("server failed", zap.Error(err))
 		exitCode = 1
@@ -80,11 +75,22 @@ func run() int {
 
 	// Stop accepting new connections, then release every live room (persisting a
 	// final snapshot per room) via application.Close so in-flight edits survive.
+	_ = private.Close()
 	shutdownServer(srv, logger)
 	logger.Info("server stopped")
 	return exitCode
 }
 
+func serve(srv *http.Server, logger *zap.Logger, errCh chan<- error) {
+	logger.Info("listener starting", zap.String("addr", srv.Addr))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		errCh <- fmt.Errorf("listen %s: %w", srv.Addr, err)
+	}
+}
+
 func main() {
-	os.Exit(run())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx)
+	stop()
+	os.Exit(code)
 }

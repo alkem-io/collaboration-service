@@ -71,6 +71,32 @@ Configuration is via environment variables — see [.env.example](./.env.example
 | `GET /metrics` | Prometheus scrape |
 | `GET /collab/{documentId}` | WebSocket collaboration (one document per connection) |
 
+An always-on private listener serves `GET /internal/memos/{memoId}/markdown`.
+It defaults to `127.0.0.1:4016`. `MEMO_MARKDOWN_ADDR` only changes the bind
+address: it must be a private or loopback IP on a port different from `PORT`.
+It reads one saved snapshot and returns raw Markdown with `Cache-Control: no-store`.
+A valid saved empty memo returns an empty body; a missing or unreadable checkpoint
+is an error. The current limit is 1 MiB per encoded checkpoint and two concurrent
+reads. It neither joins a room nor writes a file. The endpoint has no
+application authentication or authorization: do not route it publicly. A rollout
+requires network-level trusted-service access and TLS; current consumers are unchanged.
+See [the memo verification commands](specs/004-native-collab-previews/quickstart.md#4-verify-the-memo-route-boundary).
+
+The native preview worker refreshes stored files during editing. The first
+changed, successful save opens a five-second window; the worker takes the
+latest saved revision at its end. Normal room release also submits a final
+revision that has not been published, without waiting for another window.
+The worker publishes one 1800×720 PNG for a whiteboard or one Markdown file
+for a memo. It creates missing private files in the
+document's own bucket and subsequently replaces their content at stable IDs.
+A failed overwrite does not allocate another file or block editing, saving
+or close. No current frontend or server consumer is switched over.
+
+Publication is always on in the supported single-writer, file-service-backed
+topology. See the
+[artifact contract and future consumer handoff](specs/004-native-collab-previews/contracts/facility.md#documents-automatic-publication-no-new-http-read-endpoint)
+and [real file-service verification](specs/004-native-collab-previews/quickstart.md#3-verify-the-whiteboard-artifact-not-just-worker-completion).
+
 ## Status
 
 **Phase 1 (provisioning).** Fleet-consistent hexagonal skeleton with ports

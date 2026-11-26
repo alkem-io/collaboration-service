@@ -4,10 +4,42 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 )
+
+func TestDeleteDoesNotAcknowledgeABusyRoomBeforeItAcceptsTheCommand(t *testing.T) {
+	for _, callerTimeout := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			m, _ := testManager(t, fastConfig())
+			const id model.DocumentID = "busy-on-owner-delete"
+			r := &Room{id: id, commands: make(chan command, 1), done: make(chan struct{})}
+			r.lc.activate()
+			r.commands <- command{kind: cmdMessage}
+			m.rooms[id] = r
+			defer func() {
+				delete(m.rooms, id) // the controlled room has no running loop
+				m.Close()
+			}()
+			ctx := t.Context()
+			want := errRoomUnavailable
+			if callerTimeout {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Second)
+				defer cancel()
+				want = context.DeadlineExceeded
+			}
+			if err := m.CloseDeleted(ctx, id); !errors.Is(err, want) {
+				t.Fatalf("busy owner deletion got %v, want %v; a success would let the owner remove live content", err, want)
+			}
+			if m.RoomCount() != 1 || len(r.commands) != 1 {
+				t.Fatal("a timed-out deletion silently altered the live room or its command queue")
+			}
+		})
+	}
+}
 
 // TestDeleteTombstoneBridgesConfirmedPublishToOwnerRemoval pins the simplified
 // lifecycle ordering: the event is confirmed before server starts deleting, so

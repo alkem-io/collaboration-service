@@ -288,3 +288,46 @@ func TestClientReattachesAfterTheBrokerDropsTheReplyConsumer(t *testing.T) {
 		t.Fatalf("Call after re-attach = %v, want an rpc timeout (proving it published)", err)
 	}
 }
+
+func TestLateMetadataReattachReleasesTheNewConnectionAfterShutdown(t *testing.T) {
+	prev := dialRPC
+	t.Cleanup(func() { dialRPC = prev })
+	late := &rpcFakeConn{ch: &setupChan{}}
+	entered, allowed := make(chan struct{}), make(chan struct{})
+	runs := 0
+	dialRPC = func(string) (rpcConn, error) {
+		runs++
+		if runs == 1 {
+			return nil, errors.New("broker still restarting")
+		}
+		close(entered)
+		<-allowed
+		return late, nil
+	}
+	c := &Client{
+		cfg: Config{URL: "amqp://stub", Queue: "metadata"}, shutdown: make(chan struct{}),
+		reattachBackoff: time.Millisecond,
+	}
+	done := make(chan *session, 1)
+	go func() { done <- c.reattach() }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("retry did not reach the broker after the first dial error")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(allowed)
+	select {
+	case s := <-done:
+		if s != nil || late.closed != 1 || late.ch.closeCount() != 1 {
+			t.Fatal("shutdown allowed the reconnect to leave a live metadata consumer")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconnect did not settle after shutdown")
+	}
+	if err := c.Emit(t.Context(), "contribution", struct{}{}); err == nil {
+		t.Fatal("publish reported success after shutdown")
+	}
+}

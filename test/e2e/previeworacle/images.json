@@ -1,0 +1,22 @@
+[
+  {
+    "name": "control",
+    "paint": "<rect x=\"0\" y=\"0\" width=\"64\" height=\"48\" fill=\"#21a65f\"/>",
+    "center": [33, 166, 95, 255]
+  },
+  {
+    "name": "local-use",
+    "paint": "<defs><rect id=\"tile\" width=\"64\" height=\"48\" fill=\"#21a65f\"/></defs><use href=\"#tile\"/>",
+    "center": [33, 166, 95, 255]
+  },
+  {
+    "name": "local-pattern",
+    "paint": "<defs><pattern id=\"green\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\"><rect width=\"8\" height=\"8\" fill=\"#21a65f\"/></pattern></defs><rect width=\"64\" height=\"48\" fill=\"url(#green)\"/>",
+    "center": [33, 166, 95, 255]
+  },
+  {
+    "name": "local-mask",
+    "paint": "<defs><mask id=\"visible\"><rect width=\"16\" height=\"48\" fill=\"white\"/></mask></defs><rect width=\"64\" height=\"48\" fill=\"#21a65f\" mask=\"url(#visible)\"/>",
+    "center": [0, 0, 0, 0]
+  }
+]

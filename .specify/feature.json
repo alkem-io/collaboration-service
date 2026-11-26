@@ -1,5 +1,3 @@
 {
-  "feature_directory": "specs/003-go-yjs-core-port",
-  "backlog_story": null,
-  "workspace_spec": "../agents-hq/specs/003-unify-collab-yjs"
+  "feature_directory": "specs/004-native-collab-previews"
 }

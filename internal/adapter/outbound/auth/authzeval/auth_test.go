@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -115,6 +116,18 @@ func TestEvaluateCleanDenial(t *testing.T) {
 	}
 	if dec.Allowed {
 		t.Error("expected a clean denial (Allowed=false), not an error")
+	}
+}
+
+func TestTruncatedGrantDoesNotAuthorize(t *testing.T) {
+	srv := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "150")
+		_, _ = io.WriteString(w, `{"allowed":true}`)
+	}))
+	adapter := New(Config{ServiceURL: srv.URL}, staticPolicies{policies: map[model.DocumentID]string{"doc": "policy"}})
+	decision, err := adapter.Evaluate(t.Context(), testIdentity("actor"), "doc", model.PrivilegeRead)
+	if err == nil || decision.Allowed {
+		t.Fatalf("incomplete transport accepted a grant: %+v (%v)", decision, err)
 	}
 }
 
