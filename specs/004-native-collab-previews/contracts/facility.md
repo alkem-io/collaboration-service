@@ -19,12 +19,12 @@ Non-success responses use typed, generic errors with no saved text, blob identif
 ## Documents: automatic publication, no new HTTP read endpoint
 
 1. The first changed save opens a five-second window. At its end, submit the latest successfully saved revision, even if the room remains open; later saves do not reset the window. Normal release after the existing idle grace can submit a final unpublished revision without waiting for that window. If the same revision is still running, the final submission uses the same bounded queue and is skipped if the running attempt fully publishes it. Artifact reads do not trigger publication, and a failed/deleted teardown cannot submit unsaved content.
-2. One bounded worker verifies the saved fingerprint and source ownership. Whiteboards produce two full-scene PNGs without distortion, user crop or fixed mode. Only eligible source-owned assets may be resolved; a missing asset is a render failure. Memos produce one UTF-8 Markdown file; the conversion does not resolve links.
-3. Resolve the dedicated slot by its bucket-scoped reference. On a genuine missing-slot lookup, collab creates the artifact with `POST /internal/file`. Once provisioned, `PUT /internal/file/{id}/content` replaces bytes under the existing ID. A failed or conflicting overwrite never falls back to allocation or relinking. A whiteboard may have one successful variant and one failed variant; there is no cross-file atomicity claim.
+2. One bounded worker verifies the saved fingerprint and source ownership. Whiteboards produce one 1800×720 full-scene PNG without distortion, user crop or fixed mode. Only eligible source-owned assets may be resolved; a missing asset is a render failure. Memos produce one UTF-8 Markdown file; the conversion does not resolve links.
+3. Resolve the dedicated slot by its bucket-scoped reference. On a genuine missing-slot lookup, collab creates the artifact with `POST /internal/file`. Once provisioned, `PUT /internal/file/{id}/content` replaces bytes under the existing ID. A failed or conflicting overwrite never falls back to allocation or relinking. Collab does not look up, publish or remove separate card files.
 
 | Document | Suffix on `collab-preview-v1:{documentId}:` | Stored artifact |
 |---|---|---|
-| Whiteboard | `whiteboard`, `card` | `image/png`, full scene fitted to each size. |
+| Whiteboard | `whiteboard` | `image/png`, full scene fitted to 1800×720. |
 | Memo | `markdown` | `.md`, stored as `text/plain` (UTF-8); starts with the reserved, invisible Markdown reference definition `[//alkemio-preview-v1//]: # (Generated memo preview)` and two newlines. The prefix keeps a cleared memo nonzero and prevents HTML sniffing when the body starts with an iframe wrapper. Consumers needing the byte-exact body can strip that prefix or use the independent internal memo endpoint. |
 
 ### Provisioning and lifecycle constraints

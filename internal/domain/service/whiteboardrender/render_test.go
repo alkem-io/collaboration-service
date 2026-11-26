@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"image"
 	"image/color"
 	"image/png"
 	"math"
@@ -39,22 +40,17 @@ func TestRenderSavedShapeAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := func(out Result, expected color.NRGBA) {
+	check := func(out []byte, expected color.NRGBA) {
 		t.Helper()
-		for _, tc := range []struct {
-			b    []byte
-			w, h int
-		}{{out.Full, 1800, 720}, {out.Card, 410, 256}} {
-			img, err := png.Decode(bytes.NewReader(tc.b))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if img.Bounds().Dx() != tc.w || img.Bounds().Dy() != tc.h {
-				t.Fatalf("unexpected PNG size: %v", img.Bounds())
-			}
-			if got := color.NRGBAModel.Convert(img.At(tc.w/2, tc.h/2)); got != expected {
-				t.Fatalf("center pixel = %v, want %v", got, expected)
-			}
+		img, err := png.Decode(bytes.NewReader(out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if img.Bounds().Size() != image.Pt(1800, 720) {
+			t.Fatalf("unexpected PNG size: %v", img.Bounds())
+		}
+		if got := color.NRGBAModel.Convert(img.At(900, 360)); got != expected {
+			t.Fatalf("center pixel = %v, want %v", got, expected)
 		}
 	}
 	check(out, color.NRGBA{R: 255, A: 255})
@@ -77,7 +73,7 @@ func TestRenderMissingAssetInvalidSVGAndCancellationAreNotPartial(t *testing.T) 
 		"id": "image", "index": "a0", "type": "image", "width": 64., "height": 48.,
 		"fileId": "image-key", "opacity": 100., "strokeColor": "transparent", "backgroundColor": "transparent",
 	})
-	if out, err := Render(t.Context(), doc, nil); err == nil || out.Full != nil || out.Card != nil {
+	if out, err := Render(t.Context(), doc, nil); err == nil || out != nil {
 		t.Fatalf("missing image produced a partial preview: %v", err)
 	}
 	doc.GetMap("files").Set("image-key", "locator")
@@ -86,12 +82,12 @@ func TestRenderMissingAssetInvalidSVGAndCancellationAreNotPartial(t *testing.T) 
 			t.Fatal("wrong asset request")
 		}
 		return "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48"><foreignObject/></svg>`), nil
-	}); err == nil || out.Full != nil || out.Card != nil {
+	}); err == nil || out != nil {
 		t.Fatalf("unsupported SVG produced a preview: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if out, err := Render(ctx, doc, nil); !errors.Is(err, context.Canceled) || out.Full != nil || out.Card != nil {
+	if out, err := Render(ctx, doc, nil); !errors.Is(err, context.Canceled) || out != nil {
 		t.Fatalf("cancelled render: %v", err)
 	}
 }
@@ -120,23 +116,21 @@ func TestMinimalAndSharpFreehandStrokesStayVisible(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, preview := range [][]byte{out.Full, out.Card} {
-				img, err := png.Decode(bytes.NewReader(preview))
-				if err != nil {
-					t.Fatal(err)
-				}
-				ink := 0
-				for y := range img.Bounds().Dy() {
-					for x := range img.Bounds().Dx() {
-						r, _, _, a := img.At(x, y).RGBA()
-						if a == 0xffff && r < 0x8000 {
-							ink++
-						}
+			img, err := png.Decode(bytes.NewReader(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ink := 0
+			for y := range img.Bounds().Dy() {
+				for x := range img.Bounds().Dx() {
+					r, _, _, a := img.At(x, y).RGBA()
+					if a == 0xffff && r < 0x8000 {
+						ink++
 					}
 				}
-				if ink < 3 || ink > img.Bounds().Dx()*img.Bounds().Dy()/4 {
-					t.Fatalf("stroke was missing or filled the preview: %d ink pixels in %v", ink, img.Bounds())
-				}
+			}
+			if ink < 3 || ink > img.Bounds().Dx()*img.Bounds().Dy()/4 {
+				t.Fatalf("stroke was missing or filled the preview: %d ink pixels in %v", ink, img.Bounds())
 			}
 		})
 	}
@@ -170,7 +164,7 @@ func TestInvalidSavedGeometryDoesNotReturnImages(t *testing.T) {
 			}
 			addRenderElement(doc, props)
 			out, err := Render(t.Context(), doc, nil)
-			if !errors.Is(err, errInvalidScene) || out.Full != nil || out.Card != nil {
+			if !errors.Is(err, errInvalidScene) || out != nil {
 				t.Fatalf("invalid saved geometry returned output: %v", err)
 			}
 		})
@@ -191,7 +185,7 @@ func TestUntitledFramesAndEmptyEmbedsStillRenderTheirPlaceholders(t *testing.T) 
 				t.Fatal("placeholder attempted asset I/O")
 				return "", nil, nil
 			})
-			if err != nil || !previewContainsInk(t, out.Full) || !previewContainsInk(t, out.Card) {
+			if err != nil || !previewContainsInk(t, out) {
 				t.Fatalf("empty %s collapsed to a blank preview: %v", kind, err)
 			}
 		})
@@ -266,7 +260,7 @@ func TestInvalidSceneRefusesBothOutputsBeforeResolvingAssets(t *testing.T) {
 				t.Fatal("invalid geometry triggered asset I/O")
 				return "", nil, nil
 			})
-			if err == nil || out.Full != nil || out.Card != nil {
+			if err == nil || out != nil {
 				t.Fatalf("invalid input produced partial output: %+v, %v", out, err)
 			}
 		})
@@ -292,7 +286,7 @@ func TestFrameCaptionFitsWithGlyphBoundariesAndEllipsis(t *testing.T) {
 }
 
 func TestFrameOnlyCJKTitlesRenderDifferentGlyphs(t *testing.T) {
-	renderTitle := func(title string) Result {
+	renderTitle := func(title string) []byte {
 		t.Helper()
 		doc := yjs.NewDoc("frame-only-cjk")
 		defer doc.Destroy()
@@ -312,7 +306,7 @@ func TestFrameOnlyCJKTitlesRenderDifferentGlyphs(t *testing.T) {
 		return out
 	}
 	a, b := renderTitle("東京"), renderTitle("大阪")
-	if bytes.Equal(a.Full, b.Full) || bytes.Equal(a.Card, b.Card) {
+	if bytes.Equal(a, b) {
 		t.Fatal("different CJK frame titles painted the same missing glyphs")
 	}
 }
@@ -326,7 +320,7 @@ func TestHiddenEmbedDoesNotLeaveAVisibleCaption(t *testing.T) {
 		"strokeColor": "#000000", "backgroundColor": "transparent",
 	})
 	out, err := Render(t.Context(), doc, nil)
-	if err != nil || previewContainsInk(t, out.Full) || previewContainsInk(t, out.Card) {
+	if err != nil || previewContainsInk(t, out) {
 		t.Fatalf("hidden embed left visible content: %v", err)
 	}
 }

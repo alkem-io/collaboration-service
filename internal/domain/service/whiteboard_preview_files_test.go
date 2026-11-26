@@ -18,11 +18,12 @@ import (
 )
 
 type previewFilesFixture struct {
-	assets map[uuid.UUID]port.PreviewFile
-	slots  map[string]port.PreviewFile
-	hashes []string
-	blob   []byte
-	err    error
+	assets  map[uuid.UUID]port.PreviewFile
+	slots   map[string]port.PreviewFile
+	lookups []string
+	hashes  []string
+	blob    []byte
+	err     error
 }
 
 func (f *previewFilesFixture) LookupPreviewAsset(_ context.Context, id uuid.UUID) (port.PreviewFile, error) {
@@ -33,6 +34,7 @@ func (f *previewFilesFixture) LookupPreviewAsset(_ context.Context, id uuid.UUID
 }
 
 func (f *previewFilesFixture) LookupPreviewSlot(_ context.Context, _ uuid.UUID, ref string) (port.PreviewFile, error) {
+	f.lookups = append(f.lookups, ref)
 	if file, ok := f.slots[ref]; ok {
 		return file, nil
 	}
@@ -81,19 +83,17 @@ func TestSavedImageRendersOnlyFromVerifiedStorageBytes(t *testing.T) {
 	if err != nil || !slices.Equal(fixture.hashes, []string{hash}) {
 		t.Fatalf("verified asset was not read once from storage: %v; reads=%v", err, fixture.hashes)
 	}
-	for _, variant := range [][]byte{preview.Full, preview.Card} {
-		img, err := png.Decode(bytes.NewReader(variant))
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := img.Bounds().Max.Div(2)
-		if got := color.NRGBAModel.Convert(img.At(c.X, c.Y)); got != red {
-			t.Fatalf("stored image did not render at the center: %v", got)
-		}
+	img, err := png.Decode(bytes.NewReader(preview))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := img.Bounds().Max.Div(2)
+	if got := color.NRGBAModel.Convert(img.At(c.X, c.Y)); got != red {
+		t.Fatalf("stored image did not render at the center: %v", got)
 	}
 	fixture.blob, fixture.err = nil, errors.New("asset storage unavailable")
 	preview, err = renderBoardPreview(t.Context(), doc, source)
-	if !errors.Is(err, fixture.err) || preview.Full != nil || preview.Card != nil {
+	if !errors.Is(err, fixture.err) || preview != nil {
 		t.Fatalf("asset outage returned a partial preview or hid its cause: %v", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestPreviewAssetMetadataControlsContentRead(t *testing.T) {
 
 func TestWhiteboardPreviewSlotMustBeDedicatedPrivatePNG(t *testing.T) {
 	board, bucket, checkpoint, id := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	ref := previewSlotReference(board, previewCard)
+	ref := previewSlotReference(board, previewFull)
 	base := port.PreviewFile{ID: id, BucketID: bucket, ExternalReference: ref, MIME: "image/png"}
 	for _, tc := range []struct {
 		name   string
@@ -195,14 +195,15 @@ func TestWhiteboardPreviewSlotMustBeDedicatedPrivatePNG(t *testing.T) {
 			if tc.change != nil {
 				tc.change(&row)
 			}
-			files := &previewFilesFixture{slots: map[string]port.PreviewFile{ref: row}}
+			files := &previewFilesFixture{}
 			src := previewFileSource{files: files, bucket: bucket, checkpoint: checkpoint}
 			if _, err := src.slot(t.Context(), board, previewFull); !errors.Is(err, port.ErrPreviewFileMissing) {
 				t.Fatalf("missing full slot = %v", err)
 			}
-			got, err := src.slot(t.Context(), board, previewCard)
+			files.slots = map[string]port.PreviewFile{ref: row}
+			got, err := src.slot(t.Context(), board, previewFull)
 			if tc.change == nil && (err != nil || got != id) || tc.change != nil && (err == nil || got != uuid.Nil) {
-				t.Fatalf("card slot = %v, %v", got, err)
+				t.Fatalf("full slot = %v, %v", got, err)
 			}
 		})
 	}

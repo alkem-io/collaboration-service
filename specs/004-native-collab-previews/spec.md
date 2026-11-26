@@ -7,6 +7,10 @@
 
 ## Clarifications
 
+### Session 2026-11-26
+
+- Q: Does a whiteboard need a separate card image? → A: No. Generate and publish one 1800×720 full-board PNG. Keep the existing full-preview reference and leave any legacy card files untouched.
+
 ### Session 2026-11-24
 
 - Q: Can the internal memo Markdown endpoint be disabled? → A: No. It starts on every boot, only on the separate private listener. The bind address may be configured; that does not change the routing or trust boundary.
@@ -15,7 +19,7 @@
 
 ### Session 2026-11-23
 
-- Q: When a saved whiteboard is cleared, what should happen to its existing automatic and custom preview images? → A: This stage renders only the full saved board; custom crops and frozen previews are deferred. Render a successfully saved empty scene as blank PNGs, keeping any existing output IDs. Missing private files follow the November 24 provisioning ruling; genuinely unchanged sessions never publish.
+- Q: When a saved whiteboard is cleared, what should happen to its existing automatic and custom preview images? → A: This stage renders only the full saved board; custom crops and frozen previews are deferred. Render a successfully saved empty scene as a blank PNG, keeping the existing output ID. Missing private files follow the November 24 provisioning ruling; genuinely unchanged sessions never publish.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -37,7 +41,7 @@ A trusted cluster service can get a memo's saved Markdown by ID without opening 
 
 ### User Story 2 - Publish document previews from saved edits (Priority: P1)
 
-A consumer can read two full-board PNG sizes for a whiteboard or one Markdown file for a memo while editing continues or after the room closes. The service refreshes the artifact automatically, with no editor callback, browser upload or explicit generation request.
+A consumer can read one 1800×720 full-board PNG for a whiteboard or one Markdown file for a memo while editing continues or after the room closes. The service refreshes the artifact automatically, with no editor callback, browser upload or explicit generation request.
 
 **Why this priority**: Preview freshness must come from saved content, including changes made outside the browser.
 
@@ -45,10 +49,10 @@ A consumer can read two full-board PNG sizes for a whiteboard or one Markdown fi
 
 **Acceptance Scenarios**:
 
-1. **Given** a whiteboard or memo edited by a browser or MCP client, including a template or draft supported by existing metadata, **When** the first changed save reaches the end of its refresh window or normal room release occurs first, **Then** collab-service offers the latest saved content for publication. Both whiteboard sizes fit the whole scene. A browser exiting after a save needs no close/upload call.
-2. **Given** both output files already exist, **When** new saved content is rendered, **Then** the same IDs and URIs yield the updated images. No file is allocated or visual relinked on that refresh.
+1. **Given** a whiteboard or memo edited by a browser or MCP client, including a template or draft supported by existing metadata, **When** the first changed save reaches the end of its refresh window or normal room release occurs first, **Then** collab-service offers the latest saved content for publication. The whiteboard PNG fits the whole scene. A browser exiting after a save needs no close/upload call.
+2. **Given** a document's output file already exists, **When** new saved content is rendered, **Then** the same ID and URI yield the updated artifact. No file is allocated or visual relinked on that refresh.
 3. **Given** several saves in one window, **When** the window ends, **Then** the latest successful save is offered once, without waiting for editing to stop. Normal room release may offer a final saved revision but does not repeat a completed publication. Opening and closing without a content change, and reading stored artifacts, do not render.
-4. **Given** a document with existing artifacts, **When** its content is cleared and saved, **Then** the next refresh replaces the existing files with blank PNGs or visually empty Markdown at the same IDs.
+4. **Given** a document with an existing artifact, **When** its content is cleared and saved, **Then** the next refresh replaces that file with a blank PNG or visually empty Markdown at the same ID.
 
 ### Edge Cases
 
@@ -68,8 +72,8 @@ A consumer can read two full-board PNG sizes for a whiteboard or one Markdown fi
 - **FR-004**: Memo output MUST preserve the current representation of paragraphs and blank lines, headings, inline formatting, links, nested and ordered lists, blockquotes, code, separators, images, tables and embed/iframe content. Use the current converter as the compatibility reference. Conversion MUST NOT resolve links or embeds. The internal read MUST NOT write an artifact or depend on close publication. No batch, ETag or caching is part of this endpoint.
 - **FR-005**: Whiteboard output MUST preserve supported saved geometry, text layout and visual semantics. The parity corpus MUST cover shapes, arrows and arrowheads, bound/free text and wrapping, hand-drawn strokes, images, rotation, stacking, frames/clipping, colours/backgrounds, opacity, fills/strokes and non-executing embed placeholders. Inventory the supported set and fonts from the pinned editor; do not silently substitute a simplified renderer.
 - **FR-006**: A whiteboard render MUST resolve persisted image references using the supported storage boundary and only assets the source may include. It MUST NOT fetch arbitrary network destinations, execute embedded content or expose unrelated private files. Missing or unauthorized required assets MUST NOT produce a successful partial preview.
-- **FR-007**: Generate PNGs of the entire saved whiteboard for both existing slots: `WHITEBOARD_PREVIEW` (500×200 through 1800×720, 2.5:1) and `CARD` (307×192 through 410×256, existing 1.6:1 constraints). Fit the same full-board view to each size without cropping the scene to fit or distorting its geometry. Do not read or implement preview modes, user crop settings or freeze operations in this stage.
-- **FR-008**: Collaboration-service MUST write both formats directly to file-service. On a genuine miss of a reserved reference in the document's own bucket, create its private artifact. For an existing eligible row, overwrite its bytes without changing its file ID. A caller-chosen destination, failed lookup other than absence, or unsuccessful overwrite MUST NOT cause allocation or relinking. A failed whiteboard slot does not block a valid sibling.
+- **FR-007**: Generate exactly one 1800×720 PNG of the entire saved whiteboard. Fit the full-board view without cropping the scene to fit or distorting its geometry. Do not generate a separate card image or look up, replace or delete legacy card files. Do not read or implement preview modes, user crop settings or freeze operations in this stage.
+- **FR-008**: Collaboration-service MUST write both formats directly to file-service. On a genuine miss of a reserved reference in the document's own bucket, create its private artifact. For an existing eligible row, overwrite its bytes without changing its file ID. A caller-chosen destination, failed lookup other than absence, or unsuccessful overwrite MUST NOT cause allocation or relinking.
 - **FR-009**: A changed memo or whiteboard MUST refresh automatically based on successful saves. The first changed save starts a bounded, non-sliding window; at its end the service submits the latest successful save. Normal room release also submits a final saved revision if not already published, without waiting for the window or generation. Both document types share one bounded worker. Skip unchanged sessions; failed saves and artifact reads do not trigger rendering. The independent private memo endpoint still converts on demand. Do not add a retry schedule or another producer.
 - **FR-010**: Artifacts MUST remain private and tied to the source's ownership and lifetime. Stop publication when the source is invalidated by the owner or no longer exists, and let the owner cascade remove its files. Draft expiry takes effect here at the existing owner's expiry cleanup; enforcing the stored timestamp before cleanup is deferred. Any future browser-facing delivery MUST check current source READ access before returning bytes or a not-modified result, preserve entitled guest/anonymous reads, and treat preview URLs as references rather than grants. This does not impose application auth on the internal memo route.
 - **FR-011**: Both facilities MUST bound input, processing and in-flight work, and respect cancellation. Whiteboard generation MUST bound decoded image and render dimensions. Slow or failed work MUST NOT block source saving, session teardown or durability acknowledgements. Record generation failures without replacing the last successful image with a failed render. Establish initial budgets for each lane from representative qualification measurements before its production work; verify them under combined load before completion. Do not invent service targets.
@@ -78,7 +82,7 @@ A consumer can read two full-board PNG sizes for a whiteboard or one Markdown fi
 ### Key Entities *(include if feature involves data)*
 
 - **Saved document**: Existing document ID and declared type, with saved content identity and ownership. The source remains authoritative.
-- **Document preview artifact**: Private full-board image at preview or card size, or a memo Markdown file. Its file identity is stable across saved revisions.
+- **Document preview artifact**: Private 1800×720 full-board PNG or a memo Markdown file. Its file identity is stable across saved revisions.
 - **Memo Markdown result**: Transient Markdown body derived from a single saved memo, not a stored file or new content entity.
 
 ## Success Criteria *(mandatory)*
@@ -86,7 +90,7 @@ A consumer can read two full-board PNG sizes for a whiteboard or one Markdown fi
 ### Measurable Outcomes
 
 - **SC-001**: In every memo compatibility fixture, the result preserves the reference's supported structure and content. An internal cold read needs zero credentials, room joins or derivative writes; every tested public path returns zero memo content.
-- **SC-002**: Both preview variants satisfy their size constraints and pass the reviewed visual parity corpus without omitted, misplaced or incorrectly clipped content. The corpus covers every supported element family and representative supported writing systems. Define comparison tolerances against current exports before implementation rather than requiring universal pixel identity.
+- **SC-002**: The whiteboard PNG is 1800×720 and passes the reviewed visual parity corpus without omitted, misplaced or incorrectly clipped content. The corpus covers every supported element family and representative supported writing systems. Define comparison tolerances against current exports rather than requiring universal pixel identity.
 - **SC-003**: A changed, saved room creates its missing private preview files exactly once. A later refresh, including a saved clear, overwrites those IDs with no new rows or relinks. This holds across process restart for both document types.
 - **SC-004**: A burst of successful saves produces one candidate per window; release can submit newer work before the next window ends. An unchanged room and repeated reads produce zero. An injected failure does not erase a valid preview; older work cannot replace an already published newer revision.
 - **SC-005**: Under measured representative preview load and injected renderer/storage failure, saves and durability acknowledgements continue to succeed within the existing collaboration bounds. Tests observe zero source changes caused by derivation and zero derivative disclosures through exercised unauthorized paths.

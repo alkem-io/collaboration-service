@@ -166,7 +166,7 @@ func (w *previewWorker) run(render func(context.Context, previewCandidate)) {
 					break
 				}
 				// A final release may queue the active revision once. Skip it
-				// if the in-flight attempt published every artifact.
+				// if the in-flight attempt published the artifact.
 				if !candidate.wasPublished() {
 					render(ctx, candidate)
 				}
@@ -195,11 +195,11 @@ func newDocumentPreviewWorker(deps Deps, logger *zap.Logger) *previewWorker {
 type documentPreview struct {
 	saved       savedProjection
 	files       port.PreviewFiles
-	renderBoard func(context.Context, *ycrdt.Doc, previewFileSource) (whiteboardrender.Result, error)
+	renderBoard func(context.Context, *ycrdt.Doc, previewFileSource) ([]byte, error)
 	logger      *zap.Logger
 }
 
-func renderBoardPreview(ctx context.Context, doc *ycrdt.Doc, src previewFileSource) (whiteboardrender.Result, error) {
+func renderBoardPreview(ctx context.Context, doc *ycrdt.Doc, src previewFileSource) ([]byte, error) {
 	return whiteboardrender.Render(ctx, doc, func(ctx context.Context, locator string, limit int64) (string, []byte, error) {
 		asset, err := src.asset(ctx, locator, limit)
 		return asset.mime, asset.bytes, err
@@ -211,16 +211,15 @@ func renderBoardPreview(ctx context.Context, doc *ycrdt.Doc, src previewFileSour
 // The direct memo endpoint returns unwrapped Markdown.
 const memoPreviewHeader = "[//alkemio-preview-v1//]: # (Generated memo preview)\n\n"
 
-func (p documentPreview) render(ctx context.Context, doc *ycrdt.Doc, src previewFileSource, kind model.ContentType) ([2][]byte, error) {
+func (p documentPreview) render(ctx context.Context, doc *ycrdt.Doc, src previewFileSource, kind model.ContentType) ([]byte, error) {
 	if kind == model.ContentTypeMemo {
 		md, err := renderSavedMemo(ctx, doc)
 		if err != nil {
-			return [2][]byte{}, err
+			return nil, err
 		}
-		return [2][]byte{[]byte(memoPreviewHeader + md)}, nil
+		return []byte(memoPreviewHeader + md), nil
 	}
-	out, err := p.renderBoard(ctx, doc, src)
-	return [2][]byte{out.Full, out.Card}, err
+	return p.renderBoard(ctx, doc, src)
 }
 
 func (p documentPreview) run(ctx context.Context, candidate previewCandidate) {
@@ -258,8 +257,12 @@ func (p documentPreview) publish(ctx context.Context, c previewCandidate) bool {
 		return false
 	}
 	src := previewFileSource{files: p.files, bucket: bucket, checkpoint: checkpoint}
-	targets := p.outputSlots(ctx, src, id, c.kind)
-	if len(targets) == 0 {
+	variant := previewFull
+	if c.kind == model.ContentTypeMemo {
+		variant = previewMarkdown
+	}
+	target := p.outputSlot(ctx, src, id, variant)
+	if !target.valid() {
 		return false
 	}
 	doc, err := decodeProjection(ctx, c.id, bytes)
@@ -273,15 +276,7 @@ func (p documentPreview) publish(ctx context.Context, c previewCandidate) bool {
 		p.log("render", "failed", "")
 		return false
 	}
-	complete := true
-	for i, target := range targets {
-		published, current := p.publishCurrent(ctx, c, meta, bucket, target, rendered[i])
-		if !current {
-			return false
-		}
-		complete = complete && published
-	}
-	return complete
+	return p.publishCurrent(ctx, c, meta, bucket, target, rendered)
 }
 
 type previewTarget struct {
@@ -292,26 +287,6 @@ type previewTarget struct {
 
 func (out previewTarget) valid() bool {
 	return out.id != uuid.Nil || out.firstReference != ""
-}
-
-func (p documentPreview) outputSlots(ctx context.Context, src previewFileSource, id uuid.UUID, kind model.ContentType) []previewTarget {
-	if kind == model.ContentTypeMemo {
-		out := p.outputSlot(ctx, src, id, previewMarkdown)
-		if out.valid() {
-			return []previewTarget{out}
-		}
-		return nil
-	}
-	full := p.outputSlot(ctx, src, id, previewFull)
-	card := p.outputSlot(ctx, src, id, previewCard)
-	if full.id != uuid.Nil && full.id == card.id {
-		p.log("slot", "shared", "")
-		return nil
-	}
-	if !full.valid() && !card.valid() {
-		return nil
-	}
-	return []previewTarget{full, card}
 }
 
 func (p documentPreview) outputSlot(ctx context.Context, src previewFileSource, id uuid.UUID, variant previewVariant) previewTarget {
@@ -327,18 +302,14 @@ func (p documentPreview) outputSlot(ctx context.Context, src previewFileSource, 
 	return previewTarget{}
 }
 
-// A stale source stops publication of all siblings. A slot failure does not
-// block a valid sibling but does leave the candidate incompletely published.
-func (p documentPreview) publishCurrent(ctx context.Context, c previewCandidate, meta model.Metadata, bucket uuid.UUID, out previewTarget, content []byte) (published, current bool) {
-	if !out.valid() {
-		return false, true
-	}
+// Recheck saved content and ownership immediately before publishing the artifact.
+func (p documentPreview) publishCurrent(ctx context.Context, c previewCandidate, meta model.Metadata, bucket uuid.UUID, out previewTarget, content []byte) bool {
 	canonical, state, err := p.saved.load(ctx, c.id, c.kind)
 	if err != nil || canonical.ContentPointer != meta.ContentPointer ||
 		canonical.StorageBucketID != meta.StorageBucketID || canonical.OwnerRef != meta.OwnerRef ||
 		canonical.AuthorizationPolicyID != meta.AuthorizationPolicyID || sha256.Sum256(state) != c.fingerprint {
 		p.log("publish", "stale", out.variant)
-		return false, false
+		return false
 	}
 	if out.firstReference != "" {
 		created, err := p.files.CreatePreview(ctx, bucket, out.firstReference, out.variant.mediaType(), content)
@@ -352,7 +323,7 @@ func (p documentPreview) publishCurrent(ctx context.Context, c previewCandidate,
 			// replaced, so do not claim that the candidate was published.
 			p.log("create", "already-exists", out.variant)
 		}
-		return err == nil && created, true
+		return err == nil && created
 	}
 	err = p.files.ReplacePreview(ctx, out.id, out.variant.mediaType(), content)
 	switch {
@@ -363,5 +334,5 @@ func (p documentPreview) publishCurrent(ctx context.Context, c previewCandidate,
 	default:
 		p.log("publish", "failed", out.variant)
 	}
-	return err == nil, true
+	return err == nil
 }

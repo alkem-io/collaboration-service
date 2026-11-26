@@ -140,7 +140,7 @@ func TestBadSavedImageCannotReplaceEitherPreview(t *testing.T) {
 				}
 				return "image/png", tc.data, nil
 			})
-			if err == nil || out.Full != nil || out.Card != nil {
+			if err == nil || out != nil {
 				t.Fatalf("invalid asset returned a successful placeholder or partial image: %v", err)
 			}
 		})

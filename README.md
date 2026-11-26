@@ -86,8 +86,8 @@ The native preview worker refreshes stored files during editing. The first
 changed, successful save opens a five-second window; the worker takes the
 latest saved revision at its end. Normal room release also submits a final
 revision that has not been published, without waiting for another window.
-The worker publishes two PNGs for a whiteboard or one Markdown file for a
-memo. It creates missing private files in the
+The worker publishes one 1800×720 PNG for a whiteboard or one Markdown file
+for a memo. It creates missing private files in the
 document's own bucket and subsequently replaces their content at stable IDs.
 A failed overwrite does not allocate another file or block editing, saving
 or close. No current frontend or server consumer is switched over.

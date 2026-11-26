@@ -14,7 +14,6 @@ type previewVariant string
 
 const (
 	previewFull     previewVariant = "whiteboard"
-	previewCard     previewVariant = "card"
 	previewMarkdown previewVariant = "markdown"
 )
 

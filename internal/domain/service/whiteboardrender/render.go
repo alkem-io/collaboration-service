@@ -34,56 +34,39 @@ const (
 // AssetLoader reads one saved opaque locator under the current remaining byte budget.
 type AssetLoader func(context.Context, string, int64) (mime string, contents []byte, err error)
 
-// Result carries the two complete PNGs. On failure neither artifact is returned.
-type Result struct {
-	Full, Card []byte
-}
-
 var errInvalidScene = errors.New("saved whiteboard cannot be rendered")
 
-// Render fits the same complete saved scene to each bounded raster. The
+// Render fits the complete saved scene to one 1800×720 PNG. The
 // loader receives only references from the saved files root; it remains the
 // caller's job to enforce storage ownership and never resolve arbitrary URLs.
-func Render(ctx context.Context, doc *yjs.Doc, load AssetLoader) (out Result, err error) {
+func Render(ctx context.Context, doc *yjs.Doc, load AssetLoader) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	return render(ctx, doc, load, 1800, 720)
 }
 
-func render(ctx context.Context, doc *yjs.Doc, load AssetLoader, fullWidth, fullHeight int) (out Result, err error) {
+func render(ctx context.Context, doc *yjs.Doc, load AssetLoader, width, height int) (out []byte, err error) {
 	defer func() {
 		if recover() != nil {
 			// Refuse malformed projected geometry and guard the service against
 			// panics inside the drawing engines. Never return a partial result.
-			out, err = Result{}, errInvalidScene
+			out, err = nil, errInvalidScene
 		}
 	}()
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	items := savedElements(doc)
 	opts := []aster.Option{aster.WithMemoryLimit(64 << 20), aster.WithPixelWorkLimit(64 << 20)}
 	engine, err := aster.New(append(opts, fontOptions(items)...)...)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	defer func() { _ = engine.Close() }()
-	raster, err := preparePaint(ctx, doc, items, engine, load)
-	if err != nil {
-		return Result{}, err
-	}
-	full, err := raster(fullWidth, fullHeight)
-	if err != nil {
-		return Result{}, err
-	}
-	card, err := raster(410, 256)
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{Full: full, Card: card}, nil
+	return rasterizeScene(ctx, doc, items, engine, load, width, height)
 }
 
-func preparePaint(ctx context.Context, doc *yjs.Doc, items []savedElement, engine *aster.Converter, load AssetLoader) (func(int, int) ([]byte, error), error) {
+func rasterizeScene(ctx context.Context, doc *yjs.Doc, items []savedElement, engine *aster.Converter, load AssetLoader, width, height int) ([]byte, error) {
 	frames, labels := structuralElements(items)
 	ids := make(map[string]bool, len(items))
 	for _, e := range items {
@@ -107,11 +90,9 @@ func preparePaint(ctx context.Context, doc *yjs.Doc, items []savedElement, engin
 	if err := p.paint(ctx, items); err != nil {
 		return nil, err
 	}
-	return func(width, height int) ([]byte, error) {
-		svg := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="%g %g %d %d">%s</svg>`,
-			width, height, left, top, w, h, p.svg.String())
-		return engine.SVGToPNG(svg, aster.WithContext(ctx))
-	}, nil
+	svg := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="%g %g %d %d">%s</svg>`,
+		width, height, left, top, w, h, p.svg.String())
+	return engine.SVGToPNG(svg, aster.WithContext(ctx))
 }
 
 type scenePainter struct {

@@ -49,7 +49,7 @@ func TestPackagedRendererMatchesSavedBrowserCorpus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(data, &f); err != nil || len(f.Outputs) != 2 || len(f.Snapshot) == 0 {
+		if err := json.Unmarshal(data, &f); err != nil || len(f.Outputs) == 0 || len(f.Snapshot) == 0 {
 			t.Fatalf("incomplete oracle fixture %s: %v", file, err)
 		}
 		t.Run(file, func(t *testing.T) {
@@ -76,9 +76,11 @@ func TestPackagedRendererMatchesSavedBrowserCorpus(t *testing.T) {
 			// production deadline is measured on the normal Render entrypoint.
 			ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 			defer cancel()
-			img, err := render(ctx, doc, load, f.Outputs[0].Width, f.Outputs[0].Height)
+			// Only the full-board output is shipped; ignore the historical card oracle.
+			expected := f.Outputs[0]
+			img, err := render(ctx, doc, load, expected.Width, expected.Height)
 			if f.Mode == "missing-index" {
-				if err == nil || img.Full != nil || img.Card != nil {
+				if err == nil || img != nil {
 					t.Fatal("missing index must fail closed")
 				}
 				completed++
@@ -104,18 +106,16 @@ func TestPackagedRendererMatchesSavedBrowserCorpus(t *testing.T) {
 				}
 			}
 			dense := len(f.Order) > 40
-			for i, serialized := range [][]byte{img.Full, img.Card} {
-				want := f.Outputs[i].PNG
-				if dense {
-					want = f.Outputs[i].DirectPNG
-				}
-				gotImage := readCorpusPNG(t, serialized)
-				wantImage := readCorpusPNG(t, want)
-				fraction, mean := compareRendered(t, gotImage, wantImage)
-				t.Logf("PNG %v: %.2f%% of painted pixels above threshold; mean delta %.2f", gotImage.Bounds(), 100*fraction, mean)
-				if dense && (fraction > .20 || mean > 12) || !dense && (fraction > .08 || mean > 6) {
-					t.Fatalf("packaged renderer exceeded agreed visual tolerance for %v", gotImage.Bounds())
-				}
+			want := expected.PNG
+			if dense {
+				want = expected.DirectPNG
+			}
+			gotImage := readCorpusPNG(t, img)
+			wantImage := readCorpusPNG(t, want)
+			fraction, mean := compareRendered(t, gotImage, wantImage)
+			t.Logf("PNG %v: %.2f%% of painted pixels above threshold; mean delta %.2f", gotImage.Bounds(), 100*fraction, mean)
+			if dense && (fraction > .20 || mean > 12) || !dense && (fraction > .08 || mean > 6) {
+				t.Fatalf("packaged renderer exceeded agreed visual tolerance for %v", gotImage.Bounds())
 			}
 			completed++
 		})

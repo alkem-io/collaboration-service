@@ -71,6 +71,7 @@ description: "Implementation tasks for native Go collaboration previews"
   - **95.19% race-enabled unit-only; 95.4% scoped combined.** The final [quickstart evidence](quickstart.md#2-run-the-repository-gates) records the transport regression caught by the gate, the shipped runtime dependency check, and the live RabbitMQ/image-build checks still to be run by PR CI.
 - [X] T022 Update `README.md` and `.env.example` with the private memo bind, automatic artifact publication, failure behavior, verification and protected consumer adoption. No server/client/deployment changes (FR-012).
 - [X] T023 Replace close-only scheduling with one shared five-second successful-save window and final release submission. Pin the latest saved revision per window, repeat windows while open, skip a fully published revision on release, and prove both artifact types update while connected against disposable file-service (FR-009, SC-004).
+- [X] T024 Publish one 1800×720 whiteboard PNG. Test first creation, stable-ID refresh and unchanged legacy card bytes against real file-service. Keep memo output unchanged (FR-007/008, SC-002/003).
 
 ## Dependencies & execution order
 

@@ -18,7 +18,6 @@ import (
 
 	"github.com/alkem-io/collaboration-service/internal/domain/model"
 	"github.com/alkem-io/collaboration-service/internal/domain/port"
-	"github.com/alkem-io/collaboration-service/internal/domain/service/whiteboardrender"
 )
 
 func previewTestCandidate(id model.DocumentID, content string) previewCandidate {
@@ -343,8 +342,8 @@ func (f *publicationFiles) ReplacePreview(_ context.Context, id uuid.UUID, _ str
 }
 
 //nolint:gocyclo // One trace applies the same ownership and publication assertions to each failure point.
-func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFailure(t *testing.T) {
-	for _, failure := range []string{"", "both missing", "full missing", "clear with full missing", "invalid slot", "both slots invalid", "shared slot", "stale initially", "changed during render", "owner removed during render", "bucket changed during render", "render rejected", "write failed", "write conflict", "write missing", "create failed", "create race", "cancelled"} {
+func TestWhiteboardPublicationRechecksSavedSourceAndOnlyWritesFullPreview(t *testing.T) {
+	for _, failure := range []string{"", "both missing", "full missing", "clear with full missing", "invalid slot", "stale initially", "changed during render", "owner removed during render", "bucket changed during render", "render rejected", "write failed", "write conflict", "write missing", "create failed", "create race", "cancelled"} {
 		t.Run("case "+failure, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -362,7 +361,8 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 			}
 			candidate := previewTestCandidate(meta.ID, string(state))
 			candidate.published = new(atomic.Bool)
-			fullRef, cardRef := previewSlotReference(board, previewFull), previewSlotReference(board, previewCard)
+			fullRef := previewSlotReference(board, previewFull)
+			cardRef := "collab-preview-v1:" + board.String() + ":card"
 			slots := map[string]port.PreviewFile{
 				fullRef: {ID: full, BucketID: bucket, ExternalReference: fullRef, MIME: "image/png"},
 				cardRef: {ID: card, BucketID: bucket, ExternalReference: cardRef, MIME: "image/png"},
@@ -372,29 +372,18 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 			switch failure {
 			case "both missing":
 				clear(slots)
-				wantCreate = []string{fullRef, cardRef}
+				wantCreate = []string{fullRef}
 			case "full missing", "clear with full missing", "create failed", "create race":
 				delete(slots, fullRef)
-				want = []uuid.UUID{card}
 				wantCreate = []string{fullRef}
 			case "invalid slot":
 				row := slots[fullRef]
 				row.AuthorizationID = uuid.New()
 				slots[fullRef] = row
-				want = []uuid.UUID{card}
-			case "both slots invalid":
-				for ref, row := range slots {
-					row.AuthorizationID = uuid.New()
-					slots[ref] = row
-				}
-			case "shared slot":
-				row := slots[cardRef]
-				row.ID = full
-				slots[cardRef] = row
 			case "stale initially":
 				candidate.fingerprint = sha256.Sum256(nil)
 			case "", "write failed", "write conflict", "write missing":
-				want = []uuid.UUID{full, card}
+				want = []uuid.UUID{full}
 			}
 			stored := map[uuid.UUID]string{full: "prior full", card: "prior card"}
 			files := &publicationFiles{previewFilesFixture: previewFilesFixture{slots: slots}, write: func(id uuid.UUID, png []byte) error {
@@ -411,8 +400,7 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 				stored[id] = string(png)
 				return nil
 			}, create: func(to uuid.UUID, ref string, png []byte) (bool, error) {
-				expected := map[string]string{fullRef: "new full", cardRef: "new card"}
-				if bucket != to || expected[ref] != string(png) {
+				if bucket != to || ref != fullRef || string(png) != "new full" {
 					t.Fatalf("invalid private creation: %v, %q, %q", to, ref, png)
 				}
 				switch failure {
@@ -438,8 +426,8 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 					}}, maxBytes: PreviewSnapshotLimit,
 				},
 				files: files, logger: zap.NewNop(),
-				renderBoard: func(_ context.Context, projected *ycrdt.Doc, _ previewFileSource) (whiteboardrender.Result, error) {
-					if failure == "shared slot" || failure == "stale initially" || failure == "both slots invalid" {
+				renderBoard: func(_ context.Context, projected *ycrdt.Doc, _ previewFileSource) ([]byte, error) {
+					if failure == "invalid slot" || failure == "stale initially" {
 						t.Fatal("render started without an eligible current source and slot")
 					}
 					if got := projected.GetMap("appState").Get("viewBackgroundColor"); (got == nil) != (failure == "clear with full missing") {
@@ -453,14 +441,17 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 					case "bucket changed during render":
 						meta.StorageBucketID = uuid.NewString()
 					case "render rejected":
-						return whiteboardrender.Result{Full: []byte("partial")}, errors.New("failed")
+						return []byte("partial"), errors.New("failed")
 					case "cancelled":
 						cancel()
 					}
-					return whiteboardrender.Result{Full: []byte("new full"), Card: []byte("new card")}, nil
+					return []byte("new full"), nil
 				},
 			}
 			p.run(ctx, candidate)
+			if slices.Contains(files.lookups, cardRef) {
+				t.Fatal("whiteboard publication must not look up legacy card slots")
+			}
 			switch failure {
 			case "", "both missing", "full missing", "clear with full missing":
 				if !candidate.wasPublished() {
@@ -477,14 +468,11 @@ func TestWhiteboardPublicationRechecksTheSavedSourceAndKeepsExistingOutputsOnFai
 			if !slices.Equal(files.created, wantCreate) {
 				t.Fatalf("created %v, want %v", files.created, wantCreate)
 			}
-			wantFull, wantCard := "prior full", "prior card"
+			wantFull := "prior full"
 			if failure == "" {
 				wantFull = "new full"
 			}
-			if slices.Contains(want, card) {
-				wantCard = "new card"
-			}
-			if stored[full] != wantFull || stored[card] != wantCard {
+			if stored[full] != wantFull || stored[card] != "prior card" {
 				t.Fatalf("outputs changed incorrectly: full=%q card=%q", stored[full], stored[card])
 			}
 		})

@@ -4,7 +4,7 @@
 
 ## Summary
 
-Use successfully persisted edits to publish document previews during editing and on normal room release. One bounded worker reads the latest checkpoint and creates missing private slots or refreshes them at stable file IDs. Whiteboards generate two full-scene PNGs; memos generate one Markdown file. An unchanged session does nothing. An independent internal-only GET returns raw saved memo Markdown, using the same serializer without triggering publication. Neither path owns editing, saves or business settings.
+Use successfully persisted edits to publish document previews during editing and on normal room release. One bounded worker reads the latest checkpoint and creates missing private slots or refreshes them at stable file IDs. Whiteboards generate one 1800×720 full-scene PNG; memos generate one Markdown file. An unchanged session does nothing. An independent internal-only GET returns raw saved memo Markdown, using the same serializer without triggering publication. Neither path owns editing, saves or business settings.
 
 ## Technical Context
 

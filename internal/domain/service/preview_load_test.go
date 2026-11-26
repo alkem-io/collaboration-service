@@ -168,7 +168,7 @@ func renderLoadFixture(ctx context.Context) error {
 		})
 	}
 	result, err := whiteboardrender.Render(ctx, doc, nil)
-	if err == nil && (len(result.Full) == 0 || len(result.Card) == 0) {
+	if err == nil && len(result) == 0 {
 		return fmt.Errorf("renderer did not return both PNGs")
 	}
 	return err

@@ -86,7 +86,7 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 		defer cancel()
 		// Also discover any worker-created artifacts that the test had not
 		// observed before it failed.
-		for _, id := range append(provisioned, find(ctx, ref+"whiteboard"), find(ctx, memoRef)) {
+		for _, id := range append(provisioned, find(ctx, ref+"whiteboard"), find(ctx, ref+"card"), find(ctx, memoRef)) {
 			if id == "" {
 				continue
 			}
@@ -179,7 +179,6 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var full string
-	card := newFile(ref+"card", "card.png", blank.Bytes())
 	assetPixels := image.NewNRGBA(image.Rect(0, 0, 48, 32))
 	for i := range 48 * 32 {
 		assetPixels.SetNRGBA(i%48, i/48, color.NRGBA{R: 255, A: 255})
@@ -223,7 +222,7 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 	}, nil)
 	c.unlock()
 
-	readColor := func(id string) color.NRGBA {
+	readColor := func(id string, size image.Point) color.NRGBA {
 		status, body := call(http.MethodGet, "/internal/file/"+id+"/content", "", nil)
 		if status != http.StatusOK {
 			return color.NRGBA{}
@@ -232,18 +231,24 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode output %s: %v", id, err)
 		}
+		if out.Bounds().Size() != size {
+			t.Fatalf("output %s has size %v, want %v", id, out.Bounds().Size(), size)
+		}
 		center := out.Bounds().Max.Div(2)
 		return color.NRGBAModel.Convert(out.At(center.X, center.Y)).(color.NRGBA)
 	}
 	if !eventuallyWithin(12*time.Second, func() bool { full = lookup(ref + "whiteboard"); return full != "" }) {
 		t.Fatal("worker did not bootstrap missing image with the whiteboard still open")
 	}
-	for _, id := range []string{full, card} {
-		want := color.NRGBA{R: 255, A: 255}
-		if !eventually(func() bool { return readColor(id) == want }) {
-			t.Fatalf("same existing file %s did not receive generated red preview", id)
-		}
+	fullSize := image.Pt(1800, 720)
+	red := color.NRGBA{R: 255, A: 255}
+	if !eventually(func() bool { return readColor(full, fullSize) == red }) {
+		t.Fatal("the full preview did not include the red image")
 	}
+	if lookup(ref+"card") != "" {
+		t.Fatal("worker bootstrapped an obsolete card preview")
+	}
+	card := newFile(ref+"card", "card.png", blank.Bytes())
 	c.close()
 	c = dial(t, base, board, "whiteboard")
 	if !eventually(func() bool { return c.hasElement("paint") }) {
@@ -254,15 +259,15 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 	c.doc.GetMap("elements").Delete("placed")
 	c.unlock()
 	c.close()
-	for _, id := range []string{full, card} {
-		want := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-		if !eventually(func() bool { return readColor(id) == want }) {
-			t.Fatalf("saved clear did not blank existing file %s", id)
-		}
-		status, _ := call(http.MethodGet, "/rest/storage/file/"+id, "", nil)
-		if status != http.StatusForbidden {
-			t.Fatalf("private derivative publicly readable: %d", status)
-		}
+	white := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	if !eventually(func() bool { return readColor(full, fullSize) == white }) {
+		t.Fatal("saved clear did not blank the existing full preview")
+	}
+	if status, body := call(http.MethodGet, "/internal/file/"+card+"/content", "", nil); status != http.StatusOK || !bytes.Equal(body, blank.Bytes()) {
+		t.Fatalf("existing legacy card bytes changed: status %d", status)
+	}
+	if status, _ := call(http.MethodGet, "/rest/storage/file/"+full, "", nil); status != http.StatusForbidden {
+		t.Fatalf("private derivative publicly readable: %d", status)
 	}
 	if creates.Load() != 1 || lookup(ref+"whiteboard") != full || lookup(ref+"card") != card {
 		t.Fatalf("whiteboard allocated extra files or changed IDs: posts=%d", creates.Load())
@@ -345,5 +350,5 @@ func TestDocumentPreviewsPublishToStableRealFileRows(t *testing.T) {
 	if lookup(ref+"whiteboard") != full || lookup(ref+"card") != card || lookup(memoRef) != memoArtifact {
 		t.Fatal("cold reads/reopen changed output rows")
 	}
-	t.Logf("stable preview/card/memo IDs %s/%s/%s; open-room publication allocated two missing slots; clear on close and restart preserved all IDs", full, card, memoArtifact)
+	t.Logf("stable full preview and memo IDs %s/%s; published one artifact per document; legacy card untouched", full, memoArtifact)
 }

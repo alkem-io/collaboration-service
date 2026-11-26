@@ -92,7 +92,14 @@ background worker. The pinned browser's [canvas framing](https://github.com/alke
 uses common geometry bounds plus padding; the renderer intentionally matches
 its clipping for ordinary shapes with strokes wider than the padding.
 
-## 3. Verify the stored artifacts, not just worker completion
+Single-PNG update (T024): **95.33% race-enabled unit-only (3,818/4,005 statements)**
+and **95.6% scoped combined**. Build, lint, tagged vet and a race-enabled
+file-service walk passed. The walk verified the single 1800×720 file, stable ID,
+unchanged legacy card bytes and unchanged memo publication. The combined run
+included the full WebSocket suite, disposable file-service and Traefik; live
+RabbitMQ was not configured locally.
+
+## 3. Verify the whiteboard artifact, not just worker completion
 
 **Backend contract preflight (not the T019 walk):** Archive file-service at
 `259dda0d4ac517184d03bd67779b593f4c09518d` in a temporary directory and
@@ -110,8 +117,8 @@ decoded the new green pixels; only the one provisioned row was added. The
 local database was stopped. This verified the existing file-service behavior
 without using the publication worker or touching deployed environments.
 
-1. Use real, disposable file-service. Seed a board and a memo checkpoint through its existing API; give the board one existing private card row and leave its full-sized slot and the memo slot absent. Start collaboration-service in its supported single-writer, file-service-backed topology; the worker needs no enable flag.
-2. Send saved edits and leave each connection open through the five-second window. Look up all outputs read-only by scoped reference. The absent slots must be created once and the card must keep its ID. For both document types, repeat with a saved clear and close before the next window; compare the actual bytes at the same IDs. Reopen and close unchanged after restart: no output writes or allocations.
+1. Use real, disposable file-service. Seed a board and a memo checkpoint through its existing API with no preview files. Start collaboration-service in its supported single-writer, file-service-backed topology; the worker needs no enable flag.
+2. Send saved edits and leave each connection open through the five-second window. Look up the outputs read-only by scoped reference: one 1800×720 PNG and one Markdown file, no card. Seed a legacy card file and verify its bytes stay unchanged. For both document types, repeat with a saved clear and close before the next window; compare the actual bytes at the same IDs. Reopen and close unchanged after restart: no output writes or allocations.
 3. Verify private IDs cannot be fetched through the public file route. See the unit cases for stale candidates, cancellation, conflicting or failed overwrites, and an unavailable/foreign asset. Test the existing owner deletion event and bucket cascade, not the earlier unobservable draft timestamp.
 
 Run the loopback-only WS and real file-service path:
@@ -121,7 +128,7 @@ COLLAB_TEST_PREVIEW_FILE_SERVICE=http://127.0.0.1:57353 \
   go test -race -tags e2e ./test/e2e -run '^TestDocumentPreviewsPublish' -v
 ```
 
-Result against file-service `259dda0d` and disposable PostgreSQL: the open whiteboard and memo published one missing full PNG and one missing Markdown row; the existing card was overwritten, not recreated. Two POSTs total from collab. Normal release after saved clears produced white PNGs and visually empty Markdown at unchanged IDs. Restart and unchanged reopen preserved all IDs. The memo endpoint returned its exact iframe wrapper without the file marker; direct public requests for all three files returned 403. Deterministic room tests pin multiple save windows, the final submission ahead of the next window, and zero offers on an unchanged reopen of a saved board or memo.
+The test checks that the open whiteboard and memo publish one file each, only two POSTs from collab. A saved clear followed by normal release replaces the PNG with white pixels and the Markdown with a visually empty body, preserving both IDs. The independent memo endpoint returns its exact iframe wrapper without the file marker. Public file requests for the generated artifacts return 403. Deterministic room tests pin multiple save windows, the final submission ahead of the next window, and zero offers on an unchanged reopen of a saved board or memo.
 
 ## 4. Verify the memo route boundary
 
